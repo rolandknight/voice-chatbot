@@ -6,7 +6,7 @@ ENV PIP_NO_CACHE_DIR=1
 ENV HF_HOME=/work/data/hf_cache
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3.10 python3.10-venv python3-pip \
+        python3.10 python3.10-venv python3.10-dev python3-pip \
         git curl wget ca-certificates \
         ffmpeg libsndfile1 sox \
         build-essential \
@@ -21,12 +21,14 @@ RUN pip install \
         --index-url https://download.pytorch.org/whl/cu121
 
 RUN pip install \
-        "openwakeword[full]==0.6.0" \
+        openwakeword==0.6.0 \
+        torchinfo==1.8.0 \
+        torchmetrics==0.11.4 \
         huggingface_hub==0.24.5 \
         datasets==2.20.0 \
         audiomentations==0.36.0 \
         mutagen==1.47.0 \
-        speechbrain==1.0.0 \
+        speechbrain==0.5.16 \
         onnx==1.16.1 \
         onnxruntime-gpu==1.18.1 \
         tf2onnx==1.16.1 \

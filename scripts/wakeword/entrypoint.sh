@@ -90,8 +90,9 @@ def dump(ds, prefix, limit):
         n += 1
     print(prefix, "wrote", n, "clips")
 
-# FMA small (~8000 30-sec music clips)
-fma = load_dataset("rudraml/fma", "small", split="train", streaming=True, trust_remote_code=True)
+# FMA small (~8000 30-sec music clips). The dataset's loader fetches a ZIP
+# archive whose central directory must be seekable, so streaming is unsupported.
+fma = load_dataset("rudraml/fma", "small", split="train", trust_remote_code=True)
 dump(fma, "fma", 2000)
 
 # AudioSet balanced shard
