@@ -1,0 +1,83 @@
+# Personas + routing for the voice chatbot.
+#
+# Two sections:
+#   personas: declares each persona and which TTS backend voices it.
+#   routing:  declares how the active persona is selected at runtime.
+#
+# Adding a new chatterbox-backed persona:
+#   1. Drop a 5-15s reference WAV into voices/ (mono, 24 kHz preferred).
+#   2. Add an entry below with backend: chatterbox and ref_audio pointing
+#      at the file.
+#   3. (Optional) Add a routing rule, or rely on the generic
+#      "switch to {persona}" voice_command rule.
+#   4. Restart the app (or use scripts/chatterbox_health.py to reload).
+
+personas:
+  # The original assistant. Kokoro is kept in the stack solely for this
+  # persona so babel sounds identical to how it shipped.
+  babel:
+    backend: kokoro
+    voice: af_heart
+
+  marvin:
+    backend: chatterbox
+    # The `voice` value is the literal filename Chatterbox-TTS-Server
+    # will look up under its reference_audio/ dir. Keep the extension —
+    # the server doesn't auto-append one. App startup symlinks
+    # ref_audio -> reference_audio/<voice> so the names always match.
+    voice: marvin.mp3
+    ref_audio: voices/look-at-this-door-all-the-doors-in-this-spacecraft-have-a-cheerful-and-sunny-disposition-it-is-their-pleasure-to-open-for-you-and-their-satisfaction-to-close-again-with-the-knowledge-of-a-job-well-done.mp3
+    settings:
+      exaggeration: 0.5    # optional
+      cfg_weight: 0.5      # optional
+
+  # Example chatterbox personas. Uncomment after dropping the matching
+  # WAV files into voices/.
+  #
+  # jeeves:
+  #   backend: chatterbox
+  #   voice: jeeves
+  #   ref_audio: voices/jeeves.wav
+  #   settings:
+  #     exaggeration: 0.5
+  #     cfg_weight: 0.5
+  #
+  # narrator:
+  #   backend: chatterbox
+  #   voice: narrator
+  #   ref_audio: voices/narrator.wav
+
+routing:
+  # Boot persona. Overridable by the DEFAULT_PERSONA env var. Must be a
+  # declared persona above; the router fails fast on startup otherwise.
+  default: babel
+
+  # Rules fire in order; the first match per frame wins. Each rule sets
+  # the active persona, which then routes every subsequent TTS frame
+  # until another rule fires.
+  rules:
+    # Spoken commands the user can say at any time. {persona} captures any
+    # declared persona id (case-insensitive). Evaluated against the final
+    # STT transcript, before the LLM sees it.
+    - type: voice_command
+      match: "switch to {persona}"
+      action: set_persona
+    - type: voice_command
+      match: "be {persona}"
+      action: set_persona
+    - type: voice_command
+      match: "talk like {persona}"
+      action: set_persona
+
+    # Inline tag the LLM can emit to change voice mid-response. The tag is
+    # stripped before TTS sees the text. Tag matches reset to the previous
+    # persona at the next assistant turn unless set_persona is used instead.
+    - type: llm_tag
+      pattern: '\[persona:([a-z_][a-z0-9_]*)\]'
+      action: set_persona_until_next_tag
+
+    # Explicit skill route (see switch_persona in babel_skills.py). Useful
+    # when the user phrases the switch indirectly and the LLM picks the tool.
+    - type: skill_intent
+      skill: switch_persona
+      action: set_persona
