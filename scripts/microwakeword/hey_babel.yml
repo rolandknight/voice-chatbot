@@ -1,0 +1,59 @@
+# Training config for the "hey babel" microWakeWord model.
+# Output: int8 TFLite Micro model suitable for ESP32-S3.
+#
+# The schema mirrors microWakeWord's example configs. If you change keys, also
+# update entrypoint.sh's argparse invocations.
+
+model_name: "hey_babel"
+
+target_phrase:
+  - "hey babel"
+
+# Phrases the on-device model should NOT fire on. Same list as the openWakeWord
+# pipeline — these are the phonetic neighbours the regex-on-Whisper path
+# misfires on. microWakeWord uses these to weight hard-negative mining.
+custom_negative_phrases:
+  - "hey babe"
+  - "hey baby"
+  - "hey bagel"
+  - "hey bay bell"
+  - "hey ball"
+  - "able"
+  - "babble"
+  - "label"
+  - "table"
+  - "cable"
+
+# 20k positives mirrors the openWakeWord config. microWakeWord uses streaming
+# windowed features so the effective training set is much larger.
+n_samples: 20000
+n_samples_val: 2000
+
+# Audio + feature params. These match microWakeWord's reference DS-CNN model
+# so the generated .tflite plugs straight into the firmware's runtime.
+sample_rate: 16000
+window_size_ms: 30
+window_stride_ms: 20
+n_mels: 40
+preemphasis: 0.97
+
+# Streaming model spec. tile_size = how many frames the on-device runtime
+# concatenates before each inference call. Smaller = lower latency, more CPU.
+model_type: "streaming_ds_cnn"
+tile_size: 3
+quantize: true
+quantize_dtype: "int8"
+
+# RIR + background augmentation. Paths are inside the container.
+rir_paths:
+  - "/work/data/mit_rirs"
+background_paths:
+  - "/work/data/background_clips"
+augmentation_rounds: 1
+positive_dir: "/work/data/positives/hey_babel"
+
+# Training hyperparameters.
+batch_size: 128
+epochs: 30
+learning_rate: 0.001
+target_false_positives_per_hour: 0.5

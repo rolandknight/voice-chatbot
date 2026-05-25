@@ -95,8 +95,8 @@ def dump(ds, prefix, limit):
 fma = load_dataset("rudraml/fma", "small", split="train", trust_remote_code=True)
 dump(fma, "fma", 2000)
 
-# AudioSet balanced shard
-aset = load_dataset("agkphysics/AudioSet", split="balanced", streaming=True, trust_remote_code=True)
+# AudioSet balanced shard ("balanced" is a config, not a split)
+aset = load_dataset("agkphysics/AudioSet", "balanced", split="train", streaming=True, trust_remote_code=True)
 dump(aset, "audioset", 2000)
 PY
 else
@@ -113,20 +113,98 @@ python -m openwakeword.train \
     --training_config "$CONFIG" \
     --generate_clips
 
+# openwakeword 0.6.0 wraps all four feature-extraction calls under a single
+# guard that only checks for positive_features_train.npy. If a previous run
+# crashed partway, that file may exist while the other three don't — the next
+# run then skips augmentation entirely and the train phase blows up looking
+# for a missing .npy. Detect that state and clear the partial set so augment
+# regenerates everything.
+FEATURE_DIR="$OUT_DIR/hey_babel"
+EXPECTED_FEATURES=(positive_features_train.npy negative_features_train.npy
+                   positive_features_test.npy  negative_features_test.npy)
+present=0
+for f in "${EXPECTED_FEATURES[@]}"; do
+    [ -f "$FEATURE_DIR/$f" ] && present=$((present+1))
+done
+if [ "$present" -gt 0 ] && [ "$present" -lt "${#EXPECTED_FEATURES[@]}" ]; then
+    log "Detected partial feature set ($present/${#EXPECTED_FEATURES[@]}); clearing so augment re-runs"
+    for f in "${EXPECTED_FEATURES[@]}"; do rm -f "$FEATURE_DIR/$f"; done
+fi
+
 log "Augmenting clips (RIR + background mix + feature extraction)"
 python -m openwakeword.train \
     --training_config "$CONFIG" \
     --augment_clips
 
-log "Training the classifier"
-python -m openwakeword.train \
-    --training_config "$CONFIG" \
-    --train_model
+# openwakeword 0.6.0's `--train_model` flag trains AND converts to TFLite in
+# the same pass — there is no separate `--convert_to_tflite` flag. The inline
+# conversion crashes against PyTorch 2.x's `onnx::Flatten_0`-style auto-named
+# tensors: onnx_tf 1.10.0 wraps the graph in a tf.function whose parameter
+# names can't contain `::`, TF silently renames them, and onnx_tf's op
+# handlers then KeyError on the original name. Patch openwakeword's
+# convert_onnx_to_tflite on disk (idempotent) to sanitize names before
+# delegating. Modifying the in-memory module isn't enough — `python -m
+# openwakeword.train` execs the source fresh and rebinds the name locally.
+log "Patching openwakeword.train.convert_onnx_to_tflite for onnx_tf compat"
+python - <<'PY'
+import re
+import openwakeword.train as oww_train
+path = oww_train.__file__
+src = open(path).read()
+MARKER = "# --- onnx-tf sanitize patch ---"
+if MARKER in src:
+    print("already patched")
+else:
+    patch = (
+        MARKER + "\n"
+        "_orig_convert_onnx_to_tflite = convert_onnx_to_tflite\n"
+        "def convert_onnx_to_tflite(onnx_model_path, output_path):\n"
+        "    import onnx as _onnx\n"
+        "    _m = _onnx.load(onnx_model_path)\n"
+        "    _s = lambda n: n.replace('::', '__')\n"
+        "    for _x in _m.graph.input:        _x.name = _s(_x.name)\n"
+        "    for _x in _m.graph.output:       _x.name = _s(_x.name)\n"
+        "    for _x in _m.graph.initializer:  _x.name = _s(_x.name)\n"
+        "    for _x in _m.graph.value_info:   _x.name = _s(_x.name)\n"
+        "    for _n in _m.graph.node:\n"
+        "        _n.input[:]  = [_s(x) for x in _n.input]\n"
+        "        _n.output[:] = [_s(x) for x in _n.output]\n"
+        "    _onnx.save(_m, onnx_model_path)\n"
+        "    print('Sanitized ONNX inputs:', [i.name for i in _m.graph.input], flush=True)\n"
+        "    return _orig_convert_onnx_to_tflite(onnx_model_path, output_path)\n"
+    )
+    # Accept either quote style — openwakeword 0.6.0 uses single quotes
+    # (`if __name__ == '__main__':`) but match double too in case of upstream
+    # style drift.
+    m = re.search(r"""^if __name__ == ['"]__main__['"]:""", src, re.MULTILINE)
+    if not m:
+        raise SystemExit("could not find __main__ block in openwakeword/train.py")
+    needle = m.group(0)
+    src = src.replace(needle, patch + "\n\n" + needle, 1)
+    open(path, "w").write(src)
+    print("patched")
+PY
 
-log "Converting ONNX -> TFLite"
-python -m openwakeword.train \
-    --training_config "$CONFIG" \
-    --convert_to_tflite
+# Skip --train_model entirely when an .onnx already exists from a prior run.
+# openwakeword's --train_model has no built-in skip-guard, so every container
+# run would otherwise redo a multi-hour training pass even when we're only
+# iterating on the conversion step.
+ONNX_PATH="$OUT_DIR/hey_babel.onnx"
+TFLITE_PATH="$OUT_DIR/hey_babel.tflite"
+
+if [ -f "$ONNX_PATH" ]; then
+    log "ONNX present at $ONNX_PATH; skipping --train_model, running convert only"
+    python - "$ONNX_PATH" "$TFLITE_PATH" <<'PY'
+import sys
+import openwakeword.train as oww_train
+oww_train.convert_onnx_to_tflite(sys.argv[1], sys.argv[2])
+PY
+else
+    log "Training the classifier (and converting to TFLite inline)"
+    python -m openwakeword.train \
+        --training_config "$CONFIG" \
+        --train_model
+fi
 
 log "Done. Artifacts:"
 find "$OUT_DIR" -maxdepth 2 \( -name '*.onnx' -o -name '*.tflite' \) -print

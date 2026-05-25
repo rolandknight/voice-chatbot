@@ -20,7 +20,7 @@ deferred.
 
 ```sh
 cd voice-chatbot/scripts/wakeword
-./train.sh
+make train         # equivalent to ./train.sh
 ```
 
 That's it. The script:
@@ -40,9 +40,8 @@ phase is skipped if its output already exists.
 ## After training
 
 ```sh
-mkdir -p ../../models/wakeword
-cp _work/output/hey_babel/hey_babel.onnx  ../../models/wakeword/
-cp _work/output/hey_babel/hey_babel.tflite ../../models/wakeword/
+make install                          # copies .onnx + .tflite into ../../models/wakeword/
+make install DEST=/some/other/dir     # override destination
 ```
 
 A quick host-side sanity check before shipping to the Mac:
@@ -72,10 +71,54 @@ print('silence:', m.predict(silence))
 - `target_false_positives_per_hour` — lower = stricter model; raise if recall
   is suffering.
 
+## Re-training after a config change
+
+```sh
+make clean         # drop the trained model + .npy features, keep TTS clips
+make train
+```
+
+`make clean` is safe when you've only tuned hyperparameters that affect
+training/augmentation. If you change `target_phrase`, `custom_negative_phrases`,
+or `n_samples`, the synthesized clips are stale too — wipe everything:
+
+```sh
+make clean-all     # rm -rf _work/output/hey_babel/
+make train
+```
+
+## Per-phrase tuning history
+
+Tuning is phrase-specific — phonetic distinctiveness, length, and the
+relevant hard-negative space all change with the target phrase, so the same
+hyperparameters that land one phrase at recall 0.8 / FP 0.3 can give another
+0.5 / 2.5. The phrase-agnostic infrastructure (Dockerfile, scripts, Makefile,
+and this README) is reusable; the per-phrase YAML and iteration log are not.
+
+Log each phrase's iterations in its own `<phrase>-training.md`:
+
+- [`hey-babel-training.md`](hey-babel-training.md) — current phrase.
+
 ## Troubleshooting
 
 **"nvidia container runtime not detected"** — install `nvidia-container-toolkit`
 and restart docker (`sudo systemctl restart docker`).
+
+**Training falls back to CPU even though `nvidia-smi` works** — symptom is a
+`CUDA driver initialization failed` warning from torch and a `cuInit` that
+returns error 3 (`CUDA_ERROR_NOT_INITIALIZED`). NVML works (so `nvidia-smi`
+sees the GPU) but the CUDA driver API can't open a context because the
+`/dev/nvidia-caps/*` device nodes are root-only and CUDA can't fix them up.
+The setuid helper that does that fix-up is `nvidia-modprobe`, which Pop!_OS's
+`nvidia-driver-580-open` metapackage does not pull in. Install it:
+
+```sh
+sudo apt-get install -y nvidia-modprobe
+python3 -c 'import ctypes; print(ctypes.CDLL("libcuda.so.1").cuInit(0))'   # 0 == fixed
+```
+
+No reboot needed; the next CUDA call invokes the new binary and the cap
+nodes get created with the right permissions.
 
 **Out of memory during `--generate_clips`** — the Piper TTS step is the
 memory peak. Halve `tts_batch_size` in `hey_babel.yml` and re-run; the script
@@ -91,5 +134,7 @@ via `HF_HOME`. Delete the half-downloaded file there and re-run; it will resume.
 - `Dockerfile` — CUDA + Python + openWakeWord + piper-sample-generator image.
 - `entrypoint.sh` — in-container: stage data, run training, emit artifacts.
 - `train.sh` — host-side launcher; builds the image and runs the container.
-- `hey_babel.yml` — training config (the only file with phrase-specific tuning).
+- `Makefile` — `make train` / `make clean` wrappers around the above.
+- `hey_babel.yml` — training config (per phrase).
+- `hey-babel-training.md` — iteration log (per phrase).
 - `_work/` — generated; datasets, intermediate clips, and final models.

@@ -17,43 +17,40 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN python -m pip install --upgrade pip setuptools wheel
 
+# TensorFlow for microWakeWord training. microWakeWord targets TFLite Micro, so
+# the training graph and quantization use TF, not PyTorch. CUDA wheels for
+# tensorflow are matched to the CUDA 12.1 base image.
 RUN pip install \
-        torch==2.4.1 torchaudio==2.4.1 \
-        --index-url https://download.pytorch.org/whl/cu124
+        tensorflow==2.16.1 \
+        tensorflow-model-optimization==0.8.0 \
+        tflite-runtime==2.14.0
 
+# microWakeWord itself (Kevin Ahrendt). The repo is the source of truth for the
+# trainer; install from a pinned commit so re-runs are reproducible.
+ARG MWW_REF=v1.0.0
+RUN git clone --depth 1 --branch ${MWW_REF} \
+        https://github.com/kahrendt/microWakeWord.git /opt/microWakeWord \
+    && pip install -e /opt/microWakeWord
+
+# Audio + augmentation deps. Some overlap with the openWakeWord image but
+# pinned independently — these two trainers should not have to share versions.
 RUN pip install \
-        openwakeword==0.6.0 \
-        torchinfo==1.8.0 \
-        torchmetrics==0.11.4 \
+        audiomentations==0.36.0 \
+        torch==2.1.2 torchaudio==2.1.2 \
+            --index-url https://download.pytorch.org/whl/cu121 \
+    && pip install \
         huggingface_hub==0.24.5 \
         datasets==2.20.0 \
-        audiomentations==0.36.0 \
+        soundfile==0.12.1 \
+        librosa==0.10.2 \
         mutagen==1.47.0 \
-        speechbrain==0.5.16 \
-        onnx==1.16.1 \
-        onnxruntime-gpu==1.18.1 \
-        tf2onnx==1.16.1 \
-        # openwakeword's convert_onnx_to_tflite imports onnx_tf, which on PyPI
-        # is only at 1.10.0 (Aug 2022) and breaks against TF >= 2.15. Pin the
-        # whole TF stack to the 2.14 line that onnx-tf 1.10.0 was last tested
-        # with; tensorflow-addons + tensorflow-probability are transitive onnx-tf
-        # deps whose versions must match TF.
-        tensorflow-cpu==2.14.1 \
-        tensorflow-probability==0.22.1 \
-        tensorflow-addons==0.22.0 \
-        onnx-tf==1.10.0 \
         pyyaml==6.0.2 \
         tqdm==4.66.4 \
         pronouncing==0.2.0 \
-        torch-audiomentations==0.11.1 \
-        acoustics==0.2.6
+        onnx==1.16.1
 
-# openwakeword's pip wheel ships Python only; the ONNX feature-extraction
-# models (melspectrogram, embedding) must be fetched separately and dropped
-# into the package's resources/models/ dir. Bake them in so the image is
-# self-contained and the augment phase can find them.
-RUN python -c "import openwakeword.utils; openwakeword.utils.download_models()"
-
+# piper-sample-generator for synthetic positive utterances — same as the
+# openWakeWord pipeline so the positive sample distribution stays comparable.
 RUN git clone https://github.com/dscripka/piper-sample-generator.git /opt/piper-sample-generator \
     && pip install -r /opt/piper-sample-generator/requirements.txt \
     && mkdir -p /opt/piper-sample-generator/models \

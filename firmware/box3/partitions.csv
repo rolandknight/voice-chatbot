@@ -1,0 +1,13 @@
+# Partition table for ESP32-S3-BOX-3 (16 MB flash).
+# OTA-capable layout: two app slots + storage for config + a slot for models
+# if we ever stop embedding them in the binary.
+#
+# Name,     Type, SubType, Offset,   Size,    Flags
+nvs,        data, nvs,     0x9000,   0x6000,
+otadata,    data, ota,     0xf000,   0x2000,
+phy_init,   data, phy,     0x11000,  0x1000,
+factory,    app,  factory, 0x20000,  0x500000,
+ota_0,      app,  ota_0,   0x520000, 0x500000,
+ota_1,      app,  ota_1,   0xA20000, 0x500000,
+storage,    data, spiffs,  0xF20000, 0xC0000,
+models,     data, fat,     0xFE0000, 0x20000,
