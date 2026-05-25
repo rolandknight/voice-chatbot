@@ -27,6 +27,13 @@ class SkillContext:
     sfx_backend_override: Optional[str] = None
     persona_config: Optional["PersonaConfig"] = None
     persona_state: Optional["PersonaState"] = None
+    # Shared mutable dict {"backend": "ollama" | "claude"} read by the LLM-stage
+    # routing filters in app.py. Skills mutate this to switch backend at runtime
+    # (see skills/backends/ask_claude). Scoped to the active wake session; the
+    # wake-timeout handler resets it. Only populated when the Claude branch is
+    # wired up — when None, the ask_claude skill's `requires: [backend_state]`
+    # gate keeps it unregistered.
+    backend_state: Optional[dict] = None
 
     def has(self, name: str) -> bool:
         """True when the attribute is set and non-empty.

@@ -47,11 +47,38 @@ class LLMConfig(BaseModel):
     ollama_keep_alive: str = "-1"
 
 
+class WakewordModelConfig(BaseModel):
+    """One openwakeword model + the persona to activate on a hit.
+
+    `model` is either a filesystem path (relative to project root) to an
+    .onnx file or a bundled openwakeword model key like 'hey_jarvis_v0.1'.
+    `persona` must match a declared persona id in personas.yaml.
+    """
+    model: str
+    persona: str
+
+
 class WakeConfig(BaseModel):
-    phrases: list[str] = Field(
-        default_factory=lambda: ["hey babel", "hey babe", "hey baby"]
+    # Audio-based wake detection via openwakeword. Each entry is one model
+    # with its associated persona. The detector loads them all into a single
+    # openwakeword.Model instance — the shared melspec + embedding backbone
+    # makes per-model overhead negligible.
+    models: list[WakewordModelConfig] = Field(
+        default_factory=lambda: [
+            WakewordModelConfig(
+                model="models/wakeword/hey_babel.onnx", persona="babel"
+            ),
+            WakewordModelConfig(model="hey_jarvis_v0.1", persona="marvin"),
+        ]
     )
-    timeout_secs: float = 30.0
+    # Per-chunk probability threshold (0..1). Raise if a model mis-fires on
+    # similar-sounding speech; lower if real wake attempts get missed.
+    threshold: float = 0.5
+    # Minimum gap between consecutive fires of the same model. Prevents one
+    # spoken wake word from triggering on every 80 ms chunk.
+    cooldown_secs: float = 1.5
+    # Note: silence-to-sleep is driven by conversation.idle_timeout_secs so
+    # the wake-IDLE transition and the LLM-context reset land on one clock.
     vad_min_volume: float = 0.0
     vad_stop_secs: float = 0.2
 
@@ -61,17 +88,8 @@ class ConversationConfig(BaseModel):
 
 
 class ClaudeConfig(BaseModel):
-    model: str = "claude-opus-4-7"
+    model: str = "claude-sonnet-4-6"
     max_tokens: int = 1024
-    wake_phrases: list[str] = Field(
-        default_factory=lambda: [
-            "hey claude",
-            "hey claud",
-            "hey cloud",
-            "hey clod",
-            "hey clog",
-        ]
-    )
     web_search_enabled: bool = True
     web_search_max_uses: int = 3
     web_fetch_enabled: bool = True

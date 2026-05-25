@@ -35,23 +35,41 @@ llm:
   ollama_keep_alive: "-1"
 
 wake:
-  phrases: [hey babel, hey babe, hey baby]
-  timeout_secs: 30.0
+  # openwakeword models loaded into a single Model instance. Each entry
+  # binds one model to a persona — when the model fires, that persona is
+  # activated. `model` is a path to an .onnx file (relative to project
+  # root) or a bundled openwakeword key like 'hey_jarvis_v0.1' (auto-
+  # downloaded on first run). See scripts/wakeword/ for training custom
+  # models like hey_babel.
+  models:
+    - model: models/wakeword/hey_babel.onnx
+      persona: babel
+    - model: hey_jarvis_v0.1
+      persona: marvin
+  # Per-chunk probability threshold. Raise if mis-fires happen on
+  # similar-sounding speech; lower if real wakes get missed.
+  threshold: 0.5
+  # Minimum gap between consecutive fires of the same model.
+  cooldown_secs: 1.5
   # Silero VAD min loudness (EBU R128). USB speakerphones like the Jabra
   # often clamp to ~0, so the 0.6 Silero default gates everything out.
   vad_min_volume: 0.0
   vad_stop_secs: 0.2
 
 conversation:
+  # Single session timeout. After this many seconds of silence:
+  #   - LLM context history is wiped
+  #   - wake strategy drops to IDLE (a wake word is required again)
+  #   - ask_claude's session-scoped backend flip reverts to ollama
   idle_timeout_secs: 10.0
 
 claude:
-  # Secondary wake-phrase backend. Disabled until ANTHROPIC_API_KEY is in .env.
-  model: claude-opus-4-7
+  # Cloud backend, reachable mid-session via the ask_claude skill
+  # ("ask Claude…", "switch to Claude"). Disabled until ANTHROPIC_API_KEY
+  # is in .env. The switch lasts only for the active wake session and
+  # resets on sleep.
+  model: claude-sonnet-4-6
   max_tokens: 1024
-  # Multiple aliases because whisper-tiny.en often mishears "claude"
-  # as cloud / claud / clod / clog.
-  wake_phrases: [hey claude, hey claud, hey cloud, hey clod, hey clog]
   web_search_enabled: true
   web_search_max_uses: 3
   web_fetch_enabled: true

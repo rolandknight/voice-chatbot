@@ -13,7 +13,6 @@ Notes:
 
 import asyncio
 import os
-import re
 import shutil
 import sys
 from pathlib import Path
@@ -72,7 +71,11 @@ from pipecat.audio.mixers.base_audio_mixer import BaseAudioMixer
 from pipecat.frames.frames import (
     BotStoppedSpeakingFrame,
     Frame,
+    FunctionCallResultFrame,
+    FunctionCallsStartedFrame,
     LLMContextFrame,
+    LLMFullResponseEndFrame,
+    LLMFullResponseStartFrame,
     MixerControlFrame,
     TranscriptionFrame,
     TTSSpeakFrame,
@@ -84,8 +87,10 @@ from pipecat.turns.user_start import (
     TranscriptionUserTurnStartStrategy,
     VADUserTurnStartStrategy,
 )
-from pipecat.turns.user_start.wake_phrase_user_turn_start_strategy import (
-    WakePhraseUserTurnStartStrategy,
+
+from wakeword_detector import (  # noqa: E402
+    WakeWordDetector,
+    WakeWordUserTurnStartStrategy,
 )
 
 
@@ -111,8 +116,8 @@ class KeepaliveMixer(BaseAudioMixer):
 
 class TranscriptionTap(FrameProcessor):
     """Logs final transcriptions as they pass through. Useful for debugging
-    wake-phrase mismatches — shows exactly what Whisper produced so aliases
-    can be added to WAKE_PHRASES / CLAUDE_WAKE_PHRASES."""
+    intent matching — shows exactly what Whisper produced so skill triggers
+    or persona voice-command rules can be tuned to real STT output."""
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
@@ -122,72 +127,6 @@ class TranscriptionTap(FrameProcessor):
             and frame.text
         ):
             logger.info(f"Heard: {frame.text.strip()!r}")
-        await self.push_frame(frame, direction)
-
-
-class BackendRouter(FrameProcessor):
-    """Switches backend_state based on wake-phrase content in every final
-    transcription, not just the IDLE→AWAKE transition.
-
-    pipecat's WakePhraseUserTurnStartStrategy only fires on_wake_phrase_detected
-    once per IDLE→AWAKE transition. While AWAKE it just refreshes its timeout
-    and passes frames through, so a mid-conversation 'hey babel' after an
-    initial 'hey claude' never flips the backend. This processor mirrors the
-    strategy's regex/punctuation matching and updates backend_state on every
-    transcription; last wake phrase in the utterance wins."""
-
-    def __init__(self, backend_state: dict, claude_phrases, ollama_phrases):
-        super().__init__()
-        self._state = backend_state
-        self._claude_patterns = self._compile(claude_phrases)
-        self._ollama_patterns = self._compile(ollama_phrases)
-
-    @staticmethod
-    def _compile(phrases):
-        # Same shape as WakePhraseUserTurnStartStrategy: word-boundary
-        # anchored, whitespace-tolerant between words, case-insensitive.
-        out = []
-        for phrase in phrases:
-            words = phrase.split()
-            if not words:
-                continue
-            out.append(
-                re.compile(
-                    r"\b" + r"\s*".join(re.escape(w) for w in words) + r"\b",
-                    re.IGNORECASE,
-                )
-            )
-        return out
-
-    @staticmethod
-    def _last_match_pos(text: str, patterns) -> int:
-        best = -1
-        for pattern in patterns:
-            for m in pattern.finditer(text):
-                if m.start() > best:
-                    best = m.start()
-        return best
-
-    async def process_frame(self, frame: Frame, direction: FrameDirection):
-        await super().process_frame(frame, direction)
-        if (
-            isinstance(frame, TranscriptionFrame)
-            and direction == FrameDirection.DOWNSTREAM
-            and frame.text
-        ):
-            stripped = re.sub(r"[^\w\s]", "", frame.text)
-            claude_pos = self._last_match_pos(stripped, self._claude_patterns)
-            ollama_pos = self._last_match_pos(stripped, self._ollama_patterns)
-            new_backend = None
-            if claude_pos >= 0 and claude_pos >= ollama_pos:
-                new_backend = "claude"
-            elif ollama_pos >= 0 and ollama_pos > claude_pos:
-                new_backend = "ollama"
-            if new_backend and self._state.get("backend") != new_backend:
-                logger.info(
-                    f"Backend switched -> {new_backend} (in-turn wake phrase)"
-                )
-                self._state["backend"] = new_backend
         await self.push_frame(frame, direction)
 
 
@@ -282,6 +221,42 @@ class MediaDuckWatcher(FrameProcessor):
         await self.push_frame(frame, direction)
 
 
+class InFlightTracker(FrameProcessor):
+    """Tracks whether a tool call or LLM response is mid-flight.
+
+    The conversation idle timer and the wake-word IDLE transition both run on
+    a fixed budget measured from the user's last spoken activity. During the
+    gap between a function call dispatch (e.g. ask_claude) and the first
+    streamed LLM token from the now-active backend, no Bot/User speaking or
+    transcription frames flow — so both clocks tick without being refreshed
+    and can fire mid-response, killing the in-flight Claude request.
+
+    Plumbing this processor into the pipeline after the LLM stage lets the
+    idle handlers consult is_in_flight() and defer teardown while work is
+    pending."""
+
+    def __init__(self):
+        super().__init__()
+        self._fn_calls_outstanding = 0
+        self._llm_responding = False
+
+    def is_in_flight(self) -> bool:
+        return self._fn_calls_outstanding > 0 or self._llm_responding
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        if isinstance(frame, FunctionCallsStartedFrame):
+            n = len(frame.function_calls) if frame.function_calls else 0
+            self._fn_calls_outstanding += n
+        elif isinstance(frame, FunctionCallResultFrame):
+            self._fn_calls_outstanding = max(0, self._fn_calls_outstanding - 1)
+        elif isinstance(frame, LLMFullResponseStartFrame):
+            self._llm_responding = True
+        elif isinstance(frame, LLMFullResponseEndFrame):
+            self._llm_responding = False
+        await self.push_frame(frame, direction)
+
+
 async def main():
     cfg = load_config()
 
@@ -345,9 +320,6 @@ async def main():
 
     anthropic_api_key = cfg.claude.api_key.get_secret_value().strip()
     anthropic_model = cfg.claude.model
-    # Multiple aliases because whisper-tiny.en often mishears "claude" as
-    # "cloud", "claud", "clod", etc. All of these route to Claude.
-    claude_wake_phrases = [p.strip().lower() for p in cfg.claude.wake_phrases if p.strip()]
     claude_max_tokens = cfg.claude.max_tokens
     claude_enabled = cfg.claude.enabled
 
@@ -388,7 +360,7 @@ async def main():
     )
     logger.info(f"Personas           : {persona_summary}")
     if claude_enabled:
-        logger.info(f"Claude model       : {anthropic_model} (wake: {claude_wake_phrases})")
+        logger.info(f"Claude model       : {anthropic_model} (via ask_claude skill)")
         enabled_tools = [t["name"] for t in claude_tools]
         if enabled_tools:
             logger.info(f"Claude tools       : {enabled_tools}")
@@ -612,6 +584,13 @@ async def main():
     # own system_instruction; see babel_system_prompt above and
     # claude_system_prompt below.
     context = LLMContext(messages=[])
+
+    # Shared mutable backend selector consumed by the ParallelPipeline routing
+    # filters below. Declared up here so the SkillContext (built next) can
+    # see the same dict the wake-timeout handler later resets. Only meaningful
+    # when claude_enabled; the routing filters are only built in that branch.
+    backend_state = {"backend": "ollama"}
+
     skill_registry = None
     if babel_skills_enabled:
         sfx_backends: dict[str, str] = {}
@@ -630,6 +609,11 @@ async def main():
             sfx_backend_override=sfx_backend_override,
             persona_config=persona_config,
             persona_state=persona_state,
+            # backend_state is only useful when there's actually a Claude
+            # branch to switch to. Passing None when claude_enabled is False
+            # makes the ask_claude skill's `requires: [backend_state]` gate
+            # filter it out.
+            backend_state=backend_state if claude_enabled else None,
         )
         skill_registry = load_skills(skill_ctx, cfg)
         skill_registry.register(llm, context)
@@ -643,39 +627,62 @@ async def main():
     vad_min_volume = cfg.wake.vad_min_volume
     vad_stop_secs = cfg.wake.vad_stop_secs
 
-    wake_phrases = [p.strip() for p in cfg.wake.phrases if p.strip()]
-    if claude_enabled:
-        existing_lower = {p.lower() for p in wake_phrases}
-        for phrase in claude_wake_phrases:
-            if phrase and phrase not in existing_lower:
-                wake_phrases.append(phrase)
-                existing_lower.add(phrase)
-    claude_wake_set = set(claude_wake_phrases)
-    wake_timeout_secs = cfg.wake.timeout_secs
-    wake_strategy = WakePhraseUserTurnStartStrategy(
-        phrases=wake_phrases,
-        timeout=wake_timeout_secs,
-        single_activation=False,
+    wake_model_paths = [m.model for m in cfg.wake.models]
+    wake_persona_map = {
+        # openwakeword keys the predict() output dict by the model file's
+        # stem (or the bundled-model key without the .onnx suffix). For
+        # 'models/wakeword/hey_babel.onnx' that's 'hey_babel'; for
+        # 'hey_jarvis_v0.1' it's 'hey_jarvis_v0.1' unchanged.
+        Path(m.model).stem if m.model.endswith(".onnx") else m.model: m.persona
+        for m in cfg.wake.models
+    }
+    wake_detector = WakeWordDetector(
+        model_paths_or_keys=wake_model_paths,
+        persona_for_model=wake_persona_map,
+        threshold=cfg.wake.threshold,
+        cooldown_secs=cfg.wake.cooldown_secs,
+        persona_config=persona_config,
+        persona_state=persona_state,
+    )
+    # Tracks tool-call and LLM-response lifecycle frames so the idle/wake
+    # clocks can defer their teardown while Claude (or any backend) is still
+    # producing a response. Inserted into the pipeline after llm_stage below.
+    in_flight = InFlightTracker()
+
+    # One session clock for everything: same value drives the LLM context
+    # idle reset (via PipelineTask below) and the wake strategy's IDLE/AWAKE
+    # transition. Splitting them is what caused the "I just got reset but
+    # I'm still awake" bug. is_busy keeps the wake session alive across the
+    # quiet window between an ask_claude dispatch and Claude's first token.
+    wake_strategy = WakeWordUserTurnStartStrategy(
+        timeout=conversation_idle_timeout,
+        is_busy=in_flight.is_in_flight,
     )
 
-    # Mutable state shared with the routing filters below. Wake handler is the
-    # single writer; filters read this when an LLMContextFrame arrives.
-    backend_state = {"backend": "ollama"}
+    @wake_strategy.event_handler("on_wake_word_detected")
+    async def _on_wake(_strategy, model_key, score):
+        logger.info(
+            f"Wake activated: {model_key!r} (score={score:.3f}) — "
+            f"persona={persona_state.current!r}, backend={backend_state['backend']!r}"
+        )
 
-    @wake_strategy.event_handler("on_wake_phrase_detected")
-    async def _on_wake(_strategy, phrase):
-        matched = (phrase or "").strip().lower()
-        if claude_enabled and matched in claude_wake_set:
-            backend_state["backend"] = "claude"
-        else:
-            backend_state["backend"] = "ollama"
-        logger.info(f"Wake phrase detected: {phrase!r} -> {backend_state['backend']}")
-
-    @wake_strategy.event_handler("on_wake_phrase_timeout")
+    @wake_strategy.event_handler("on_wake_word_timeout")
     async def _on_sleep(_strategy):
-        logger.info("Wake timeout — going back to sleep")
+        # Session-scoped backend revert: ask_claude flipped this to "claude"
+        # for the duration of the wake session; sleep ends the session.
+        if backend_state["backend"] != "ollama":
+            logger.info(
+                f"Wake timeout — reverting backend "
+                f"{backend_state['backend']!r} -> 'ollama'"
+            )
+            backend_state["backend"] = "ollama"
+        else:
+            logger.info("Wake timeout — going back to sleep")
 
-    logger.info(f"Wake phrases       : {wake_phrases} (timeout={wake_timeout_secs}s)")
+    logger.info(
+        f"Wake models        : {wake_model_paths} "
+        f"(timeout={conversation_idle_timeout}s, threshold={cfg.wake.threshold})"
+    )
 
     context_aggregator = LLMContextAggregatorPair(
         context,
@@ -748,26 +755,18 @@ async def main():
             ]
         )
 
+    # WakeWordDetector runs ahead of STT on the raw 16 kHz audio frames:
+    # openwakeword fires during the wake word itself, not after Whisper has
+    # buffered the full utterance, so the wake event reaches the user
+    # aggregator before any TranscriptionFrame for that turn.
     pipeline_stages = [
         transport.input(),
+        wake_detector,
         stt,
         TranscriptionTap(),
         PersonaCommandRouter(persona_config, persona_state),
+        context_aggregator.user(),
     ]
-    if claude_enabled:
-        # Ollama wake phrases as a set distinct from Claude's. Anything in
-        # `wake_phrases` that's not a Claude phrase is treated as Ollama.
-        ollama_only_phrases = [
-            p for p in wake_phrases if p.strip().lower() not in claude_wake_set
-        ]
-        pipeline_stages.append(
-            BackendRouter(
-                backend_state=backend_state,
-                claude_phrases=claude_wake_phrases,
-                ollama_phrases=ollama_only_phrases,
-            )
-        )
-    pipeline_stages.append(context_aggregator.user())
     if skill_registry is not None:
         # Per-turn tool filter: reads the latest user message off the shared
         # LLMContext and swaps in the top-K relevant tools. Runs before the
@@ -784,6 +783,7 @@ async def main():
         )
     pipeline_stages += [
         llm_stage,
+        in_flight,
         PersonaTagRouter(persona_config, persona_state),
         tts_dispatch,
         transport.output(),
@@ -814,12 +814,22 @@ async def main():
 
     @task.event_handler("on_idle_timeout")
     async def _on_conversation_idle(task):
+        if in_flight.is_in_flight():
+            # Work pending (function call dispatched, or Claude still streaming).
+            # PipelineTask re-fires on_idle_timeout each interval, so a silent
+            # return is enough — we re-check on the next tick.
+            return
         if not context.messages:
             return
         logger.info(
             f"Conversation idle for {conversation_idle_timeout:.0f}s — resetting context."
         )
         context.set_messages([])
+        # Force the wake strategy back to IDLE: if the LLM has forgotten the
+        # conversation, the user should have to re-wake too. Otherwise the
+        # 30s wake timeout outlives the 10s conversation idle and follow-up
+        # speech gets processed without a wake word.
+        wake_strategy.force_idle()
 
     runner = PipelineRunner()
 
@@ -899,15 +909,15 @@ async def main():
 
     keepalive_task = asyncio.create_task(_ollama_keepalive_heartbeat())
 
+    wake_display = ", ".join(sorted(wake_persona_map.keys())) or "(no models)"
     if claude_enabled:
-        claude_display = claude_wake_phrases[0] if claude_wake_phrases else "hey claude"
         logger.info(
-            f"Ready. Say {wake_phrases[0]!r} for the local model, "
-            f"{claude_display!r} for Claude. Press Ctrl+C to stop."
+            f"Ready. Wake words: {wake_display}. "
+            f"Say 'ask Claude' mid-session to route to Claude. Press Ctrl+C to stop."
         )
     else:
         logger.info(
-            f"Ready. Say {wake_phrases[0]!r} to wake the bot. Press Ctrl+C to stop."
+            f"Ready. Wake words: {wake_display}. Press Ctrl+C to stop."
         )
 
     try:

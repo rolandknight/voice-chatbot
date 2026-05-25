@@ -42,13 +42,24 @@ echo "Installing Python dependencies..."
 # openai      -> OpenAI-compatible TTS client used to talk to the local
 #                Chatterbox-TTS-Server for the cloned chatterbox personas
 # ollama      -> local LLM service via Ollama's OpenAI-compatible API
-# anthropic   -> Claude routing for the secondary "hey claude" wake phrase
+# anthropic   -> Claude cloud backend reachable via the ask_claude skill
 # spotipy     -> Spotify Web API client used to control playback on the
 #                librespot Connect device
+# openwakeword -> audio-based wake-word detection (hey_babel + hey_jarvis)
+#                upstream of Whisper STT; replaces the older text-based
+#                WakePhraseUserTurnStartStrategy.
 python -m pip install \
   "pipecat-ai[local,mlx-whisper,kokoro,openai,ollama,silero,anthropic]" \
   python-dotenv loguru pyaudio pyyaml websockets yt-dlp spotipy \
+  openwakeword \
   "pydantic>=2" "pydantic-settings>=2"
+
+echo "Downloading openwakeword shared backbone + hey_jarvis model..."
+# openwakeword ships the melspec/embedding/silero_vad backbone files via a
+# CDN, not the wheel. WakeWordDetector tries to use them at startup, so we
+# fetch them now — also downloads the bundled 'hey_jarvis_v0.1' model that
+# the marvin persona is wired to in config.yaml.
+.venv/bin/python -c "import openwakeword.utils as u; u.download_models(['hey_jarvis_v0.1'])"
 
 echo "Starting Ollama if needed..."
 if ! pgrep -x ollama >/dev/null 2>&1; then
