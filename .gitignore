@@ -14,3 +14,7 @@ voices/*.flac
 
 scripts/microwakeword/_work/
 scripts/wakeword/_work/
+
+# Self-signed certs for the LAN dev servers (smoke + main backend).
+.certs/
+webrtc_smoke/.certs/
