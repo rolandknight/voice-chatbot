@@ -7,8 +7,13 @@
 set -euo pipefail
 
 CONFIG="${CONFIG:-/work/config/hey_babel.yml}"
+# Derive the model name from the config filename (hey_babel.yml -> hey_babel)
+# unless the launcher already passed MODEL_NAME in. MODEL_NAME drives every
+# phrase-specific path below; the YAML's `model_name` and `output_dir` fields
+# must agree with it for openwakeword's own output to land in the same tree.
+MODEL_NAME="${MODEL_NAME:-$(basename "$CONFIG" .yml)}"
 DATA_DIR="/work/data"
-OUT_DIR="/work/output/hey_babel"
+OUT_DIR="/work/output/$MODEL_NAME"
 
 mkdir -p "$DATA_DIR" "$OUT_DIR" "$HF_HOME"
 
@@ -119,7 +124,7 @@ python -m openwakeword.train \
 # run then skips augmentation entirely and the train phase blows up looking
 # for a missing .npy. Detect that state and clear the partial set so augment
 # regenerates everything.
-FEATURE_DIR="$OUT_DIR/hey_babel"
+FEATURE_DIR="$OUT_DIR/$MODEL_NAME"
 EXPECTED_FEATURES=(positive_features_train.npy negative_features_train.npy
                    positive_features_test.npy  negative_features_test.npy)
 present=0
@@ -189,8 +194,8 @@ PY
 # openwakeword's --train_model has no built-in skip-guard, so every container
 # run would otherwise redo a multi-hour training pass even when we're only
 # iterating on the conversion step.
-ONNX_PATH="$OUT_DIR/hey_babel.onnx"
-TFLITE_PATH="$OUT_DIR/hey_babel.tflite"
+ONNX_PATH="$OUT_DIR/$MODEL_NAME.onnx"
+TFLITE_PATH="$OUT_DIR/$MODEL_NAME.tflite"
 
 if [ -f "$ONNX_PATH" ]; then
     log "ONNX present at $ONNX_PATH; skipping --train_model, running convert only"

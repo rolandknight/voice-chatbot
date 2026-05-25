@@ -1,9 +1,12 @@
-# `hey babel` wake-word training
+# Wake-word training
 
-Builds an [openWakeWord](https://github.com/dscripka/openWakeWord) model
-for the phrase **"hey babel"** and emits `hey_babel.onnx` + `hey_babel.tflite`.
-**Training only — no app integration.** Wiring the model into `app.py` is
-deferred.
+Builds [openWakeWord](https://github.com/dscripka/openWakeWord) models for
+the phrases this project ships — currently **"hey babel"** and
+**"hey marvin"** — and emits `<phrase>.onnx` + `<phrase>.tflite` per phrase.
+The pipeline is phrase-agnostic: add a new wake word by dropping a
+`<model_name>.yml` next to the existing configs and appending the model
+name to `PHRASES` in the `Makefile`. **Training only — no app integration.**
+Wiring models into `app.py` is deferred.
 
 ## Prerequisites
 
@@ -20,34 +23,40 @@ deferred.
 
 ```sh
 cd voice-chatbot/scripts/wakeword
-make train         # equivalent to ./train.sh
+make train               # trains every phrase in Makefile's PHRASES, in order
+make train-hey-babel     # train just one phrase
+make train-hey-marvin
 ```
 
-That's it. The script:
+That's it. For each phrase the script:
 
-1. Builds the `hey-babel-trainer:latest` image (CUDA 12.1 + openWakeWord +
-   piper-sample-generator + libritts voice model).
+1. Builds the `wakeword-trainer:latest` image (CUDA 12.1 + openWakeWord +
+   piper-sample-generator + libritts voice model). One image serves every
+   phrase — the YAML config picks which one to train.
 2. Bind-mounts `./_work` into the container at `/work`.
 3. Inside the container, `entrypoint.sh` downloads MIT RIRs, FMA-small,
    AudioSet balanced shard, and the pre-computed ACAV100M / validation
-   features, then runs `python -m openwakeword.train` through all four
-   phases (generate → augment → train → convert).
-4. Final artifacts land in `./_work/output/hey_babel/`.
+   features (once — shared across phrases), then runs
+   `python -m openwakeword.train` through all four phases
+   (generate → augment → train → convert).
+4. Final artifacts land in `./_work/output/<phrase>/`.
 
 Re-running picks up where it left off — every download and every training
-phase is skipped if its output already exists.
+phase is skipped if its output already exists. `make train` runs phrases
+sequentially, so a partial second phrase doesn't lose progress on the first.
 
 ## After training
 
 ```sh
-make install                          # copies .onnx + .tflite into ../../models/wakeword/
+make install                          # copies every trained phrase's .onnx + .tflite into ../../models/wakeword/
+make install-hey-babel                # just one phrase
 make install DEST=/some/other/dir     # override destination
 ```
 
 A quick host-side sanity check before shipping to the Mac:
 
 ```sh
-docker run --rm -it --gpus all -v "$PWD/_work:/work" hey-babel-trainer:latest \
+docker run --rm -it --gpus all -v "$PWD/_work:/work" wakeword-trainer:latest \
     python -c "
 from openwakeword.model import Model
 import numpy as np
@@ -58,7 +67,7 @@ print('silence:', m.predict(silence))
 "
 ```
 
-## Tuning knobs (`hey_babel.yml`)
+## Tuning knobs (per-phrase `<model_name>.yml`)
 
 - `n_samples` — bump from 20 000 to 50 000+ once you've validated end-to-end.
   Lifts wall-clock by an hour or two but improves robustness noticeably.
@@ -74,18 +83,24 @@ print('silence:', m.predict(silence))
 ## Re-training after a config change
 
 ```sh
-make clean         # drop the trained model + .npy features, keep TTS clips
-make train
+make clean-hey-babel   # drop the trained model + .npy features, keep TTS clips
+make train-hey-babel
 ```
 
-`make clean` is safe when you've only tuned hyperparameters that affect
-training/augmentation. If you change `target_phrase`, `custom_negative_phrases`,
-or `n_samples`, the synthesized clips are stale too — wipe everything:
+`make clean-<phrase>` is safe when you've only tuned hyperparameters that
+affect training/augmentation. If you change `target_phrase`,
+`custom_negative_phrases`, or `n_samples`, the synthesized clips are stale
+too — wipe everything:
 
 ```sh
-make clean-all     # rm -rf _work/output/hey_babel/
-make train
+make clean-all-hey-babel   # rm -rf _work/output/hey_babel/
+make train-hey-babel
 ```
+
+The unsuffixed `make clean` / `make clean-all` / `make train` apply the
+operation to every phrase in `PHRASES`. Use the suffixed forms when
+iterating on one phrase — the other phrase's hours of synthesized clips
+shouldn't be collateral damage.
 
 ## Per-phrase tuning history
 
@@ -97,7 +112,8 @@ and this README) is reusable; the per-phrase YAML and iteration log are not.
 
 Log each phrase's iterations in its own `<phrase>-training.md`:
 
-- [`hey-babel-training.md`](hey-babel-training.md) — current phrase.
+- [`hey-babel-training.md`](hey-babel-training.md)
+- [`hey-marvin-training.md`](hey-marvin-training.md)
 
 ## Troubleshooting
 
@@ -121,7 +137,7 @@ No reboot needed; the next CUDA call invokes the new binary and the cap
 nodes get created with the right permissions.
 
 **Out of memory during `--generate_clips`** — the Piper TTS step is the
-memory peak. Halve `tts_batch_size` in `hey_babel.yml` and re-run; the script
+memory peak. Halve `tts_batch_size` in the affected `<phrase>.yml` and re-run; the script
 resumes from the partial generation.
 
 **Out of memory during `--train_model`** — halve `batch_n_per_class.ACAV100M_sample`.
@@ -133,8 +149,11 @@ via `HF_HOME`. Delete the half-downloaded file there and re-run; it will resume.
 
 - `Dockerfile` — CUDA + Python + openWakeWord + piper-sample-generator image.
 - `entrypoint.sh` — in-container: stage data, run training, emit artifacts.
+  Phrase-agnostic — derives the model name from `$CONFIG` or `$MODEL_NAME`.
 - `train.sh` — host-side launcher; builds the image and runs the container.
-- `Makefile` — `make train` / `make clean` wrappers around the above.
-- `hey_babel.yml` — training config (per phrase).
-- `hey-babel-training.md` — iteration log (per phrase).
-- `_work/` — generated; datasets, intermediate clips, and final models.
+  Drives one phrase per invocation (selected via `WAKEWORD_CONFIG`).
+- `Makefile` — per-phrase + aggregate `train`/`clean`/`clean-all`/`install`
+  wrappers around the above. The `PHRASES` list is the source of truth.
+- `hey_babel.yml`, `hey_marvin.yml` — training config (one per phrase).
+- `hey-babel-training.md`, `hey-marvin-training.md` — iteration log (one per phrase).
+- `_work/` — generated; datasets (shared), intermediate clips, and final models.

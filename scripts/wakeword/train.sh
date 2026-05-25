@@ -8,8 +8,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK_DIR="${WAKEWORD_WORK_DIR:-$SCRIPT_DIR/_work}"
-IMAGE="${WAKEWORD_IMAGE:-hey-babel-trainer:latest}"
+IMAGE="${WAKEWORD_IMAGE:-wakeword-trainer:latest}"
 CONFIG_NAME="${WAKEWORD_CONFIG:-hey_babel.yml}"
+MODEL_NAME="${CONFIG_NAME%.yml}"
 
 if ! command -v docker >/dev/null 2>&1; then
     echo "docker is required" >&2; exit 1
@@ -30,6 +31,7 @@ docker run --rm -it \
     --shm-size=2g \
     -v "$WORK_DIR:/work" \
     -e CONFIG="/work/config/$CONFIG_NAME" \
+    -e MODEL_NAME="$MODEL_NAME" \
     "$IMAGE"
 
 echo
