@@ -1,24 +1,27 @@
-# Training config for the "hey babel" openWakeWord model.
-# Tuned for an RTX 2060 (6 GB VRAM). See README.md for the knobs that matter.
+# Training config for the "hey marvin" openWakeWord model.
+# Cloned from hey_babel.yml — only target_phrase, custom_negative_phrases,
+# and output_dir change. Hyperparameters start at the values that worked
+# for hey_babel v3; tune per the iteration log in hey-marvin-training.md.
 
-model_name: "hey_babel"
+model_name: "hey_marvin"
 
 target_phrase:
-  - "hey babel"
+  - "hey marvin"
 
-# Phonetic neighbours that the current regex-on-Whisper path frequently
-# misfires on. Listing them here pushes the model to discriminate against them.
+# Phonetic neighbours likely to trigger false positives. Starter list
+# borrowed from scripts/microwakeword/hey_marvin.yml — same phrase, same
+# hard negatives even though the model architecture differs.
 custom_negative_phrases:
-  - "hey babe"
-  - "hey baby"
-  - "hey bagel"
-  - "hey bay bell"
-  - "hey ball"
-  - "able"
-  - "babble"
-  - "label"
-  - "table"
-  - "cable"
+  - "hey martin"
+  - "hey marlin"
+  - "hey marvel"
+  - "hey margin"
+  - "hey marin"
+  - "hey starving"
+  - "marvelous"
+  - "marvel"
+  - "carving"
+  - "starving"
 
 # 50k positives expands positive-class variety after the v1–v3 loss-balance
 # work landed FP/hour close to target with recall still under it. Typical
@@ -34,7 +37,7 @@ augmentation_batch_size: 8
 # Paths are all relative to /work inside the container. The entrypoint stages
 # datasets into /work/data/... before invoking train.py.
 piper_sample_generator_path: "/opt/piper-sample-generator"
-output_dir: "/work/output/hey_babel"
+output_dir: "/work/output/hey_marvin"
 
 rir_paths:
   # openwakeword's train.py does a flat os.scandir() on each entry — no glob, no
