@@ -20,7 +20,7 @@ deferred.
 
 ```sh
 cd voice-chatbot/scripts/wakeword
-./train.sh
+make train         # equivalent to ./train.sh
 ```
 
 That's it. The script:
@@ -40,9 +40,8 @@ phase is skipped if its output already exists.
 ## After training
 
 ```sh
-mkdir -p ../../models/wakeword
-cp _work/output/hey_babel/hey_babel.onnx  ../../models/wakeword/
-cp _work/output/hey_babel/hey_babel.tflite ../../models/wakeword/
+make install                          # copies .onnx + .tflite into ../../models/wakeword/
+make install DEST=/some/other/dir     # override destination
 ```
 
 A quick host-side sanity check before shipping to the Mac:
@@ -71,6 +70,34 @@ print('silence:', m.predict(silence))
   This is the single highest-leverage knob for cleaning up false positives.
 - `target_false_positives_per_hour` — lower = stricter model; raise if recall
   is suffering.
+
+## Re-training after a config change
+
+```sh
+make clean         # drop the trained model + .npy features, keep TTS clips
+make train
+```
+
+`make clean` is safe when you've only tuned hyperparameters that affect
+training/augmentation. If you change `target_phrase`, `custom_negative_phrases`,
+or `n_samples`, the synthesized clips are stale too — wipe everything:
+
+```sh
+make clean-all     # rm -rf _work/output/hey_babel/
+make train
+```
+
+## Per-phrase tuning history
+
+Tuning is phrase-specific — phonetic distinctiveness, length, and the
+relevant hard-negative space all change with the target phrase, so the same
+hyperparameters that land one phrase at recall 0.8 / FP 0.3 can give another
+0.5 / 2.5. The phrase-agnostic infrastructure (Dockerfile, scripts, Makefile,
+and this README) is reusable; the per-phrase YAML and iteration log are not.
+
+Log each phrase's iterations in its own `<phrase>-training.md`:
+
+- [`hey-babel-training.md`](hey-babel-training.md) — current phrase.
 
 ## Troubleshooting
 
@@ -107,5 +134,7 @@ via `HF_HOME`. Delete the half-downloaded file there and re-run; it will resume.
 - `Dockerfile` — CUDA + Python + openWakeWord + piper-sample-generator image.
 - `entrypoint.sh` — in-container: stage data, run training, emit artifacts.
 - `train.sh` — host-side launcher; builds the image and runs the container.
-- `hey_babel.yml` — training config (the only file with phrase-specific tuning).
+- `Makefile` — `make train` / `make clean` wrappers around the above.
+- `hey_babel.yml` — training config (per phrase).
+- `hey-babel-training.md` — iteration log (per phrase).
 - `_work/` — generated; datasets, intermediate clips, and final models.

@@ -20,9 +20,11 @@ custom_negative_phrases:
   - "table"
   - "cable"
 
-# 20k positives is the sweet spot for a 2-word phrase: enough variety, finishes
-# overnight on a 2060. Bump to 50k+ once we've validated the pipeline end-to-end.
-n_samples: 20000
+# 50k positives expands positive-class variety after the v1–v3 loss-balance
+# work landed FP/hour close to target with recall still under it. Typical
+# openWakeWord tunings see 5–10 pts of recall lift from this bump with little
+# FP movement. Adds 1–2 h of wall-clock vs the 20k baseline.
+n_samples: 50000
 n_samples_val: 2000
 
 # Piper TTS runs on the GPU; keep batch small so it co-exists with augmentation.
@@ -48,7 +50,7 @@ background_paths_duplication_rate:
 
 false_positive_validation_data_path: "/work/data/validation_set_features.npy"
 
-augmentation_rounds: 1
+augmentation_rounds: 2
 
 feature_data_files:
   "ACAV100M_sample": "/work/data/openwakeword_features_ACAV100M_2000_hrs_16bit.npy"
@@ -58,11 +60,11 @@ feature_data_files:
 batch_n_per_class:
   "ACAV100M_sample": 1024
   "adversarial_negative": 50
-  "positive": 50
+  "positive": 100
 
 model_type: "dnn"
-layer_size: 32
+layer_size: 64
 
 steps: 50000
-max_negative_weight: 1500
-target_false_positives_per_hour: 0.2
+max_negative_weight: 750
+target_false_positives_per_hour: 0.5
