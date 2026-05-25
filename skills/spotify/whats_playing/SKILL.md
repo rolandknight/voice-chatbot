@@ -4,7 +4,7 @@ description: >
   Say which Spotify track is currently playing. Use for 'what's playing?',
   'what is this song?', 'who's this?', 'what's the name of this track?'.
 category: spotify
-enabled_when: BABEL_SPOTIFY_ENABLED
+enabled_when: skills.spotify.enabled
 requires: [spotify_player]
 parameters: {}
 triggers:

@@ -1,15 +1,9 @@
 """Shared helpers for picking PyAudio devices by name or index."""
 from __future__ import annotations
 
-import os
 from typing import Optional
 
 import pyaudio
-
-
-def _env(name: str) -> Optional[str]:
-    v = os.getenv(name)
-    return v.strip() if v and v.strip() else None
 
 
 def find_device(pa: pyaudio.PyAudio, *, name_substr: Optional[str], index: Optional[int], direction: str) -> int:
@@ -50,24 +44,25 @@ def find_device(pa: pyaudio.PyAudio, *, name_substr: Optional[str], index: Optio
     return int(pa.get_default_output_device_info()["index"])
 
 
-def resolve_from_env() -> tuple[int, int, str, str]:
-    """Resolve input/output device indexes using env vars. Returns (in_idx, out_idx, in_name, out_name)."""
+def resolve_from_config(audio) -> tuple[int, int, str, str]:
+    """Resolve input/output device indexes from a typed AudioConfig.
+
+    `audio` must expose input_device_name / input_device_index /
+    output_device_name / output_device_index attributes (the AudioConfig
+    pydantic model from `config.schema`).
+    """
     pa = pyaudio.PyAudio()
     try:
-        in_name = _env("INPUT_DEVICE_NAME")
-        out_name = _env("OUTPUT_DEVICE_NAME")
-        in_idx_env = _env("INPUT_DEVICE_INDEX")
-        out_idx_env = _env("OUTPUT_DEVICE_INDEX")
         in_idx = find_device(
             pa,
-            name_substr=in_name,
-            index=int(in_idx_env) if in_idx_env else None,
+            name_substr=audio.input_device_name,
+            index=audio.input_device_index,
             direction="input",
         )
         out_idx = find_device(
             pa,
-            name_substr=out_name,
-            index=int(out_idx_env) if out_idx_env else None,
+            name_substr=audio.output_device_name,
+            index=audio.output_device_index,
             direction="output",
         )
         in_info = pa.get_device_info_by_index(in_idx)

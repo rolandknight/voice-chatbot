@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import os
-
 import httpx
 from loguru import logger
 
 from pipecat.services.llm_service import FunctionCallParams
 
+from config import get as get_config
 from skills._context import SkillContext
 
 HTTP_TIMEOUT_SECS = 6.0
@@ -39,9 +38,9 @@ async def _search_duckduckgo(query: str) -> str:
 
 
 async def _search_brave(query: str) -> str:
-    api_key = os.getenv("BRAVE_API_KEY", "").strip()
+    api_key = get_config().skills.web_search.brave_api_key.get_secret_value().strip()
     if not api_key:
-        return "Brave search isn't configured. Add a BRAVE_API_KEY to enable it."
+        return "Brave search isn't configured. Add a BRAVE_API_KEY to .env to enable it."
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_SECS) as client:
         r = await client.get(
             "https://api.search.brave.com/res/v1/web/search",
@@ -63,9 +62,9 @@ async def _search_brave(query: str) -> str:
 
 
 async def _search_tavily(query: str) -> str:
-    api_key = os.getenv("TAVILY_API_KEY", "").strip()
+    api_key = get_config().skills.web_search.tavily_api_key.get_secret_value().strip()
     if not api_key:
-        return "Tavily search isn't configured. Add a TAVILY_API_KEY to enable it."
+        return "Tavily search isn't configured. Add a TAVILY_API_KEY to .env to enable it."
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_SECS) as client:
         r = await client.post(
             "https://api.tavily.com/search",
@@ -96,7 +95,7 @@ async def handle(params: FunctionCallParams, ctx: SkillContext) -> None:
         await params.result_callback("I need a search query to look something up.")
         return
 
-    provider = os.getenv("BABEL_SEARCH_PROVIDER", "duckduckgo").strip().lower()
+    provider = get_config().skills.web_search.provider
     try:
         if provider == "brave":
             text = await _search_brave(query)

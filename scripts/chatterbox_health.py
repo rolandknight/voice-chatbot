@@ -7,27 +7,28 @@ Usage:
                                                  #  (use after editing voices)
   python scripts/chatterbox_health.py speak TEXT [--voice NAME] [--out FILE]
 
-Reads CHATTERBOX_BASE_URL from .env / environment (default
-http://127.0.0.1:8004/v1).
+Reads tts.chatterbox.base_url / tts.chatterbox.model from config.yaml.
 """
 
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
 import httpx
 
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except Exception:
-    pass
+# When run standalone the project root isn't on sys.path; add it so the
+# `config` package resolves.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
-BASE_URL = os.getenv("CHATTERBOX_BASE_URL", "http://127.0.0.1:8004/v1").rstrip("/")
-MODEL = os.getenv("CHATTERBOX_MODEL", "chatterbox-turbo")
+from config import load as load_config  # noqa: E402
+
+_cfg = load_config()
+BASE_URL = _cfg.tts.chatterbox.base_url.rstrip("/")
+MODEL = _cfg.tts.chatterbox.model
 
 
 def _ping() -> int:

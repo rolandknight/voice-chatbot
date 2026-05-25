@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import shutil
 import sys
 from dataclasses import dataclass
@@ -11,6 +10,7 @@ from loguru import logger
 
 from pipecat.services.llm_service import FunctionCallParams
 
+from config import get as get_config
 from skills._context import SkillContext
 
 HTTP_TIMEOUT_SECS = 6.0
@@ -160,7 +160,7 @@ def _format_weather_reply(
 async def handle(params: FunctionCallParams, ctx: SkillContext) -> None:
     location = (params.arguments.get("location") or "").strip()
     if not location:
-        location = os.getenv("BABEL_DEFAULT_LOCATION", "").strip()
+        location = get_config().skills.weather.default_location.strip()
 
     try:
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_SECS) as client:

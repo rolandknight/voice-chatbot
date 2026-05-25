@@ -8,7 +8,7 @@ description: >
   new Taylor Swift album'. For playing a Spotify playlist by name (e.g.
   'play my Discover Weekly') use play_spotify_playlist instead.
 category: spotify
-enabled_when: BABEL_SPOTIFY_ENABLED
+enabled_when: skills.spotify.enabled
 requires: [spotify_player]
 parameters:
   query:

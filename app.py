@@ -19,11 +19,12 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from dotenv import load_dotenv
 from loguru import logger
 
+from config import load as load_config  # noqa: E402
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "scripts"))
-from _audio_devices import resolve_from_env  # noqa: E402
+from _audio_devices import resolve_from_config  # noqa: E402
 from radio import RadioPlayer  # noqa: E402
 from spotify import SpotifyPlayer  # noqa: E402
 
@@ -281,29 +282,8 @@ class MediaDuckWatcher(FrameProcessor):
         await self.push_frame(frame, direction)
 
 
-def env_int(name: str, default: Optional[int] = None) -> Optional[int]:
-    value = os.getenv(name, "")
-    if value is None or value.strip() == "":
-        return default
-    return int(value)
-
-
-def env_float(name: str, default: float) -> float:
-    value = os.getenv(name, "")
-    if value is None or value.strip() == "":
-        return default
-    return float(value)
-
-
-def env_bool(name: str, default: bool) -> bool:
-    value = os.getenv(name, "").strip().lower()
-    if value == "":
-        return default
-    return value in ("1", "true", "yes", "on")
-
-
 async def main():
-    load_dotenv(override=True)
+    cfg = load_config()
 
     logger.remove()
     logger.add(
@@ -311,30 +291,29 @@ async def main():
         filter=lambda record: record["message"] != "Idle timeout detected.",
     )
 
-    if os.getenv("HF_HUB_OFFLINE", "0") == "1":
+    if cfg.huggingface.hub_offline:
         os.environ["HF_HUB_OFFLINE"] = "1"
 
     input_device_index, output_device_index, input_device_name, output_device_name = (
-        resolve_from_env()
+        resolve_from_config(cfg.audio)
     )
 
-    audio_in_sample_rate = env_int("AUDIO_IN_SAMPLE_RATE", 16000)
-    audio_out_sample_rate = env_int("AUDIO_OUT_SAMPLE_RATE", 24000)
+    audio_in_sample_rate = cfg.audio.in_sample_rate
+    audio_out_sample_rate = cfg.audio.out_sample_rate
 
-    whisper_model = os.getenv("WHISPER_MLX_MODEL", "mlx-community/whisper-base.en-mlx")
-    language = os.getenv("LANGUAGE", "en")
-    ollama_model = os.getenv("OLLAMA_MODEL", "gemma4:26b")
-    conversation_idle_timeout = env_float("CONVERSATION_IDLE_TIMEOUT_SECS", 10.0)
-    babel_skills_enabled = env_bool("BABEL_SKILLS_ENABLED", True)
-    radio_enabled = babel_skills_enabled and env_bool("BABEL_RADIO_ENABLED", True)
-    shows_enabled = radio_enabled and env_bool("BABEL_SHOWS_ENABLED", True)
-    # Spotify is gated on both the env flag and a configured client id —
+    whisper_model = cfg.stt.whisper_model
+    language = cfg.stt.language
+    ollama_model = cfg.llm.ollama_model
+    conversation_idle_timeout = cfg.conversation.idle_timeout_secs
+    babel_skills_enabled = cfg.skills.enabled
+    radio_enabled = babel_skills_enabled and cfg.skills.radio.enabled
+    # Spotify is gated on both the config flag and a configured client id —
     # without credentials, the handlers would just emit the bootstrap prompt
     # for every voice command, which is worse than not exposing them at all.
     spotify_enabled = (
         babel_skills_enabled
-        and env_bool("BABEL_SPOTIFY_ENABLED", True)
-        and bool(os.getenv("SPOTIPY_CLIENT_ID", "").strip())
+        and cfg.skills.spotify.enabled
+        and bool(cfg.skills.spotify.client_id.get_secret_value().strip())
     )
     # SFX backends both default to off — each is multi-GB on disk and not
     # everyone wants them. When on, the URLs point at the local FastAPI
@@ -342,79 +321,44 @@ async def main():
     #   - Woosh: foley/ambience/animals/machines (Sony text-to-foley).
     #   - Stable Audio Open: high-quality non-musical sounds incl.
     #     bodily/comedic effects where Woosh underperforms.
-    # When both are on, BABEL_SFX_BACKEND chooses routing (auto = keyword
+    # When both are on, skills.sfx.backend chooses routing (auto = keyword
     # routing handled inside skills/sfx/generate_sound_effect/handler.py).
-    sfx_woosh_enabled = babel_skills_enabled and env_bool("BABEL_SFX_ENABLED", False)
-    sfx_sao_enabled = babel_skills_enabled and env_bool("BABEL_SAO_ENABLED", False)
+    sfx_woosh_enabled = babel_skills_enabled and cfg.skills.sfx.woosh_enabled
+    sfx_sao_enabled = babel_skills_enabled and cfg.skills.sfx.sao_enabled
     sfx_enabled = sfx_woosh_enabled or sfx_sao_enabled
-    sfx_woosh_url = (
-        os.getenv("WOOSH_URL", "http://127.0.0.1:8005")
-        if sfx_woosh_enabled
-        else None
-    )
-    sfx_stable_audio_url = (
-        os.getenv("STABLE_AUDIO_URL", "http://127.0.0.1:8006")
-        if sfx_sao_enabled
-        else None
-    )
-    sfx_backend_override = os.getenv("BABEL_SFX_BACKEND", "auto").strip().lower() or None
+    sfx_woosh_url = cfg.skills.sfx.woosh_url if sfx_woosh_enabled else None
+    sfx_stable_audio_url = cfg.skills.sfx.sao_url if sfx_sao_enabled else None
+    sfx_backend_override = cfg.skills.sfx.backend
     # Tracker is a FrameProcessor inserted into the pipeline below; the SFX
     # handler uses it to defer mpv playback until the bot's TTS has stopped,
     # so the spoken ack and the SFX clip don't overlap on the speaker.
     sfx_tracker = BotSpeakingTracker() if sfx_enabled else None
-    ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+    ollama_base_url = cfg.llm.ollama_base_url
 
-    personas_config_path = Path(
-        os.getenv("PERSONAS_CONFIG", "personas.yaml")
-    )
-    if not personas_config_path.is_absolute():
-        personas_config_path = Path(__file__).parent / personas_config_path
     persona_config, persona_state = load_persona_config(
-        personas_config_path, os.getenv("DEFAULT_PERSONA")
+        cfg.resolved_personas_path(), cfg.tts.default_persona
     )
 
-    # Legacy env override: pre-personas config, the active voice was set
-    # via KOKORO_VOICE. If it's still set we apply it to the babel persona
-    # so existing .env files don't silently drift.
-    kokoro_voice_override = os.getenv("KOKORO_VOICE", "").strip()
-    if kokoro_voice_override:
-        babel_persona = persona_config.personas.get("babel")
-        if babel_persona and babel_persona.backend == KOKORO_BACKEND:
-            if babel_persona.voice != kokoro_voice_override:
-                logger.info(
-                    f"KOKORO_VOICE={kokoro_voice_override!r} overrides babel persona voice"
-                )
-                babel_persona.voice = kokoro_voice_override
+    chatterbox_base_url = cfg.tts.chatterbox.base_url
+    chatterbox_model = cfg.tts.chatterbox.model
+    chatterbox_api_key = cfg.tts.chatterbox.api_key.get_secret_value()
 
-    chatterbox_base_url = os.getenv(
-        "CHATTERBOX_BASE_URL", "http://127.0.0.1:8004/v1"
-    )
-    chatterbox_model = os.getenv("CHATTERBOX_MODEL", "chatterbox-turbo")
-    chatterbox_api_key = os.getenv("CHATTERBOX_API_KEY", "not-needed")
-
-    anthropic_api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
-    anthropic_model = os.getenv("ANTHROPIC_MODEL", "claude-opus-4-7")
+    anthropic_api_key = cfg.claude.api_key.get_secret_value().strip()
+    anthropic_model = cfg.claude.model
     # Multiple aliases because whisper-tiny.en often mishears "claude" as
     # "cloud", "claud", "clod", etc. All of these route to Claude.
-    claude_wake_phrases = [
-        p.strip().lower()
-        for p in os.getenv(
-            "CLAUDE_WAKE_PHRASES",
-            "hey claude,hey claud,hey cloud,hey clod,hey clog",
-        ).split(",")
-        if p.strip()
-    ]
-    claude_max_tokens = env_int("CLAUDE_MAX_TOKENS", 1024) or 1024
-    claude_enabled = bool(anthropic_api_key)
+    claude_wake_phrases = [p.strip().lower() for p in cfg.claude.wake_phrases if p.strip()]
+    claude_max_tokens = cfg.claude.max_tokens
+    claude_enabled = cfg.claude.enabled
 
     # Claude server tools. Both are GA on the Anthropic API; passing them in
     # `tools` lets Claude decide per-turn whether to search/fetch. max_uses
     # caps per-turn invocations to keep voice latency bounded — each search
     # round-trip adds ~1-2s before the first audible token.
-    claude_web_search = claude_enabled and env_bool("CLAUDE_WEB_SEARCH", True)
-    claude_web_fetch = claude_enabled and env_bool("CLAUDE_WEB_FETCH", True)
-    claude_web_search_max_uses = env_int("CLAUDE_WEB_SEARCH_MAX_USES", 3) or 3
-    claude_web_fetch_max_uses = env_int("CLAUDE_WEB_FETCH_MAX_USES", 2) or 2
+    claude_web_search = claude_enabled and cfg.claude.web_search_enabled
+    claude_web_fetch = claude_enabled and cfg.claude.web_fetch_enabled
+    claude_web_search_max_uses = cfg.claude.web_search_max_uses
+    claude_web_fetch_max_uses = cfg.claude.web_fetch_max_uses
 
     claude_tools: list[dict] = []
     if claude_web_search:
@@ -476,8 +420,8 @@ async def main():
     # ttfs_p99_latency: measured p99 from speech end → final transcript. Used
     # by the turn analyzer to size its post-VAD wait window. Default 1.0s is
     # too conservative for whisper-tiny.en-mlx on Apple Silicon; observed TTFB
-    # here is ~0.28s, so 0.5s is a safe p99 estimate. Override with
-    # STT_TTFS_P99_LATENCY after running the stt-benchmark for your settings.
+    # here is ~0.28s, so 0.5s is a safe p99 estimate. Override via
+    # stt.ttfs_p99_latency_secs in config.yaml after running the stt-benchmark.
     stt = WhisperSTTServiceMLX(
         settings=WhisperSTTServiceMLX.Settings(
             model=whisper_model,
@@ -485,7 +429,7 @@ async def main():
             no_speech_prob=0.55,
             temperature=0.0,
         ),
-        ttfs_p99_latency=env_float("STT_TTFS_P99_LATENCY", 0.5),
+        ttfs_p99_latency=cfg.stt.ttfs_p99_latency_secs,
     )
 
     # Both babel and Claude share one LLMContext for conversation history but
@@ -675,12 +619,9 @@ async def main():
             sfx_backends["woosh"] = sfx_woosh_url
         if sfx_stable_audio_url:
             sfx_backends["stable_audio"] = sfx_stable_audio_url
-        # Shows are gated by env (BABEL_SHOWS_ENABLED, default on) inside the
-        # SKILL.md frontmatter. The radio_player gate handles the deps; if
-        # shows are disabled explicitly we drop the player reference so the
-        # play_bbc_show skill's `requires: [radio_player]` check fails. The
-        # other radio skills still register because shows_enabled defaults
-        # to True so the env gate is unset.
+        # Shows are gated by skills.shows.enabled via the SKILL.md `enabled_when`
+        # field; play_bbc_show also has `requires: [radio_player]`, so it
+        # disappears if radio is off too.
         skill_ctx = SkillContext(
             radio_player=radio_player,
             spotify_player=spotify_player,
@@ -690,23 +631,19 @@ async def main():
             persona_config=persona_config,
             persona_state=persona_state,
         )
-        skill_registry = load_skills(skill_ctx)
+        skill_registry = load_skills(skill_ctx, cfg)
         skill_registry.register(llm, context)
         logger.info(f"Babel skills      : {sorted(skill_registry.skills_by_name)}")
     else:
-        logger.info("Babel skills      : disabled (BABEL_SKILLS_ENABLED=0)")
+        logger.info("Babel skills      : disabled (skills.enabled = false)")
     # Silero's `min_volume` is normalized EBU R128 loudness (pyloudnorm), not
     # RMS. For low-gain USB speakerphones like the Jabra Speak2 40, integrated
     # loudness frequently clamps to ~0, so the 0.6 default gates everything
     # out. Disable the volume floor and rely on Silero's confidence threshold.
-    vad_min_volume = env_float("VAD_MIN_VOLUME", 0.0)
-    vad_stop_secs = env_float("VAD_STOP_SECS", 0.2)
+    vad_min_volume = cfg.wake.vad_min_volume
+    vad_stop_secs = cfg.wake.vad_stop_secs
 
-    wake_phrases = [
-        p.strip()
-        for p in os.getenv("WAKE_PHRASES", "hey babel,hey babe,hey baby").split(",")
-        if p.strip()
-    ]
+    wake_phrases = [p.strip() for p in cfg.wake.phrases if p.strip()]
     if claude_enabled:
         existing_lower = {p.lower() for p in wake_phrases}
         for phrase in claude_wake_phrases:
@@ -714,7 +651,7 @@ async def main():
                 wake_phrases.append(phrase)
                 existing_lower.add(phrase)
     claude_wake_set = set(claude_wake_phrases)
-    wake_timeout_secs = env_float("WAKE_TIMEOUT_SECS", 30.0)
+    wake_timeout_secs = cfg.wake.timeout_secs
     wake_strategy = WakePhraseUserTurnStartStrategy(
         phrases=wake_phrases,
         timeout=wake_timeout_secs,
@@ -841,8 +778,8 @@ async def main():
             SkillFilterProcessor(
                 context,
                 skill_registry,
-                k=env_int("BABEL_SKILL_FILTER_K", 15),
-                debug=env_bool("BABEL_SKILL_FILTER_DEBUG", False),
+                k=cfg.skills.filter_k,
+                debug=cfg.skills.filter_debug,
             )
         )
     pipeline_stages += [

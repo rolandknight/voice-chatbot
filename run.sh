@@ -4,39 +4,18 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$PROJECT_DIR"
 
-# Make .env values visible to bash too. app.py reads .env via python-dotenv,
-# but the feature gates below (Woosh auto-start, anything else that reads
-# $BABEL_*) run in bash and need their own copy.
-#
-# Plain `source .env` is not safe here: python-dotenv allows unquoted
-# spaces in values (e.g. WAKE_PHRASES=hey babel,hey babe), but bash's
-# `source` parses with shell rules and treats those as command boundaries.
-# So we read .env line-by-line and only export well-formed KEY=VALUE
-# pairs ourselves — no eval, no shell expansion of the value.
-if [[ -f .env ]]; then
-  while IFS='=' read -r _env_key _env_value || [[ -n "$_env_key" ]]; do
-    # Skip blanks and comment lines.
-    [[ -z "${_env_key// /}" || "$_env_key" =~ ^[[:space:]]*# ]] && continue
-    # Strip optional surrounding whitespace from the key.
-    _env_key="${_env_key#"${_env_key%%[![:space:]]*}"}"
-    _env_key="${_env_key%"${_env_key##*[![:space:]]}"}"
-    # Only accept POSIX-style identifiers — skip anything weird.
-    [[ "$_env_key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
-    # Strip a single layer of surrounding quotes if the user added them.
-    if [[ "$_env_value" == \"*\" || "$_env_value" == \'*\' ]]; then
-      _env_value="${_env_value:1:${#_env_value}-2}"
-    fi
-    export "$_env_key=$_env_value"
-  done < .env
-  unset _env_key _env_value
-fi
-
 if [[ ! -d .venv ]]; then
   echo "Missing .venv. Run ./install_mac.sh first."
   exit 1
 fi
 
 source .venv/bin/activate
+
+# Pull the handful of config values that this script (sidecar launch
+# gating) needs, as shell-quoted exports. config/shell.py validates
+# config.yaml + .env via Pydantic, so a malformed config fails here
+# rather than mid-app boot.
+eval "$(python -m config.shell)"
 
 if [[ "${1:-}" == "--devices" ]]; then
   python scripts/list_audio_devices.py
@@ -223,7 +202,6 @@ if [[ "$need_sao" == "1" || "$need_sao" == "true" || "$need_sao" == "yes" ]]; th
 fi
 
 export PYTHONUNBUFFERED=1
-# Keep the babel LLM resident across idle stretches so wake-phrase turns
-# don't pay a cold model load (~1-3s). Default ollama TTL is 5 minutes.
-export OLLAMA_KEEP_ALIVE="${OLLAMA_KEEP_ALIVE:--1}"
+# OLLAMA_KEEP_ALIVE is exported by `python -m config.shell` above (sourced
+# from llm.ollama_keep_alive in config.yaml; default "-1" pins the model).
 python app.py

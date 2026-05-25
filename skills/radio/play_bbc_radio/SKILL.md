@@ -6,7 +6,7 @@ description: >
   station (Radio 1, 1Xtra, Radio 2, Radio 3, Radio 4, Radio 4 Extra, Radio 5
   Live, Radio 5 Sports Extra, 6 Music, Asian Network, or the World Service).
 category: radio
-enabled_when: BABEL_RADIO_ENABLED
+enabled_when: skills.radio.enabled
 requires: [radio_player]
 parameters:
   station:

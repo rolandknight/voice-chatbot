@@ -28,6 +28,15 @@ from typing import Optional
 
 from loguru import logger
 
+# When run standalone (`python scripts/spotify.py …`), the project root isn't
+# on sys.path, so `from config import …` would fail. app.py-driven imports
+# add it already; this guards the standalone case.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+from config import get as get_config  # noqa: E402
+
 from radio import _mpv_jabra_device
 
 
@@ -251,15 +260,14 @@ class SpotifyPlayer:
     def _client(self):
         if self._sp is not None:
             return self._sp
-        client_id = os.getenv("SPOTIPY_CLIENT_ID", "").strip()
+        spotify_cfg = get_config().skills.spotify
+        client_id = spotify_cfg.client_id.get_secret_value().strip()
         if not client_id:
             raise RuntimeError(
-                "SPOTIPY_CLIENT_ID is not set. Create a Spotify app at "
+                "SPOTIPY_CLIENT_ID is not set in .env. Create a Spotify app at "
                 "https://developer.spotify.com/dashboard."
             )
-        redirect_uri = os.getenv(
-            "SPOTIPY_REDIRECT_URI", "http://127.0.0.1:8765/callback"
-        )
+        redirect_uri = spotify_cfg.redirect_uri
         spotipy = _spotipy_module()
         from spotipy.oauth2 import SpotifyPKCE
         _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -712,13 +720,12 @@ class SpotifyPlayer:
 def _bootstrap() -> int:
     spotipy = _spotipy_module()
     from spotipy.oauth2 import SpotifyPKCE
-    client_id = os.getenv("SPOTIPY_CLIENT_ID", "").strip()
+    spotify_cfg = get_config().skills.spotify
+    client_id = spotify_cfg.client_id.get_secret_value().strip()
     if not client_id:
         print("ERROR: set SPOTIPY_CLIENT_ID in .env first.", file=sys.stderr)
         return 1
-    redirect_uri = os.getenv(
-        "SPOTIPY_REDIRECT_URI", "http://127.0.0.1:8765/callback"
-    )
+    redirect_uri = spotify_cfg.redirect_uri
     _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     auth = SpotifyPKCE(
         client_id=client_id,
@@ -802,12 +809,6 @@ if __name__ == "__main__":
         "binding 'Babel' from a Spotify client.",
     )
     args = parser.parse_args()
-
-    try:
-        from dotenv import load_dotenv
-        load_dotenv()
-    except ImportError:
-        pass
 
     if args.bootstrap:
         sys.exit(_bootstrap())

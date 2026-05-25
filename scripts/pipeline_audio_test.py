@@ -8,10 +8,11 @@ import sys
 import time
 
 import audioop
-from dotenv import load_dotenv
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), os.pardir))
 sys.path.insert(0, os.path.dirname(__file__))
-from _audio_devices import resolve_from_env  # noqa: E402
+from config import load as load_config  # noqa: E402
+from _audio_devices import resolve_from_config  # noqa: E402
 
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
@@ -62,12 +63,12 @@ class AudioInspector(FrameProcessor):
 
 
 async def main():
-    load_dotenv(override=True)
-    in_idx, out_idx, in_name, out_name = resolve_from_env()
+    cfg = load_config()
+    in_idx, out_idx, in_name, out_name = resolve_from_config(cfg.audio)
     print(f"Input  : [{in_idx}] {in_name}")
     print(f"Output : [{out_idx}] {out_name}")
 
-    sr = int(os.getenv("AUDIO_IN_SAMPLE_RATE", "16000"))
+    sr = cfg.audio.in_sample_rate
     transport = LocalAudioTransport(
         LocalAudioTransportParams(
             audio_in_enabled=True,

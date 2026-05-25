@@ -6,15 +6,16 @@ import time
 import audioop
 
 import pyaudio
-from dotenv import load_dotenv
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), os.pardir))
 sys.path.insert(0, os.path.dirname(__file__))
-from _audio_devices import resolve_from_env  # noqa: E402
+from config import load as load_config  # noqa: E402
+from _audio_devices import resolve_from_config  # noqa: E402
 
-load_dotenv()
-sr = int(os.getenv("AUDIO_IN_SAMPLE_RATE", "16000"))
+cfg = load_config()
+sr = cfg.audio.in_sample_rate
 
-in_idx, _out_idx, in_name, _out_name = resolve_from_env()
+in_idx, _out_idx, in_name, _out_name = resolve_from_config(cfg.audio)
 
 pa = pyaudio.PyAudio()
 print(f"Opening input device [{in_idx}] {in_name} @ {sr} Hz")

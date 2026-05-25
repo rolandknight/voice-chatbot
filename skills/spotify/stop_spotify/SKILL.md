@@ -4,7 +4,7 @@ description: >
   Stop Spotify playback completely (not just pause). Use when the user says
   'stop Spotify', 'stop the music', 'kill Spotify', 'turn the music off'.
 category: spotify
-enabled_when: BABEL_SPOTIFY_ENABLED
+enabled_when: skills.spotify.enabled
 requires: [spotify_player]
 parameters: {}
 triggers:

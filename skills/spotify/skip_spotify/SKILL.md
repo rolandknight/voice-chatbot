@@ -4,7 +4,7 @@ description: >
   Skip to the next or previous track on Spotify. Use for 'skip', 'next track',
   'next song', 'previous track', 'go back', 'last song again'.
 category: spotify
-enabled_when: BABEL_SPOTIFY_ENABLED
+enabled_when: skills.spotify.enabled
 requires: [spotify_player]
 parameters:
   direction:

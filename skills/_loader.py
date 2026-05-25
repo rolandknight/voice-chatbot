@@ -13,7 +13,6 @@ filter that the SkillFilterProcessor uses to swap the LLM's tool set.
 from __future__ import annotations
 
 import importlib.util
-import os
 import re
 import sys
 from dataclasses import dataclass, field
@@ -28,6 +27,7 @@ from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.services.llm_service import FunctionCallParams, LLMService
 
+from config import Config
 from skills._context import SkillContext
 
 SKILLS_ROOT = Path(__file__).parent
@@ -190,12 +190,23 @@ def _import_handler(skill_dir: Path):
     return module.handle
 
 
-def load_skills(ctx: SkillContext, root: Path = SKILLS_ROOT) -> SkillRegistry:
+def _resolve_dotted(root: Any, dotted: str) -> Any:
+    node = root
+    for part in dotted.split("."):
+        node = getattr(node, part)
+    return node
+
+
+def load_skills(ctx: SkillContext, cfg: Config, root: Path = SKILLS_ROOT) -> SkillRegistry:
     """Walk SKILLS_ROOT, parse each SKILL.md, return a populated registry.
 
-    Skills are skipped (with an INFO log) when:
-    - their `enabled_when` env var is set and resolves false ("0", "false", ""), or
+    Skills are skipped (with a debug log) when:
+    - their `enabled_when` dotted config path resolves to a falsy value, or
     - any name in their `requires` list is not satisfied by `ctx.has(name)`.
+
+    `enabled_when` is a dotted attribute path into `cfg` (the Config tree),
+    e.g. `skills.radio.enabled`. Skills with no `enabled_when` field load
+    unconditionally.
     """
     registry = SkillRegistry()
     for skill_md in sorted(root.glob("*/*/SKILL.md")):
@@ -207,14 +218,21 @@ def load_skills(ctx: SkillContext, root: Path = SKILLS_ROOT) -> SkillRegistry:
             logger.warning(f"Skipping {skill_md}: {e}")
             continue
 
-        gate_env = front.get("enabled_when")
-        if gate_env:
-            raw = os.getenv(gate_env)
-            # Unset env defaults to enabled (matches the old env_bool(..., True)
-            # semantics in app.py). To explicitly disable a skill, set the var
-            # to "0"/"false"/"no"/"off".
-            if raw is not None and not _env_truthy(raw):
-                logger.debug(f"Skill {front.get('name')}: gated off by {gate_env}={raw!r}")
+        gate_path = front.get("enabled_when")
+        if gate_path:
+            try:
+                gate_value = _resolve_dotted(cfg, gate_path)
+            except AttributeError:
+                logger.warning(
+                    f"Skill {front.get('name')}: enabled_when={gate_path!r} "
+                    f"does not resolve in config; skipping"
+                )
+                continue
+            if not gate_value:
+                logger.debug(
+                    f"Skill {front.get('name')}: gated off by "
+                    f"{gate_path}={gate_value!r}"
+                )
                 continue
 
         requires = front.get("requires") or []
@@ -262,7 +280,3 @@ def _bind_ctx(handle, ctx: SkillContext):
     async def _bound(params: FunctionCallParams):
         return await handle(params, ctx)
     return _bound
-
-
-def _env_truthy(value: str) -> bool:
-    return value.strip().lower() in ("1", "true", "yes", "on")

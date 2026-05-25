@@ -9,6 +9,19 @@ chmod +x install_mac.sh run.sh
 ./install_mac.sh
 ```
 
+## Configuration
+
+Non-secret config lives in `config.yaml` at the repo root — edit values
+there. Secrets (API keys) live in `.env` (gitignored); see `.env.example`
+for the keys that are read. Config is validated at startup via Pydantic, so
+a malformed `config.yaml` fails loudly before any audio device is opened.
+
+Dump the resolved tree:
+
+```bash
+.venv/bin/python -m config.loader --print-effective
+```
+
 ## Pick the Jabra device
 
 Plug in the Jabra, set it as the macOS default input/output, then:
@@ -17,11 +30,12 @@ Plug in the Jabra, set it as the macOS default input/output, then:
 ./run.sh --devices
 ```
 
-If needed, edit `.env`:
+If needed, set the indexes in `config.yaml` under `audio:`:
 
-```bash
-INPUT_DEVICE_INDEX=3
-OUTPUT_DEVICE_INDEX=3
+```yaml
+audio:
+  input_device_index: 3
+  output_device_index: 3
 ```
 
 ## Run
@@ -62,8 +76,8 @@ original single-voice setup. To add cloned voices on a Mac Studio:
    terminal). The server speaks the OpenAI `/v1/audio/speech` protocol
    on `http://127.0.0.1:8004` and Chatterbox-Turbo uses MPS / Metal
    acceleration on Apple Silicon.
-5. Run `./run.sh` and either set `DEFAULT_PERSONA=marvin` in `.env` for
-   boot or say *"switch to marvin"* mid-session.
+5. Run `./run.sh` and either set `tts.default_persona: marvin` in
+   `config.yaml` for boot or say *"switch to marvin"* mid-session.
 
 Routing rules in `personas.yaml` are fully declarative:
 
@@ -89,24 +103,25 @@ sees ~15 relevant tools no matter how many are registered. Skills shipped today:
 
 - `get_current_time`, `get_current_date` — local clock.
 - `set_timer(minutes, label?)` — counts down and speaks the alert out loud.
-- `get_weather(location)` — Open-Meteo, no API key. Honors `BABEL_DEFAULT_LOCATION`.
-- `web_search(query)` — DuckDuckGo by default. Switch with `BABEL_SEARCH_PROVIDER=brave|tavily` plus the matching API key.
-- `play_bbc_radio(station)` / `stop_bbc_radio` — live BBC streams via `mpv`, targeted at the Jabra CoreAudio device. See "BBC radio" below. Disable with `BABEL_RADIO_ENABLED=0`.
-- `play_bbc_show(show, date?, query?)` — on-demand BBC Sounds programmes and podcast episodes. See "BBC shows" below. Disable with `BABEL_SHOWS_ENABLED=0`.
-- `play_spotify(query, kind?)` / `play_spotify_playlist(name)` / `pause_spotify` / `resume_spotify` / `skip_spotify(direction?)` / `whats_playing` / `stop_spotify` — Spotify Premium playback via a local `librespot` Connect endpoint. See "Spotify" below. Disable with `BABEL_SPOTIFY_ENABLED=0`.
+- `get_weather(location)` — Open-Meteo, no API key. Honors `skills.weather.default_location` in `config.yaml`.
+- `web_search(query)` — DuckDuckGo by default. Switch with `skills.web_search.provider: brave` or `tavily` plus the matching API key in `.env`.
+- `play_bbc_radio(station)` / `stop_bbc_radio` — live BBC streams via `mpv`, targeted at the Jabra CoreAudio device. See "BBC radio" below. Disable with `skills.radio.enabled: false`.
+- `play_bbc_show(show, date?, query?)` — on-demand BBC Sounds programmes and podcast episodes. See "BBC shows" below. Disable with `skills.shows.enabled: false`.
+- `play_spotify(query, kind?)` / `play_spotify_playlist(name)` / `pause_spotify` / `resume_spotify` / `skip_spotify(direction?)` / `whats_playing` / `stop_spotify` — Spotify Premium playback via a local `librespot` Connect endpoint. See "Spotify" below. Disable with `skills.spotify.enabled: false`.
 
 Default model is `gemma4:26b` (MoE, ~4B active per token, ~17 GB resident).
 It scores 85.5% on the τ²-bench agentic tool-use benchmark (vs Gemma 3 27B's
 6.6%) and fires tools without emitting chain-of-thought tokens first, so
 warm TTFB stays under ~0.4s on M-series. On lower-RAM machines (<24 GB
-free), fall back to `OLLAMA_MODEL=gemma4:latest` (E4B, ~9.6 GB) — same
-warm TTFB on direct queries but can spike to several seconds on indirect
-phrasings because E4B uses thinking mode. Disable the whole skill feature
-with `BABEL_SKILLS_ENABLED=0`.
+free), fall back to `llm.ollama_model: gemma4:latest` (E4B, ~9.6 GB) —
+same warm TTFB on direct queries but can spike to several seconds on
+indirect phrasings because E4B uses thinking mode. Disable the whole skill
+feature with `skills.enabled: false`.
 
-`run.sh` exports `OLLAMA_KEEP_ALIVE=-1` so the model stays resident across
-idle stretches; `app.py` pre-warms it at startup so the first wake-phrase
-turn doesn't pay the cold-load cost (~9s for 26B, ~6s for E4B).
+`config.yaml` sets `llm.ollama_keep_alive: "-1"` so the model stays
+resident across idle stretches; `app.py` pre-warms it at startup so the
+first wake-phrase turn doesn't pay the cold-load cost (~9s for 26B,
+~6s for E4B).
 
 ## BBC radio
 
@@ -155,7 +170,7 @@ Anything not in the curated list falls through to a BBC Sounds search plus
 on shift periodically, and shows without a published podcast feed (some
 talk strands, most music programmes) may fail to resolve. `yt-dlp` is
 installed by `install_mac.sh`. Disable the whole feature with
-`BABEL_SHOWS_ENABLED=0`.
+`skills.shows.enabled: false`.
 
 ## Spotify
 
@@ -198,7 +213,7 @@ same CoreAudio device would garble the output.
 1. **Create a Spotify app** at
    [https://developer.spotify.com/dashboard](https://developer.spotify.com/dashboard).
    In the app's settings, add a Redirect URI matching
-   `SPOTIPY_REDIRECT_URI` in your `.env` exactly. The default is
+   `skills.spotify.redirect_uri` in `config.yaml` exactly. The default is
    `http://127.0.0.1:8765/callback`. Loopback URIs require PKCE — which
    is what `spotipy` uses here, so no client secret is strictly required.
 
@@ -206,11 +221,11 @@ same CoreAudio device would garble the output.
    `spotipy` library convention):
 
    ```bash
-   BABEL_SPOTIFY_ENABLED=1
    SPOTIPY_CLIENT_ID=<your client id>
    SPOTIPY_CLIENT_SECRET=   # optional with PKCE; leave blank
-   SPOTIPY_REDIRECT_URI=http://127.0.0.1:8765/callback
    ```
+
+   Leave `skills.spotify.enabled: true` in `config.yaml` (the default).
 
 3. **One-time OAuth** — opens Safari for consent, caches the token at
    `~/.config/babel/spotify_token.json` (refresh tokens don't expire
@@ -233,8 +248,8 @@ same CoreAudio device would garble the output.
    Ctrl+C the sink once binding is confirmed.
 
 5. Run `./run.sh`. Spotify tools register only when both
-   `BABEL_SPOTIFY_ENABLED=1` and `SPOTIPY_CLIENT_ID` are set, so the LLM
-   won't see them otherwise.
+   `skills.spotify.enabled: true` and `SPOTIPY_CLIENT_ID` are set, so the
+   LLM won't see them otherwise.
 
 ### Troubleshooting
 
@@ -254,37 +269,37 @@ same CoreAudio device would garble the output.
 
 ## Latency optimization knobs
 
-Local LLM choices. Measured warm TTFB on M4 Max with the babel system
-prompt + tool schemas, after the startup pre-warm:
+Local LLM choices (set in `config.yaml` under `llm.ollama_model`).
+Measured warm TTFB on M4 Max with the babel system prompt + tool schemas,
+after the startup pre-warm:
 
-```bash
-# Default. Gemma 4 26B MoE, ~4B active per token. ~17 GB resident.
-# Warm TTFB ~0.37s. Best tool-call reliability; no chain-of-thought tax.
-OLLAMA_MODEL=gemma4:26b
+```yaml
+llm:
+  # Default. Gemma 4 26B MoE, ~4B active per token. ~17 GB resident.
+  # Warm TTFB ~0.37s. Best tool-call reliability; no chain-of-thought tax.
+  ollama_model: gemma4:26b
 
-# Gemma 4 E4B edge. ~9.6 GB. Warm TTFB ~0.35s on direct queries BUT can
-# spike to 4+s on indirect phrasings because it emits reasoning tokens
-# before firing the tool. Pick if RAM is tight.
-OLLAMA_MODEL=gemma4:latest
+  # Gemma 4 E4B edge. ~9.6 GB. Warm TTFB ~0.35s on direct queries BUT can
+  # spike to 4+s on indirect phrasings because it emits reasoning tokens
+  # before firing the tool. Pick if RAM is tight.
+  # ollama_model: gemma4:latest
 
-# Smallest fallback for low-RAM machines.
-OLLAMA_MODEL=qwen2.5:3b
+  # Smallest fallback for low-RAM machines.
+  # ollama_model: qwen2.5:3b
 ```
 
-Whisper trade-offs:
+Whisper trade-offs (`stt.whisper_model`):
 
-```bash
-# Fastest:
-WHISPER_MLX_MODEL=mlx-community/whisper-tiny.en-mlx
-# Better accuracy:
-WHISPER_MLX_MODEL=mlx-community/whisper-small-mlx
+```yaml
+stt:
+  # Fastest:
+  whisper_model: mlx-community/whisper-tiny.en-mlx
+  # Better accuracy:
+  # whisper_model: mlx-community/whisper-small-mlx
 ```
 
-After first model download:
-
-```bash
-HF_HUB_OFFLINE=1
-```
+After first model download, set `huggingface.hub_offline: true` to skip
+the HF metadata check.
 
 ## Common fixes
 
@@ -304,7 +319,7 @@ Run:
 ./run.sh --devices
 ```
 
-Then set `INPUT_DEVICE_INDEX` and `OUTPUT_DEVICE_INDEX` in `.env`.
+Then set `audio.input_device_index` and `audio.output_device_index` in `config.yaml`.
 
 ### Feedback / echo
 

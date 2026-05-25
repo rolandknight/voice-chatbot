@@ -58,9 +58,44 @@ def _pick_device() -> str:
 _state: dict = {"model": None, "config": None, "device": _pick_device()}
 
 
+def _patch_apg_project_for_mps() -> None:
+    """stable-audio-tools 0.0.20 calls `.double()` (float64) inside
+    DiffusionTransformer.apg_project for numerical stability, but MPS
+    refuses float64 outright — `PYTORCH_ENABLE_MPS_FALLBACK` doesn't
+    cover dtype casts, so the call raises and aborts generation.
+
+    Patch it to run the projection in the input dtype (float32) on MPS.
+    Generation quality at 100 steps is indistinguishable from float64 for
+    short SFX clips.
+    """
+    if _state["device"] != "mps":
+        return
+    from stable_audio_tools.models import dit as _dit
+
+    def apg_project_mps(self, v0, v1, padding_mask=None):
+        dtype = v0.dtype
+        if padding_mask is not None:
+            mask = padding_mask.unsqueeze(1).to(dtype)
+            v0_masked = v0 * mask
+            v1_masked = v1 * mask
+            v1_norm = v1_masked.norm(dim=[-1, -2], keepdim=True).clamp(min=1e-8)
+            v1_normalized = v1_masked / v1_norm
+            v0_parallel = (v0_masked * v1_normalized).sum(dim=[-1, -2], keepdim=True) * v1_normalized
+            v0_orthogonal = (v0 - (v0 * v1_normalized).sum(dim=[-1, -2], keepdim=True) * v1_normalized) * mask
+        else:
+            v1n = torch.nn.functional.normalize(v1, dim=[-1, -2])
+            v0_parallel = (v0 * v1n).sum(dim=[-1, -2], keepdim=True) * v1n
+            v0_orthogonal = v0 - v0_parallel
+        return v0_parallel.to(dtype), v0_orthogonal.to(dtype)
+
+    _dit.DiffusionTransformer.apg_project = apg_project_mps
+    logger.info("Patched stable_audio_tools apg_project (MPS-safe float32 path).")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info(f"Loading {MODEL_NAME} on device={_state['device']} ...")
+    _patch_apg_project_for_mps()
     model, model_config = get_pretrained_model(MODEL_NAME)
     model = model.to(_state["device"])
     _state["model"] = model

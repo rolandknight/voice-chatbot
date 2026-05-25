@@ -6,7 +6,7 @@ description: >
   workout playlist', 'play the Jazz Classics playlist'. For arbitrary
   songs/artists/albums use play_spotify.
 category: spotify
-enabled_when: BABEL_SPOTIFY_ENABLED
+enabled_when: skills.spotify.enabled
 requires: [spotify_player]
 parameters:
   name:

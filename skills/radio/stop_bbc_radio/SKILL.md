@@ -6,7 +6,7 @@ description: >
   the show', 'turn it off', 'silence', 'kill the radio', or anything similar
   while audio is playing.
 category: radio
-enabled_when: BABEL_RADIO_ENABLED
+enabled_when: skills.radio.enabled
 requires: [radio_player]
 parameters: {}
 triggers:

@@ -5,7 +5,7 @@ description: >
   'pause Spotify', 'hold on', 'wait' while music is playing. For stopping
   BBC radio use stop_bbc_radio.
 category: spotify
-enabled_when: BABEL_SPOTIFY_ENABLED
+enabled_when: skills.spotify.enabled
 requires: [spotify_player]
 parameters: {}
 triggers:

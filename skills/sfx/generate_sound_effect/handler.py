@@ -68,10 +68,12 @@ def _build_sfx_body(backend: str, description: str) -> dict:
             },
         }
     if backend == "stable_audio":
+        # 40 steps × 3s lands around ~30s on MPS (vs ~110s at 100×5s).
+        # Quality difference for short comedic SFX is hard to notice.
         return {
             "prompt": description,
-            "seconds": 5.0,
-            "steps": 100,
+            "seconds": 3.0,
+            "steps": 40,
             "cfg_scale": 7.0,
             "seed": random.randint(0, 2**32 - 1),
         }

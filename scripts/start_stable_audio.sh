@@ -67,9 +67,11 @@ if [[ ! -d "$SERVER_DIR/.venv" ]]; then
   #     ("dtype size changed" ABI mismatch).
   #   pytorch-lightning — imported by stable_audio_tools.models.lora
   #     but not declared as a runtime dep of the PyPI package.
+  #   soundfile — torchaudio 2.x ships no audio backends by default;
+  #     soundfile wraps libsndfile so torchaudio.save can write FLAC.
   uv pip install --python "$SERVER_DIR/.venv/bin/python" \
     stable-audio-tools fastapi uvicorn \
-    'pywavelets>=1.6' pytorch-lightning
+    'pywavelets>=1.6' pytorch-lightning soundfile
   touch "$DEPS_MARKER"
 fi
 

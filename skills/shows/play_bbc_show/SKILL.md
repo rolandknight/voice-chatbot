@@ -7,7 +7,7 @@ description: >
   Radio 4, 6 Music, World Service, etc.) use play_bbc_radio instead — this
   tool is only for on-demand programmes and podcast episodes.
 category: shows
-enabled_when: BABEL_SHOWS_ENABLED
+enabled_when: skills.shows.enabled
 requires: [radio_player]
 parameters:
   show:
