@@ -70,12 +70,15 @@ from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.audio.mixers.base_audio_mixer import BaseAudioMixer
 from pipecat.frames.frames import (
     BotStoppedSpeakingFrame,
+    CancelFrame,
     Frame,
     FunctionCallResultFrame,
     FunctionCallsStartedFrame,
+    InterruptionFrame,
     LLMContextFrame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
+    LLMTextFrame,
     MixerControlFrame,
     TranscriptionFrame,
     TTSSpeakFrame,
@@ -233,12 +236,34 @@ class InFlightTracker(FrameProcessor):
 
     Plumbing this processor into the pipeline after the LLM stage lets the
     idle handlers consult is_in_flight() and defer teardown while work is
+    pending.
+
+    The Start/End ControlFrames and the FunctionCallResultFrame DataFrame are
+    subject to the route_to_{ollama,claude} FunctionFilters that sandwich
+    each branch of the ParallelPipeline — so when ask_claude flips
+    backend_state mid-tool-call, the matching End/Result frames from the
+    now-inactive branch get silently dropped, leaving the counters stuck.
+    BotStoppedSpeakingFrame (SystemFrame, always passes filters) is used as
+    a guaranteed reset: once TTS has finished playback, there is nothing
     pending."""
 
     def __init__(self):
         super().__init__()
         self._fn_calls_outstanding = 0
         self._llm_responding = False
+        # Per-response counters reset on LLMFullResponseStartFrame. Used to
+        # detect "silent" responses where the LLM emitted neither text nor
+        # a dispatchable tool call — the common cause is a tool-call JSON
+        # truncated by max_tokens, which pipecat drops via json.loads in
+        # base_llm.py without surfacing anything user-visible. The
+        # _interrupted flag suppresses the warning when the response was
+        # cancelled by the user starting to speak — base_llm.py's finally
+        # block pushes LLMFullResponseEndFrame on interruption too, so we
+        # need the extra signal to tell a real silent failure from a
+        # legitimate barge-in.
+        self._text_frames_this_response = 0
+        self._tool_calls_this_response = 0
+        self._interrupted_this_response = False
 
     def is_in_flight(self) -> bool:
         return self._fn_calls_outstanding > 0 or self._llm_responding
@@ -248,11 +273,39 @@ class InFlightTracker(FrameProcessor):
         if isinstance(frame, FunctionCallsStartedFrame):
             n = len(frame.function_calls) if frame.function_calls else 0
             self._fn_calls_outstanding += n
+            self._tool_calls_this_response += n
         elif isinstance(frame, FunctionCallResultFrame):
             self._fn_calls_outstanding = max(0, self._fn_calls_outstanding - 1)
         elif isinstance(frame, LLMFullResponseStartFrame):
             self._llm_responding = True
+            self._text_frames_this_response = 0
+            self._tool_calls_this_response = 0
+            self._interrupted_this_response = False
         elif isinstance(frame, LLMFullResponseEndFrame):
+            self._llm_responding = False
+            if (
+                not self._interrupted_this_response
+                and self._text_frames_this_response == 0
+                and self._tool_calls_this_response == 0
+            ):
+                logger.warning(
+                    "LLM response ended with no text and no tool call — "
+                    "likely a truncated tool-call JSON (check max_tokens) or "
+                    "a malformed completion. Babel will be silent this turn."
+                )
+        elif isinstance(frame, LLMTextFrame) and frame.text:
+            self._text_frames_this_response += 1
+        elif isinstance(frame, (InterruptionFrame, CancelFrame)):
+            self._interrupted_this_response = True
+        elif isinstance(frame, UserStartedSpeakingFrame):
+            # Belt-and-braces: some pipecat versions broadcast interruption
+            # via UserStartedSpeakingFrame directly rather than a dedicated
+            # InterruptionFrame. Either way, an in-flight LLM response is
+            # about to be cancelled — don't warn about its empty output.
+            if self._llm_responding:
+                self._interrupted_this_response = True
+        elif isinstance(frame, BotStoppedSpeakingFrame):
+            self._fn_calls_outstanding = 0
             self._llm_responding = False
         await self.push_frame(frame, direction)
 
@@ -427,15 +480,19 @@ async def main():
             "sentence."
         )
 
-    # max_tokens bumped from 80 to 200 because tool-call turns need room
-    # for the tool call payload plus a one- or two-sentence spoken response
-    # after the tool result comes back.
+    # max_tokens bumped to 512: 200 was tight enough that tool-call JSON
+    # for skills with non-trivial arg shapes (or the LLM second-guessing
+    # itself before emitting the call) could truncate mid-stream. A
+    # truncated tool call fails json.loads downstream and is dropped
+    # silently — Babel produces no audible response and the wake session
+    # times out. 512 leaves headroom for the JSON plus the brief spoken
+    # reply after the tool result returns.
     llm = OLLamaLLMService(
         base_url=ollama_base_url,
         settings=OLLamaLLMService.Settings(
             model=ollama_model,
             temperature=0.2,
-            max_tokens=200,
+            max_tokens=512,
             system_instruction=babel_system_prompt,
         ),
     )
@@ -893,19 +950,26 @@ async def main():
         # /api/generate with no prompt and keep_alive=-1 is the canonical
         # "pin this model in memory" call — doesn't generate, just refreshes
         # the TTL. 240s leaves a 60s margin under Ollama's 5-minute default.
+        # Logged at INFO so missing heartbeats are obvious when chasing
+        # cold-load TTFB spikes (a 30s+ first-token delay almost always
+        # means the model was evicted between turns).
         import httpx
         async with httpx.AsyncClient(timeout=10.0) as client:
             while True:
                 try:
                     await asyncio.sleep(240)
-                    await client.post(
+                    response = await client.post(
                         f"{ollama_host}/api/generate",
                         json={"model": ollama_model, "keep_alive": -1},
+                    )
+                    response.raise_for_status()
+                    logger.info(
+                        f"Ollama keepalive: {ollama_model} pinned (keep_alive=-1)"
                     )
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
-                    logger.debug(f"Ollama keepalive heartbeat skipped: {e}")
+                    logger.warning(f"Ollama keepalive heartbeat failed: {e}")
 
     keepalive_task = asyncio.create_task(_ollama_keepalive_heartbeat())
 

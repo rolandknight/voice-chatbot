@@ -277,6 +277,22 @@ def load_skills(ctx: SkillContext, cfg: Config, root: Path = SKILLS_ROOT) -> Ski
 
 
 def _bind_ctx(handle, ctx: SkillContext):
+    # The LLM service hands this wrapped callable to its function-call
+    # dispatcher, so it's the single chokepoint every skill invocation
+    # passes through. Logging here surfaces "did the LLM actually call a
+    # tool, with what args, and did the handler return cleanly?" — useful
+    # when diagnosing turns where Babel goes silent: a missing invoke log
+    # means the LLM's tool-call JSON never reached dispatch (likely
+    # truncated by max_tokens and dropped by json.loads in pipecat).
     async def _bound(params: FunctionCallParams):
-        return await handle(params, ctx)
+        logger.info(
+            f"Tool invoke -> {params.function_name}({dict(params.arguments)!r})"
+        )
+        try:
+            result = await handle(params, ctx)
+        except Exception:
+            logger.exception(f"Tool error  <- {params.function_name} raised")
+            raise
+        logger.info(f"Tool return <- {params.function_name}")
+        return result
     return _bound
