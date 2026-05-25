@@ -1,0 +1,131 @@
+# Voice chatbot config. Edit values here; secrets (API keys) live in .env.
+# Run `python -m config.loader --print-effective` to dump the resolved tree.
+
+audio:
+  in_sample_rate: 16000
+  out_sample_rate: 24000
+  # PyAudio device selection. Prefer NAMES (case-insensitive substring
+  # match) over indexes — PyAudio indexes aren't stable across runs on
+  # macOS. Leave both null to use the macOS default I/O.
+  # Run `./run.sh --devices` to list available devices.
+  input_device_name: Jabra
+  input_device_index: null
+  output_device_name: Jabra
+  output_device_index: null
+
+stt:
+  # Fast options: mlx-community/whisper-tiny.en-mlx (default — observed
+  # TTFB ~0.28s on Apple Silicon), mlx-community/whisper-base.en-mlx
+  # (slower, better accuracy), mlx-community/whisper-small-mlx (better
+  # still). All download on first use into the HF cache.
+  whisper_model: mlx-community/whisper-tiny.en-mlx
+  language: en
+  # Measured p99 from speech end -> final transcript. 0.5s is safe for
+  # whisper-tiny.en-mlx on Apple Silicon.
+  ttfs_p99_latency_secs: 0.5
+
+llm:
+  ollama_base_url: http://localhost:11434/v1
+  # Warm TTFB on M4 Max with babel system prompt + tool schemas:
+  #   gemma4:26b     (~17 GB) DEFAULT — best tool-call reliability (~85% tau2-bench)
+  #   gemma4:latest  (~9.6 GB) — smaller, can spike on indirect phrasings
+  #   qwen2.5:3b     (~2 GB)  — smallest fallback
+  ollama_model: gemma4:26b
+  # "-1" pins the model resident; default Ollama TTL is 5 minutes.
+  ollama_keep_alive: "-1"
+
+wake:
+  # openwakeword models loaded into a single Model instance. Each entry
+  # binds one model to a persona — when the model fires, that persona is
+  # activated. `model` is a path to an .onnx file (relative to project
+  # root) or a bundled openwakeword key like 'hey_jarvis_v0.1' (auto-
+  # downloaded on first run). See scripts/wakeword/ for training custom
+  # models like hey_babel.
+  models:
+    - model: models/wakeword/hey_babel.onnx
+      persona: babel
+    - model: hey_jarvis_v0.1
+      persona: marvin
+  # Per-chunk probability threshold. Raise if mis-fires happen on
+  # similar-sounding speech; lower if real wakes get missed.
+  threshold: 0.5
+  # Minimum gap between consecutive fires of the same model.
+  cooldown_secs: 1.5
+  # Silero VAD min loudness (EBU R128). USB speakerphones like the Jabra
+  # often clamp to ~0, so the 0.6 Silero default gates everything out.
+  vad_min_volume: 0.0
+  vad_stop_secs: 0.2
+
+conversation:
+  # Single session timeout. After this many seconds of silence:
+  #   - LLM context history is wiped
+  #   - wake strategy drops to IDLE (a wake word is required again)
+  #   - ask_claude's session-scoped backend flip reverts to ollama
+  idle_timeout_secs: 10.0
+
+claude:
+  # Cloud backend, reachable mid-session via the ask_claude skill
+  # ("ask Claude…", "switch to Claude"). Disabled until ANTHROPIC_API_KEY
+  # is in .env. The switch lasts only for the active wake session and
+  # resets on sleep.
+  model: claude-sonnet-4-6
+  max_tokens: 1024
+  web_search_enabled: true
+  web_search_max_uses: 3
+  web_fetch_enabled: true
+  web_fetch_max_uses: 2
+
+tts:
+  # Relative paths resolve against the project root.
+  personas_config: personas.yaml
+  # Override routing.default in personas.yaml. Null = use the file's default.
+  default_persona: null
+  chatterbox:
+    base_url: http://127.0.0.1:8004/v1
+    model: chatterbox-turbo
+
+skills:
+  enabled: true
+  # Top-K skill tools fed to the LLM per turn (after substring scoring).
+  filter_k: 15
+  filter_debug: false
+  radio:
+    enabled: true
+  shows:
+    enabled: true
+  spotify:
+    # Spotify is also gated on SPOTIPY_CLIENT_ID being present in .env.
+    enabled: true
+    redirect_uri: http://127.0.0.1:8765/callback
+  sfx:
+    # Sound-effect generation. Each backend is multi-GB on disk and
+    # triggers a long first-run install via run.sh — flip to false to
+    # skip entirely.
+    #
+    # Backend 1: Woosh (Sony text-to-foley). Strong on foley/ambience/animals.
+    woosh_enabled: true
+    woosh_url: http://127.0.0.1:8005
+    woosh_port: 8005
+    # Backend 2: Stable Audio Open 1.0 — gated model. Accept terms at
+    # https://huggingface.co/stabilityai/stable-audio-open-1.0 and set
+    # HF_TOKEN in .env. Better for bodily/comedic sounds Woosh handles poorly.
+    sao_enabled: true
+    sao_url: http://127.0.0.1:8006
+    sao_port: 8006
+    # When both backends are enabled:
+    #   auto         keyword route: farts/burps/laughs -> SAO, rest -> Woosh
+    #   woosh        always Woosh
+    #   stable_audio always SAO
+    backend: auto
+  web_search:
+    # duckduckgo: no key. brave/tavily: set the matching key in .env.
+    provider: duckduckgo
+  weather:
+    # Lookup precedence: this value -> macOS CoreLocation -> IP geolocation
+    # -> ask user. e.g. "Brooklyn, NY".
+    default_location: ""
+
+huggingface:
+  # Skip the HF metadata check on every model load. Safe to set true once
+  # all your models have been downloaded (faster startup + works offline).
+  hub_offline: true

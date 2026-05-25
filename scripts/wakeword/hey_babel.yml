@@ -1,0 +1,70 @@
+# Training config for the "hey babel" openWakeWord model.
+# Tuned for an RTX 2060 (6 GB VRAM). See README.md for the knobs that matter.
+
+model_name: "hey_babel"
+
+target_phrase:
+  - "hey babel"
+
+# Phonetic neighbours that the current regex-on-Whisper path frequently
+# misfires on. Listing them here pushes the model to discriminate against them.
+custom_negative_phrases:
+  - "hey babe"
+  - "hey baby"
+  - "hey bagel"
+  - "hey bay bell"
+  - "hey ball"
+  - "able"
+  - "babble"
+  - "label"
+  - "table"
+  - "cable"
+
+# 50k positives expands positive-class variety after the v1–v3 loss-balance
+# work landed FP/hour close to target with recall still under it. Typical
+# openWakeWord tunings see 5–10 pts of recall lift from this bump with little
+# FP movement. Adds 1–2 h of wall-clock vs the 20k baseline.
+n_samples: 50000
+n_samples_val: 2000
+
+# Piper TTS runs on the GPU; keep batch small so it co-exists with augmentation.
+tts_batch_size: 16
+augmentation_batch_size: 8
+
+# Paths are all relative to /work inside the container. The entrypoint stages
+# datasets into /work/data/... before invoking train.py.
+piper_sample_generator_path: "/opt/piper-sample-generator"
+output_dir: "/work/output/hey_babel"
+
+rir_paths:
+  # openwakeword's train.py does a flat os.scandir() on each entry — no glob, no
+  # recursion — and the MIT RIRs dataset puts its wavs in a 16khz/ subdir
+  # alongside .gitattributes/README.md. Point directly at the wav dir.
+  - "/work/data/mit_rirs/16khz"
+
+background_paths:
+  - "/work/data/background_clips"
+
+background_paths_duplication_rate:
+  - 1
+
+false_positive_validation_data_path: "/work/data/validation_set_features.npy"
+
+augmentation_rounds: 2
+
+feature_data_files:
+  "ACAV100M_sample": "/work/data/openwakeword_features_ACAV100M_2000_hrs_16bit.npy"
+
+# Training batch (1024 + 50 + 50 = 1124) is feature-vector-shaped, not raw
+# audio, so it fits in 6 GB. Drop ACAV100M_sample to 512 if OOM.
+batch_n_per_class:
+  "ACAV100M_sample": 1024
+  "adversarial_negative": 50
+  "positive": 100
+
+model_type: "dnn"
+layer_size: 64
+
+steps: 50000
+max_negative_weight: 1000
+target_false_positives_per_hour: 0.5

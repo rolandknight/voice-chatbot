@@ -1,0 +1,47 @@
+# Training config for the "hey marvin" microWakeWord model. Used to route the
+# device to the Claude backend (see docs/web-rtc.md, "Backend selection").
+#
+# Diffs from hey_babel.yml are limited to the phrase + the negative list.
+
+model_name: "hey_marvin"
+
+target_phrase:
+  - "hey marvin"
+
+custom_negative_phrases:
+  - "hey martin"
+  - "hey marlin"
+  - "hey marvel"
+  - "hey margin"
+  - "hey marin"
+  - "hey starving"
+  - "marvelous"
+  - "marvel"
+  - "carving"
+  - "starving"
+
+n_samples: 20000
+n_samples_val: 2000
+
+sample_rate: 16000
+window_size_ms: 30
+window_stride_ms: 20
+n_mels: 40
+preemphasis: 0.97
+
+model_type: "streaming_ds_cnn"
+tile_size: 3
+quantize: true
+quantize_dtype: "int8"
+
+rir_paths:
+  - "/work/data/mit_rirs"
+background_paths:
+  - "/work/data/background_clips"
+augmentation_rounds: 1
+positive_dir: "/work/data/positives/hey_marvin"
+
+batch_size: 128
+epochs: 30
+learning_rate: 0.001
+target_false_positives_per_hour: 0.5

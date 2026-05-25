@@ -1,0 +1,16 @@
+.venv/
+.env
+__pycache__/
+*.pyc
+
+# Chatterbox-TTS-Server clone, its venv, and any model caches it pulls.
+vendor/
+
+# Reference clips for cloned personas. Keep these out of git unless you
+# explicitly want to commit them (small files only — and check licensing).
+voices/*.wav
+voices/*.mp3
+voices/*.flac
+
+scripts/microwakeword/_work/
+scripts/wakeword/_work/
