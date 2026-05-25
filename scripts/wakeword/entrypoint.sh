@@ -95,8 +95,8 @@ def dump(ds, prefix, limit):
 fma = load_dataset("rudraml/fma", "small", split="train", trust_remote_code=True)
 dump(fma, "fma", 2000)
 
-# AudioSet balanced shard
-aset = load_dataset("agkphysics/AudioSet", split="balanced", streaming=True, trust_remote_code=True)
+# AudioSet balanced shard ("balanced" is a config, not a split)
+aset = load_dataset("agkphysics/AudioSet", "balanced", split="train", streaming=True, trust_remote_code=True)
 dump(aset, "audioset", 2000)
 PY
 else
@@ -112,6 +112,24 @@ log "Generating synthetic positive/negative clips"
 python -m openwakeword.train \
     --training_config "$CONFIG" \
     --generate_clips
+
+# openwakeword 0.6.0 wraps all four feature-extraction calls under a single
+# guard that only checks for positive_features_train.npy. If a previous run
+# crashed partway, that file may exist while the other three don't — the next
+# run then skips augmentation entirely and the train phase blows up looking
+# for a missing .npy. Detect that state and clear the partial set so augment
+# regenerates everything.
+FEATURE_DIR="$OUT_DIR/hey_babel"
+EXPECTED_FEATURES=(positive_features_train.npy negative_features_train.npy
+                   positive_features_test.npy  negative_features_test.npy)
+present=0
+for f in "${EXPECTED_FEATURES[@]}"; do
+    [ -f "$FEATURE_DIR/$f" ] && present=$((present+1))
+done
+if [ "$present" -gt 0 ] && [ "$present" -lt "${#EXPECTED_FEATURES[@]}" ]; then
+    log "Detected partial feature set ($present/${#EXPECTED_FEATURES[@]}); clearing so augment re-runs"
+    for f in "${EXPECTED_FEATURES[@]}"; do rm -f "$FEATURE_DIR/$f"; done
+fi
 
 log "Augmenting clips (RIR + background mix + feature extraction)"
 python -m openwakeword.train \

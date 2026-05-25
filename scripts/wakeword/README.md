@@ -77,6 +77,22 @@ print('silence:', m.predict(silence))
 **"nvidia container runtime not detected"** — install `nvidia-container-toolkit`
 and restart docker (`sudo systemctl restart docker`).
 
+**Training falls back to CPU even though `nvidia-smi` works** — symptom is a
+`CUDA driver initialization failed` warning from torch and a `cuInit` that
+returns error 3 (`CUDA_ERROR_NOT_INITIALIZED`). NVML works (so `nvidia-smi`
+sees the GPU) but the CUDA driver API can't open a context because the
+`/dev/nvidia-caps/*` device nodes are root-only and CUDA can't fix them up.
+The setuid helper that does that fix-up is `nvidia-modprobe`, which Pop!_OS's
+`nvidia-driver-580-open` metapackage does not pull in. Install it:
+
+```sh
+sudo apt-get install -y nvidia-modprobe
+python3 -c 'import ctypes; print(ctypes.CDLL("libcuda.so.1").cuInit(0))'   # 0 == fixed
+```
+
+No reboot needed; the next CUDA call invokes the new binary and the cap
+nodes get created with the right permissions.
+
 **Out of memory during `--generate_clips`** — the Piper TTS step is the
 memory peak. Halve `tts_batch_size` in `hey_babel.yml` and re-run; the script
 resumes from the partial generation.

@@ -12,4 +12,5 @@ voices/*.wav
 voices/*.mp3
 voices/*.flac
 
+scripts/microwakeword/_work/
 scripts/wakeword/_work/

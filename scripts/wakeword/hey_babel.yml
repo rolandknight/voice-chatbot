@@ -35,7 +35,10 @@ piper_sample_generator_path: "/opt/piper-sample-generator"
 output_dir: "/work/output/hey_babel"
 
 rir_paths:
-  - "/work/data/mit_rirs"
+  # openwakeword's train.py does a flat os.scandir() on each entry — no glob, no
+  # recursion — and the MIT RIRs dataset puts its wavs in a 16khz/ subdir
+  # alongside .gitattributes/README.md. Point directly at the wav dir.
+  - "/work/data/mit_rirs/16khz"
 
 background_paths:
   - "/work/data/background_clips"
