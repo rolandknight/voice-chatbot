@@ -1,4 +1,4 @@
-.PHONY: help run run-webrtc-smoke run-webrtc-smoke-lan run-server run-server-lan
+.PHONY: help run run-webrtc-smoke run-webrtc-smoke-lan run-server run-server-lan run-server-local run-server-lan-local
 
 CERT_DIR := .certs
 CERT := $(CERT_DIR)/cert.pem
@@ -6,11 +6,13 @@ KEY := $(CERT_DIR)/key.pem
 
 help:
 	@echo "Targets:"
-	@echo "  run                    - legacy local-audio backend (./run.sh)"
-	@echo "  run-server             - WebRTC backend on http://localhost:8080"
-	@echo "  run-server-lan         - WebRTC backend on HTTPS, reachable from LAN"
-	@echo "  run-webrtc-smoke       - smoke loopback on http://localhost:8080"
-	@echo "  run-webrtc-smoke-lan   - smoke loopback on HTTPS, reachable from LAN"
+	@echo "  run                       - legacy local-audio backend (./run.sh)"
+	@echo "  run-server                - WebRTC backend on http://localhost:8080"
+	@echo "  run-server-lan            - WebRTC backend on HTTPS, reachable from LAN"
+	@echo "  run-server-local          - WebRTC + always-on Jabra (LocalAudio, wake mode)"
+	@echo "  run-server-lan-local      - run-server-lan + always-on Jabra"
+	@echo "  run-webrtc-smoke          - smoke loopback on http://localhost:8080"
+	@echo "  run-webrtc-smoke-lan      - smoke loopback on HTTPS, reachable from LAN"
 
 run:
 	./run.sh
@@ -34,6 +36,16 @@ run-server-lan: $(CERT)
 	@echo "If the OS firewall prompts, allow incoming connections for Python."
 	@echo ""
 	WEBRTC_SSL_CERT=$(CERT) WEBRTC_SSL_KEY=$(KEY) .venv/bin/python server.py
+
+run-server-local:
+	.venv/bin/python server.py --local-audio
+
+run-server-lan-local: $(CERT)
+	@echo ""
+	@echo "First visit from another machine: accept the self-signed cert warning."
+	@echo "If the OS firewall prompts, allow incoming connections for Python."
+	@echo ""
+	WEBRTC_SSL_CERT=$(CERT) WEBRTC_SSL_KEY=$(KEY) .venv/bin/python server.py --local-audio
 
 $(CERT):
 	@mkdir -p $(CERT_DIR)

@@ -19,7 +19,8 @@ Each peer connection gets its own backend_state and persona_state dicts, so
 two clients on the same server can route to different backends/personas
 without interfering.
 
-Skills, wake words, idle reset, ducking, SFX — not yet wired (later steps).
+Skills, wake words, idle reset, ducking, and SFX are all wired in — see
+build_pipeline_task and build_local_pipeline_task.
 
 Run:
     .venv/bin/python server.py            # http://localhost:8080
@@ -49,9 +50,17 @@ from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
+    CancelFrame,
     Frame,
+    FunctionCallResultFrame,
+    FunctionCallsStartedFrame,
+    InterruptionFrame,
+    LLMContextFrame,
+    LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
+    LLMTextFrame,
     TranscriptionFrame,
+    TTSSpeakFrame,
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
 )
@@ -71,7 +80,9 @@ from pipecat.services.kokoro.tts import KokoroTTSService
 from pipecat.services.ollama.llm import OLLamaLLMService
 from pipecat.services.tts_service import TextAggregationMode
 from pipecat.services.whisper.stt import WhisperSTTServiceMLX
+from pipecat.audio.mixers.base_audio_mixer import BaseAudioMixer
 from pipecat.transports.base_transport import TransportParams
+from pipecat.transports.local.audio import LocalAudioTransport, LocalAudioTransportParams
 from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
 from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 from pipecat.turns.user_start.vad_user_turn_start_strategy import (
@@ -91,6 +102,21 @@ from persona_router import (
 )
 from wakeword_detector import WakeWordDetector, WakeWordUserTurnStartStrategy
 
+# `scripts/` is where resolve_from_config (Jabra device lookup) lives, and the
+# radio/spotify packages provide the media players the skills wire up to.
+import sys
+HERE_BOOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE_BOOT / "scripts"))
+from _audio_devices import resolve_from_config  # noqa: E402
+from radio import RadioPlayer  # noqa: E402
+from spotify import SpotifyPlayer  # noqa: E402
+from skills import (  # noqa: E402
+    BotSpeakingTracker,
+    SkillContext,
+    SkillFilterProcessor,
+    load_skills,
+)
+
 
 VALID_MODES = {"push", "wake"}
 
@@ -99,6 +125,162 @@ HERE = Path(__file__).resolve().parent
 WEB_DIR = HERE / "web"
 
 logging.basicConfig(level=logging.INFO)
+
+
+class _KeepaliveMixer(BaseAudioMixer):
+    """No-op mixer that keeps BaseOutputTransport emitting silence between
+    utterances. USB speakerphones like the Jabra Speak2 40 power their amp
+    down on an idle stream, eating the first ~500ms of the next utterance.
+    Continuous silence keeps the device awake. Verbatim from app.py."""
+
+    async def start(self, sample_rate: int) -> None:
+        pass
+
+    async def stop(self) -> None:
+        pass
+
+    async def process_frame(self, frame) -> None:
+        pass
+
+    async def mix(self, audio: bytes) -> bytes:
+        return audio
+
+
+# ─────────────────────────── skill plumbing helpers ──────────────────────
+
+
+class ClaudeCueEmitter(FrameProcessor):
+    """Emits a short TTS cue ("Claude here.") immediately before forwarding the
+    LLMContextFrame downstream. Placed in the Claude branch of the
+    ParallelPipeline so the cue only plays when Claude actually answers."""
+
+    def __init__(self, cue_text: str = "Claude here.") -> None:
+        super().__init__()
+        self._cue_text = cue_text
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
+        await super().process_frame(frame, direction)
+        if isinstance(frame, LLMContextFrame) and direction == FrameDirection.DOWNSTREAM:
+            await self.push_frame(TTSSpeakFrame(text=self._cue_text), direction)
+        await self.push_frame(frame, direction)
+
+
+class MediaDuckWatcher(FrameProcessor):
+    """Ducks each registered media player when the user starts speaking and
+    un-ducks after the bot finishes its reply. Verbatim from app.py.
+
+    Players are duck-compatible if they expose is_playing() plus either
+    pause/resume (RadioPlayer) or duck_pause/duck_resume (SpotifyPlayer)."""
+
+    SAFETY_RESUME_SECS = 8.0
+
+    def __init__(self, players: list[Any]) -> None:
+        super().__init__()
+        self._players = [p for p in players if p is not None]
+        self._safety_task: asyncio.Task | None = None
+
+    @staticmethod
+    def _duck(player: Any) -> None:
+        if hasattr(player, "duck_pause"):
+            player.duck_pause()
+        else:
+            player.pause()
+
+    @staticmethod
+    def _unduck(player: Any) -> None:
+        if hasattr(player, "duck_resume"):
+            player.duck_resume()
+        else:
+            player.resume()
+
+    def _cancel_safety(self) -> None:
+        if self._safety_task and not self._safety_task.done():
+            self._safety_task.cancel()
+        self._safety_task = None
+
+    async def _safety_resume(self) -> None:
+        try:
+            await asyncio.sleep(self.SAFETY_RESUME_SECS)
+            for player in self._players:
+                if player.is_playing():
+                    logger.info(
+                        f"Duck safety timer fired; resuming {type(player).__name__}."
+                    )
+                    self._unduck(player)
+        except asyncio.CancelledError:
+            pass
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
+        await super().process_frame(frame, direction)
+        if isinstance(frame, UserStartedSpeakingFrame):
+            any_playing = False
+            for player in self._players:
+                if player.is_playing():
+                    self._duck(player)
+                    any_playing = True
+            if any_playing:
+                self._cancel_safety()
+                self._safety_task = asyncio.create_task(self._safety_resume())
+        elif isinstance(frame, BotStoppedSpeakingFrame):
+            self._cancel_safety()
+            for player in self._players:
+                if player.is_playing():
+                    self._unduck(player)
+        await self.push_frame(frame, direction)
+
+
+class InFlightTracker(FrameProcessor):
+    """Tracks whether a tool call or LLM response is mid-flight so the wake
+    strategy and idle reset can defer teardown across the quiet window
+    between an ask_claude dispatch and Claude's first streamed token.
+    Verbatim from app.py — see the long comment there for the why."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._fn_calls_outstanding = 0
+        self._llm_responding = False
+        self._text_frames_this_response = 0
+        self._tool_calls_this_response = 0
+        self._interrupted_this_response = False
+
+    def is_in_flight(self) -> bool:
+        return self._fn_calls_outstanding > 0 or self._llm_responding
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
+        await super().process_frame(frame, direction)
+        if isinstance(frame, FunctionCallsStartedFrame):
+            n = len(frame.function_calls) if frame.function_calls else 0
+            self._fn_calls_outstanding += n
+            self._tool_calls_this_response += n
+        elif isinstance(frame, FunctionCallResultFrame):
+            self._fn_calls_outstanding = max(0, self._fn_calls_outstanding - 1)
+        elif isinstance(frame, LLMFullResponseStartFrame):
+            self._llm_responding = True
+            self._text_frames_this_response = 0
+            self._tool_calls_this_response = 0
+            self._interrupted_this_response = False
+        elif isinstance(frame, LLMFullResponseEndFrame):
+            self._llm_responding = False
+            if (
+                not self._interrupted_this_response
+                and self._text_frames_this_response == 0
+                and self._tool_calls_this_response == 0
+            ):
+                logger.warning(
+                    "LLM response ended with no text and no tool call — "
+                    "likely a truncated tool-call JSON (check max_tokens)."
+                )
+        elif isinstance(frame, LLMTextFrame) and frame.text:
+            self._text_frames_this_response += 1
+        elif isinstance(frame, (InterruptionFrame, CancelFrame)):
+            self._interrupted_this_response = True
+        elif isinstance(frame, UserStartedSpeakingFrame):
+            if self._llm_responding:
+                self._interrupted_this_response = True
+        elif isinstance(frame, BotStoppedSpeakingFrame):
+            self._fn_calls_outstanding = 0
+            self._llm_responding = False
+        await self.push_frame(frame, direction)
 
 
 # ─────────────────────────── control channel ─────────────────────────────
@@ -227,34 +409,46 @@ class ControlChannel:
 
 
 class PipelineStateEmitter(FrameProcessor):
-    """Pushes pipeline lifecycle frames out to the control channel as
-    `state` messages so the client UI can render listening/thinking/speaking
-    without inferring from audio levels. Also logs transcripts so a missing
-    transcription is obvious in stderr."""
+    """Pushes pipeline lifecycle frames out to the control channel as `state`
+    messages so the client UI can render listening/thinking/speaking without
+    inferring from audio levels. When `control` is None (local-audio
+    pipeline), still logs transcripts and state — they just don't go over
+    a DataChannel."""
 
-    def __init__(self, control: ControlChannel) -> None:
+    def __init__(
+        self,
+        control: ControlChannel | None,
+        persona_state: PersonaState,
+        *,
+        label: str = "ctrl",
+    ) -> None:
         super().__init__()
         self._control = control
+        self._persona_state = persona_state
+        self._label = label
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         await super().process_frame(frame, direction)
         if isinstance(frame, UserStartedSpeakingFrame):
-            self._control.send_state("listening")
+            self._emit_state("listening")
         elif isinstance(frame, UserStoppedSpeakingFrame):
-            logger.info("user stopped speaking")
+            logger.info(f"[{self._label}] user stopped speaking")
         elif isinstance(frame, LLMFullResponseStartFrame):
-            self._control.send_state("thinking")
+            self._emit_state("thinking")
         elif isinstance(frame, BotStartedSpeakingFrame):
-            self._control.send_state(
-                "speaking", persona=self._control._persona_state.current
-            )
+            self._emit_state("speaking", persona=self._persona_state.current)
         elif isinstance(frame, BotStoppedSpeakingFrame):
-            self._control.send_state("idle")
+            self._emit_state("idle")
         elif isinstance(frame, TranscriptionFrame) and direction == FrameDirection.DOWNSTREAM:
             if frame.text:
-                logger.info(f"heard: {frame.text.strip()!r}")
-                self._control.send_transcript(frame.text, final=True)
+                logger.info(f"[{self._label}] heard: {frame.text.strip()!r}")
+                if self._control is not None:
+                    self._control.send_transcript(frame.text, final=True)
         await self.push_frame(frame, direction)
+
+    def _emit_state(self, state: str, **extra: Any) -> None:
+        if self._control is not None:
+            self._control.send_state(state, **extra)
 
 
 # ─────────────────────────── persona / TTS plumbing ───────────────────────
@@ -390,27 +584,69 @@ def _build_llm_dispatch(
     ollama_llm: FrameProcessor,
     claude_llm: FrameProcessor | None,
     backend_state: dict[str, str],
+    *,
+    claude_cue: FrameProcessor | None = None,
 ) -> FrameProcessor:
     """Single backend -> the service directly. Both -> ParallelPipeline
     sandwiched by top+bottom FunctionFilters per branch (see app.py:760-790
-    for why bottom filters are also required)."""
+    for why bottom filters are also required). When `claude_cue` is provided
+    it sits inside the Claude branch and speaks a short cue ("Claude here.")
+    before forwarding the LLMContextFrame downstream."""
     if claude_llm is None:
         return ollama_llm
+    claude_branch: list[Any] = [
+        FunctionFilter(filter=_backend_filter(backend_state, "claude"), direction=None),
+    ]
+    if claude_cue is not None:
+        claude_branch.append(claude_cue)
+    claude_branch.extend([
+        claude_llm,
+        FunctionFilter(filter=_backend_filter(backend_state, "claude"), direction=None),
+    ])
     return ParallelPipeline(
         [
             FunctionFilter(filter=_backend_filter(backend_state, "ollama"), direction=None),
             ollama_llm,
             FunctionFilter(filter=_backend_filter(backend_state, "ollama"), direction=None),
         ],
-        [
-            FunctionFilter(filter=_backend_filter(backend_state, "claude"), direction=None),
-            claude_llm,
-            FunctionFilter(filter=_backend_filter(backend_state, "claude"), direction=None),
-        ],
+        claude_branch,
     )
 
 
 # ─────────────────────────── pipeline factory ────────────────────────────
+
+
+def _build_skill_runtime(
+    runtime: dict[str, Any],
+    *,
+    persona_state: PersonaState,
+    backend_state: dict[str, str],
+):
+    """Build the per-connection skill plumbing: SkillContext + SkillRegistry +
+    optional BotSpeakingTracker. Singleton resources (RadioPlayer,
+    SpotifyPlayer) come from the shared runtime dict so two clients sharing
+    a Mac don't fight over its speaker.
+
+    Returns (registry, sfx_tracker). Either may be None when skills are
+    disabled or when the loader filters everything out."""
+    if not runtime.get("skills_enabled"):
+        return None, None
+    sfx_tracker = BotSpeakingTracker() if runtime["sfx_enabled"] else None
+    ctx = SkillContext(
+        radio_player=runtime["radio_player"],
+        spotify_player=runtime["spotify_player"],
+        sfx_tracker=sfx_tracker,
+        sfx_backends=runtime["sfx_backends"],
+        sfx_backend_override=runtime["sfx_backend_override"],
+        persona_config=runtime["persona_config"],
+        persona_state=persona_state,
+        # ask_claude flips this mid-session; only meaningful when Claude is
+        # wired up. Passing None when claude is off keeps that skill out of
+        # the registry via its `requires: [backend_state]` gate.
+        backend_state=backend_state if runtime["claude_enabled"] else None,
+    )
+    registry = load_skills(ctx, runtime["cfg"])
+    return registry, sfx_tracker
 
 
 def build_pipeline_task(
@@ -467,8 +703,23 @@ def build_pipeline_task(
             ),
         )
 
-    llm_dispatch = _build_llm_dispatch(ollama_llm, claude_llm, backend_state)
+    # Skills + sfx_tracker are per-connection: their handlers close over this
+    # connection's persona_state/backend_state, so two clients won't switch
+    # each other's persona or backend by issuing voice commands.
+    skill_registry, sfx_tracker = _build_skill_runtime(
+        runtime, persona_state=persona_state, backend_state=backend_state
+    )
+
+    claude_cue = ClaudeCueEmitter() if claude_llm is not None else None
+    llm_dispatch = _build_llm_dispatch(
+        ollama_llm, claude_llm, backend_state, claude_cue=claude_cue
+    )
     tts_dispatch = _build_tts_dispatch(runtime["persona_tts"], persona_state)
+
+    # in_flight defers wake teardown across the quiet ask_claude dispatch
+    # window. Constructed up front so wake_strategy can read its is_busy hook.
+    in_flight = InFlightTracker()
+    wake_strategy: WakeWordUserTurnStartStrategy | None = None
 
     # Wake mode: prepend a WakeWordDetector and gate turn-start on wake firing.
     # Push mode: turn-start is VAD-driven, mic is effectively push-to-talk.
@@ -492,13 +743,15 @@ def build_pipeline_task(
             )
             wake_strategy = WakeWordUserTurnStartStrategy(
                 timeout=runtime["wake_session_timeout"],
+                is_busy=in_flight.is_in_flight,
             )
 
             @wake_strategy.event_handler("on_wake_word_detected")
             async def _on_wake(_s, model_key, score):
                 logger.info(
                     f"Wake fired: {model_key!r} score={score:.3f} "
-                    f"persona={persona_state.current!r}"
+                    f"persona={persona_state.current!r} "
+                    f"backend={backend_state['backend']!r}"
                 )
                 control.send_wake(
                     "awake",
@@ -509,10 +762,20 @@ def build_pipeline_task(
 
             @wake_strategy.event_handler("on_wake_word_timeout")
             async def _on_sleep(_s):
-                logger.info("Wake session timed out — back to asleep")
+                # Session-scoped backend revert: ask_claude flips backend_state
+                # to "claude" for the duration of the wake session, sleep ends
+                # it. Mirrors app.py's wake-timeout handler.
+                if backend_state["backend"] != "ollama":
+                    logger.info(
+                        f"Wake timeout — reverting backend "
+                        f"{backend_state['backend']!r} -> 'ollama'"
+                    )
+                    backend_state["backend"] = "ollama"
+                    control._send({"type": "backend", "name": "ollama"})
+                else:
+                    logger.info("Wake session timed out — back to asleep")
                 control.send_wake("asleep")
 
-            # Wake strategy MUST come before VAD strategy so it gates start.
             turn_start_strategies = [wake_strategy, VADUserTurnStartStrategy()]
 
     context = LLMContext(messages=[])
@@ -529,6 +792,16 @@ def build_pipeline_task(
         ),
     )
 
+    # Skills bind their tool handlers to this connection's Ollama service and
+    # seed the always-available tool set on the context. The
+    # SkillFilterProcessor below swaps in the per-turn top-K relevant tools.
+    if skill_registry is not None:
+        skill_registry.register(ollama_llm, context)
+        logger.info(
+            f"[webrtc {connection.pc_id}] skills loaded: "
+            f"{sorted(skill_registry.skills_by_name)}"
+        )
+
     stages: list[Any] = [transport.input()]
     if wake_detector is not None:
         # WakeWordDetector runs ahead of STT so the wake event reaches the
@@ -538,23 +811,274 @@ def build_pipeline_task(
         stt,
         PersonaCommandRouter(runtime["persona_config"], persona_state),
         aggregator.user(),
+    ]
+    if skill_registry is not None:
+        stages.append(
+            SkillFilterProcessor(
+                context,
+                skill_registry,
+                k=runtime["skills_filter_k"],
+                debug=runtime["skills_filter_debug"],
+            )
+        )
+    stages += [
         llm_dispatch,
+        in_flight,
         PersonaTagRouter(runtime["persona_config"], persona_state),
         tts_dispatch,
         transport.output(),
-        PipelineStateEmitter(control),
+    ]
+    duckable = [
+        p for p in (runtime["radio_player"], runtime["spotify_player"]) if p is not None
+    ]
+    if duckable:
+        # MediaDuckWatcher must sit downstream of transport.output() so it
+        # sees the canonical Bot/User speaking lifecycle frames.
+        stages.append(MediaDuckWatcher(duckable))
+    if sfx_tracker is not None:
+        stages.append(sfx_tracker)
+    stages += [
+        PipelineStateEmitter(control, persona_state, label="webrtc"),
         aggregator.assistant(),
     ]
     pipeline = Pipeline(stages)
 
-    return PipelineTask(
+    task = PipelineTask(
         pipeline,
         params=PipelineParams(
             allow_interruptions=True,
             enable_metrics=True,
             enable_usage_metrics=True,
         ),
+        idle_timeout_secs=runtime["idle_timeout_secs"],
+        cancel_on_idle_timeout=False,
     )
+
+    @task.event_handler("on_idle_timeout")
+    async def _on_conversation_idle(_task):
+        # Defer reset while a tool call / Claude response is mid-flight — the
+        # idle handler re-fires on the next interval, so a silent return is
+        # enough. Mirrors app.py.
+        if in_flight.is_in_flight():
+            return
+        if not context.messages:
+            return
+        logger.info(
+            f"[webrtc {connection.pc_id}] conversation idle for "
+            f"{runtime['idle_timeout_secs']:.0f}s — resetting context."
+        )
+        context.set_messages([])
+        if wake_strategy is not None:
+            wake_strategy.force_idle()
+
+    return task
+
+
+def build_local_pipeline_task(
+    *,
+    runtime: dict[str, Any],
+    input_device_index: int | None,
+    output_device_index: int | None,
+) -> PipelineTask:
+    """LocalAudioTransport-backed pipeline running wake mode against the
+    default (or configured) input/output device — typically the Jabra
+    speakerphone the original `app.py` targets.
+
+    This is its own task with its own backend_state/persona_state, so a
+    browser client switching backend on its own connection doesn't affect
+    the local Jabra channel, and vice versa.
+    """
+    backend_state: dict[str, str] = {"backend": runtime["default_backend"]}
+    persona_state = PersonaState(
+        current=runtime["default_persona"], pinned=runtime["default_persona"]
+    )
+
+    transport = LocalAudioTransport(
+        LocalAudioTransportParams(
+            audio_in_enabled=True,
+            audio_out_enabled=True,
+            audio_in_sample_rate=runtime["in_sr"],
+            audio_out_sample_rate=runtime["out_sr"],
+            audio_in_channels=1,
+            audio_out_channels=1,
+            audio_in_passthrough=True,
+            audio_out_mixer=_KeepaliveMixer(),
+            input_device_index=input_device_index,
+            output_device_index=output_device_index,
+        )
+    )
+
+    stt = WhisperSTTServiceMLX(
+        settings=WhisperSTTServiceMLX.Settings(
+            model=runtime["whisper_model"],
+            language=runtime["language"],
+            no_speech_prob=0.55,
+            temperature=0.0,
+        ),
+        ttfs_p99_latency=runtime["ttfs_p99_latency"],
+    )
+
+    ollama_llm = OLLamaLLMService(
+        base_url=runtime["ollama_base_url"],
+        settings=OLLamaLLMService.Settings(
+            model=runtime["ollama_model"],
+            temperature=0.2,
+            max_tokens=512,
+            system_instruction=runtime["ollama_system_prompt"],
+        ),
+    )
+    claude_llm: FrameProcessor | None = None
+    if runtime["claude_enabled"]:
+        claude_llm = AnthropicLLMService(
+            api_key=runtime["anthropic_api_key"],
+            settings=AnthropicLLMService.Settings(
+                model=runtime["claude_model"],
+                max_tokens=runtime["claude_max_tokens"],
+                system_instruction=runtime["claude_system_prompt"],
+                extra={"tools": runtime["claude_tools"]} if runtime["claude_tools"] else {},
+            ),
+        )
+    skill_registry, sfx_tracker = _build_skill_runtime(
+        runtime, persona_state=persona_state, backend_state=backend_state
+    )
+
+    claude_cue = ClaudeCueEmitter() if claude_llm is not None else None
+    llm_dispatch = _build_llm_dispatch(
+        ollama_llm, claude_llm, backend_state, claude_cue=claude_cue
+    )
+    tts_dispatch = _build_tts_dispatch(runtime["persona_tts"], persona_state)
+
+    in_flight = InFlightTracker()
+    wake_strategy: WakeWordUserTurnStartStrategy | None = None
+
+    # Local audio always runs in wake mode (matches app.py behavior — wake is
+    # the only sane gating against an always-on mic feeding a continuous
+    # speech stream into the LLM).
+    wake_detector: FrameProcessor | None = None
+    turn_start_strategies: list[Any] = [VADUserTurnStartStrategy()]
+    if runtime["wake_available"]:
+        wake_detector = WakeWordDetector(
+            model_paths_or_keys=runtime["wake_models"],
+            persona_for_model=runtime["wake_persona_map"],
+            threshold=runtime["wake_threshold"],
+            cooldown_secs=runtime["wake_cooldown_secs"],
+            persona_config=runtime["persona_config"],
+            persona_state=persona_state,
+        )
+        wake_strategy = WakeWordUserTurnStartStrategy(
+            timeout=runtime["wake_session_timeout"],
+            is_busy=in_flight.is_in_flight,
+        )
+
+        @wake_strategy.event_handler("on_wake_word_detected")
+        async def _on_wake(_s, model_key, score):
+            logger.info(
+                f"[local] wake fired: {model_key!r} score={score:.3f} "
+                f"persona={persona_state.current!r} "
+                f"backend={backend_state['backend']!r}"
+            )
+
+        @wake_strategy.event_handler("on_wake_word_timeout")
+        async def _on_sleep(_s):
+            if backend_state["backend"] != "ollama":
+                logger.info(
+                    f"[local] wake timeout — reverting backend "
+                    f"{backend_state['backend']!r} -> 'ollama'"
+                )
+                backend_state["backend"] = "ollama"
+            else:
+                logger.info("[local] wake session timed out — back to asleep")
+
+        turn_start_strategies = [wake_strategy, VADUserTurnStartStrategy()]
+    else:
+        logger.warning(
+            "[local] no wake models — local pipeline will respond to every "
+            "VAD-detected utterance (effectively always-on, which is rarely "
+            "what you want for a room mic)."
+        )
+
+    context = LLMContext(messages=[])
+    aggregator = LLMContextAggregatorPair(
+        context,
+        user_params=LLMUserAggregatorParams(
+            vad_analyzer=SileroVADAnalyzer(
+                params=VADParams(
+                    min_volume=runtime["vad_min_volume"],
+                    stop_secs=runtime["vad_stop_secs"],
+                ),
+            ),
+            user_turn_strategies=UserTurnStrategies(start=turn_start_strategies),
+        ),
+    )
+
+    if skill_registry is not None:
+        skill_registry.register(ollama_llm, context)
+        logger.info(
+            f"[local] skills loaded: {sorted(skill_registry.skills_by_name)}"
+        )
+
+    stages: list[Any] = [transport.input()]
+    if wake_detector is not None:
+        stages.append(wake_detector)
+    stages += [
+        stt,
+        PersonaCommandRouter(runtime["persona_config"], persona_state),
+        aggregator.user(),
+    ]
+    if skill_registry is not None:
+        stages.append(
+            SkillFilterProcessor(
+                context,
+                skill_registry,
+                k=runtime["skills_filter_k"],
+                debug=runtime["skills_filter_debug"],
+            )
+        )
+    stages += [
+        llm_dispatch,
+        in_flight,
+        PersonaTagRouter(runtime["persona_config"], persona_state),
+        tts_dispatch,
+        transport.output(),
+    ]
+    duckable = [
+        p for p in (runtime["radio_player"], runtime["spotify_player"]) if p is not None
+    ]
+    if duckable:
+        stages.append(MediaDuckWatcher(duckable))
+    if sfx_tracker is not None:
+        stages.append(sfx_tracker)
+    stages += [
+        PipelineStateEmitter(control=None, persona_state=persona_state, label="local"),
+        aggregator.assistant(),
+    ]
+
+    task = PipelineTask(
+        Pipeline(stages),
+        params=PipelineParams(
+            allow_interruptions=True,
+            enable_metrics=True,
+            enable_usage_metrics=True,
+        ),
+        idle_timeout_secs=runtime["idle_timeout_secs"],
+        cancel_on_idle_timeout=False,
+    )
+
+    @task.event_handler("on_idle_timeout")
+    async def _on_conversation_idle(_task):
+        if in_flight.is_in_flight():
+            return
+        if not context.messages:
+            return
+        logger.info(
+            f"[local] conversation idle for "
+            f"{runtime['idle_timeout_secs']:.0f}s — resetting context."
+        )
+        context.set_messages([])
+        if wake_strategy is not None:
+            wake_strategy.force_idle()
+
+    return task
 
 
 # ─────────────────────────── runtime config ──────────────────────────────
@@ -694,6 +1218,31 @@ async def _load_runtime(cfg) -> dict[str, Any]:
     else:
         logger.warning("No usable wake models — wake mode will fall back to push.")
 
+    # Skills + media players. RadioPlayer and SpotifyPlayer drive real audio on
+    # the host Mac, so they're process singletons shared across all WebRTC
+    # connections and the optional local-audio pipeline — two clients can't
+    # meaningfully each have their own. Per-connection state (SkillContext,
+    # registry, SkillFilterProcessor) is built later inside the pipeline
+    # factories and references these singletons through the runtime dict.
+    skills_enabled = cfg.skills.enabled
+    radio_enabled = skills_enabled and cfg.skills.radio.enabled
+    spotify_enabled = (
+        skills_enabled
+        and cfg.skills.spotify.enabled
+        and bool(cfg.skills.spotify.client_id.get_secret_value().strip())
+    )
+    sfx_woosh_enabled = skills_enabled and cfg.skills.sfx.woosh_enabled
+    sfx_sao_enabled = skills_enabled and cfg.skills.sfx.sao_enabled
+    sfx_enabled = sfx_woosh_enabled or sfx_sao_enabled
+    sfx_backends: dict[str, str] = {}
+    if sfx_woosh_enabled:
+        sfx_backends["woosh"] = cfg.skills.sfx.woosh_url
+    if sfx_sao_enabled:
+        sfx_backends["stable_audio"] = cfg.skills.sfx.sao_url
+
+    radio_player = RadioPlayer() if radio_enabled else None
+    spotify_player = SpotifyPlayer() if spotify_enabled else None
+
     return {
         "in_sr": cfg.audio.in_sample_rate,
         "out_sr": cfg.audio.out_sample_rate,
@@ -728,6 +1277,18 @@ async def _load_runtime(cfg) -> dict[str, Any]:
         "wake_cooldown_secs": cfg.wake.cooldown_secs,
         "wake_session_timeout": cfg.conversation.idle_timeout_secs,
         "wake_available": bool(wake_models),
+        # Skills + media. cfg is stashed so per-connection load_skills() can
+        # evaluate each SKILL.md's `enabled_when` dotted path against it.
+        "cfg": cfg,
+        "skills_enabled": skills_enabled,
+        "sfx_enabled": sfx_enabled,
+        "sfx_backends": sfx_backends,
+        "sfx_backend_override": cfg.skills.sfx.backend if sfx_enabled else None,
+        "skills_filter_k": cfg.skills.filter_k,
+        "skills_filter_debug": cfg.skills.filter_debug,
+        "radio_player": radio_player,
+        "spotify_player": spotify_player,
+        "idle_timeout_secs": cfg.conversation.idle_timeout_secs,
     }
 
 
@@ -852,16 +1413,47 @@ async def lifespan(app: FastAPI):
         name="ollama-keepalive",
     )
 
+    # Optional always-on local-audio pipeline (Jabra etc.) — enabled by the
+    # --local-audio CLI flag, plumbed through env so it survives the
+    # uvicorn-managed app load.
+    local_task: asyncio.Task[Any] | None = None
+    if os.environ.get("VOICE_CHATBOT_LOCAL_AUDIO") == "1":
+        in_idx, out_idx, in_name, out_name = resolve_from_config(cfg.audio)
+        logger.info(
+            f"[local] audio devices: in=[{in_idx}] {in_name!r} "
+            f"out=[{out_idx}] {out_name!r}"
+        )
+        local_pipeline = build_local_pipeline_task(
+            runtime=rc,
+            input_device_index=in_idx,
+            output_device_index=out_idx,
+        )
+
+        async def _run_local() -> None:
+            runner = PipelineRunner(handle_sigint=False)
+            try:
+                await runner.run(local_pipeline)
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("[local] pipeline runner crashed")
+
+        local_task = asyncio.create_task(_run_local(), name="local-audio-pipeline")
+        logger.info("[local] pipeline started")
+
     logger.info(
-        "ready: whisper={whisper} ollama={ollama} personas={p} backends={b}",
+        "ready: whisper={whisper} ollama={ollama} personas={p} backends={b} local={l}",
         whisper=rc["whisper_model"],
         ollama=rc["ollama_model"],
         p=sorted(rc["available_personas"]),
         b=sorted(rc["available_backends"]),
+        l=local_task is not None,
     )
     try:
         yield
     finally:
+        if local_task is not None:
+            local_task.cancel()
         # Tighter shutdown: clean exits complete in <100ms, the timeouts here
         # are only for the pathological case where a task is stuck. Past ~2s
         # the user is double-Ctrl-C'ing anyway, which would SIGKILL us.
@@ -869,6 +1461,8 @@ async def lifespan(app: FastAPI):
         for t in list(_pipeline_tasks):
             t.cancel()
         pending = [heartbeat, *_pipeline_tasks]
+        if local_task is not None:
+            pending.append(local_task)
         if pending:
             try:
                 await asyncio.wait_for(
@@ -880,6 +1474,14 @@ async def lifespan(app: FastAPI):
                     f"shutdown: {len(pending)} task(s) didn't exit within "
                     "1.5s — abandoning"
                 )
+        # Stop the singleton media players last — anything still mid-tool-call
+        # at shutdown has already had its task cancelled above.
+        if rc.get("radio_player") is not None:
+            rc["radio_player"].stop()
+        if rc.get("spotify_player") is not None:
+            # api_pause=False: killing mpv silences the speaker; the API pause
+            # is what produces "rate/request limit" stdout spam from spotipy.
+            rc["spotify_player"].stop(api_pause=False)
 
 
 app = FastAPI(lifespan=lifespan)
@@ -993,7 +1595,23 @@ app.mount("/", StaticFiles(directory=str(WEB_DIR), html=True), name="static")
 
 
 def main() -> None:
+    import argparse
     import uvicorn
+
+    parser = argparse.ArgumentParser(
+        description="voice-chatbot WebRTC backend (with optional always-on local audio)."
+    )
+    parser.add_argument(
+        "--local-audio",
+        action="store_true",
+        help="Also boot a LocalAudioTransport pipeline against the configured "
+        "input/output device (typically the Jabra) in wake mode. Mirrors the "
+        "behavior of the original app.py.",
+    )
+    args = parser.parse_args()
+
+    if args.local_audio:
+        os.environ["VOICE_CHATBOT_LOCAL_AUDIO"] = "1"
 
     host = os.environ.get("WEBRTC_HOST", "0.0.0.0")
     port = int(os.environ.get("WEBRTC_PORT", "8080"))
@@ -1009,6 +1627,10 @@ def main() -> None:
         print()
         print("  NOTE: browsers only grant mic access on http://localhost.")
         print("  For LAN clients use `make run-server-lan` (HTTPS).")
+    if args.local_audio:
+        print()
+        print("  --local-audio: also running an always-on local pipeline")
+        print("  against the configured Jabra device (wake mode).")
     print()
 
     uvicorn.run(
