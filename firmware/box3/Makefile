@@ -33,22 +33,40 @@ endif
 TARGET ?= esp32s3
 
 # ------------------------------------------------------------------------------
+# Flash dump — full 16 MB read-back. See README "Back up the factory firmware".
+# ------------------------------------------------------------------------------
+DUMP_FILE ?= box3-factory-backup.bin
+DUMP_SIZE := 0x1000000
+DUMP_BAUD ?= 460800
+
+# ------------------------------------------------------------------------------
+# ESP-IDF install — clones the pinned release and runs install.sh for $(TARGET).
+# See README "Install ESP-IDF". After it completes, source the env in each new
+# shell:  . $(IDF_DIR)/export.sh
+# ------------------------------------------------------------------------------
+IDF_VERSION ?= v5.1.4
+IDF_DIR     ?= $(HOME)/esp/esp-idf
+IDF_REPO    := https://github.com/espressif/esp-idf.git
+
+# ------------------------------------------------------------------------------
 # Phony targets
 # ------------------------------------------------------------------------------
-.PHONY: help install install-stock set-target build flash monitor flash-monitor \
-        erase-flash menuconfig size clean fullclean reconfigure \
-        check-idf check-port check-models
+.PHONY: help install install-stock install-idf set-target build flash monitor \
+        flash-monitor erase-flash menuconfig size clean fullclean reconfigure \
+        dump check-idf check-port check-models
 
 help:
 	@echo "firmware/box3 — ESP32-S3-BOX-3 voice client"
 	@echo
 	@echo "First-time setup:"
-	@echo "  source ~/esp/esp-idf/export.sh"
+	@echo "  make install-idf    # one-time: clones ESP-IDF + installs toolchain"
+	@echo "  . $(IDF_DIR)/export.sh"
 	@echo "  make install        # or 'make install-stock' for the okay_nabu fallback"
 	@echo "  make set-target"
 	@echo "  make flash-monitor"
 	@echo
 	@echo "Targets:"
+	@echo "  install-idf     clone ESP-IDF $(IDF_VERSION) to \$$(IDF_DIR) and run install.sh"
 	@echo "  install         copy hey_babel/hey_marvin .tflite from scripts/microwakeword"
 	@echo "  install-stock   download a stock microWakeWord model for both slots"
 	@echo "  set-target      idf.py set-target $(TARGET)"
@@ -57,6 +75,7 @@ help:
 	@echo "  monitor         idf.py -p $(PORT) monitor"
 	@echo "  flash-monitor   idf.py -p $(PORT) flash monitor    (most common)"
 	@echo "  erase-flash     idf.py -p $(PORT) erase-flash"
+	@echo "  dump            esptool.py read_flash 0..16MB -> \$$(DUMP_FILE)"
 	@echo "  menuconfig      idf.py menuconfig"
 	@echo "  reconfigure     idf.py reconfigure"
 	@echo "  size            idf.py size"
@@ -66,6 +85,10 @@ help:
 	@echo "Variables (override on the command line):"
 	@echo "  PORT=$(PORT)"
 	@echo "  TARGET=$(TARGET)"
+	@echo "  DUMP_FILE=$(DUMP_FILE)"
+	@echo "  DUMP_BAUD=$(DUMP_BAUD)"
+	@echo "  IDF_VERSION=$(IDF_VERSION)"
+	@echo "  IDF_DIR=$(IDF_DIR)"
 
 # ------------------------------------------------------------------------------
 # Preflight
@@ -89,6 +112,23 @@ check-models:
 	    echo "  make install        # if you've trained them in scripts/microwakeword"; \
 	    echo "  make install-stock  # to use okay_nabu for both slots (transport testing)"; \
 	    exit 1; }
+
+# ------------------------------------------------------------------------------
+# ESP-IDF
+# ------------------------------------------------------------------------------
+install-idf:
+	@if [ ! -d "$(IDF_DIR)" ]; then \
+	    echo "Cloning ESP-IDF $(IDF_VERSION) into $(IDF_DIR)..."; \
+	    mkdir -p "$(dir $(IDF_DIR))"; \
+	    git clone -b $(IDF_VERSION) --recursive $(IDF_REPO) "$(IDF_DIR)"; \
+	else \
+	    echo "ESP-IDF dir already exists at $(IDF_DIR) — skipping clone."; \
+	fi
+	@echo "Running install.sh $(TARGET)..."
+	cd "$(IDF_DIR)" && ./install.sh $(TARGET)
+	@echo
+	@echo "ESP-IDF installed. Source the env in each new shell:"
+	@echo "  . $(IDF_DIR)/export.sh"
 
 # ------------------------------------------------------------------------------
 # Models
@@ -140,6 +180,17 @@ flash-monitor: check-idf check-port check-models
 
 erase-flash: check-idf check-port
 	idf.py -p $(PORT) erase-flash
+
+dump: check-idf check-port
+	@if [ -e "$(DUMP_FILE)" ]; then \
+	    echo "error: '$(DUMP_FILE)' already exists. Refusing to overwrite."; \
+	    echo "Pass DUMP_FILE=<path> or remove the existing file."; \
+	    exit 1; \
+	fi
+	@echo "Dumping 16 MB flash from $(PORT) to $(DUMP_FILE) (~3-4 min at $(DUMP_BAUD) baud)..."
+	esptool.py --chip $(TARGET) -p $(PORT) -b $(DUMP_BAUD) \
+	    read_flash 0x0 $(DUMP_SIZE) $(DUMP_FILE)
+	@echo "done — store $(DUMP_FILE) outside the repo; it's a 16 MB binary and shouldn't be committed."
 
 menuconfig: check-idf
 	idf.py menuconfig

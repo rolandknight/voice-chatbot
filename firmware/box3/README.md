@@ -8,11 +8,43 @@ Status: **scaffolding**. The code structure, audio pipeline shape, signaling pro
 
 - ESP32-S3-BOX-3 (16 MB flash, 8 MB octal PSRAM, ES7210 dual-mic ADC, ES8311 speaker DAC, 320×240 LCD)
 
-## Toolchain
+## Install ESP-IDF
 
-- ESP-IDF v5.1+ (`. ~/esp/esp-idf/export.sh`)
-- `idf.py` on PATH
-- USB-C cable for flashing + monitor (`/dev/ttyACM0` on Linux, `/dev/cu.usbmodem*` on macOS)
+Pin to v5.1.4 — the API versions this scaffold targets (esp-sr v1.4.x, esp-webrtc-solution v1.0, esp-tflite-micro v1.3.x, esp-bsp v1.4.x) line up with that release. Espressif's [Get Started guide](https://docs.espressif.com/projects/esp-idf/en/v5.1.4/esp32s3/get-started/index.html) is the canonical reference; the quick path:
+
+**Prerequisites**
+
+Linux (Debian / Ubuntu / Pop!_OS):
+
+```sh
+sudo apt install git wget flex bison gperf python3 python3-pip python3-venv \
+    cmake ninja-build ccache libffi-dev libssl-dev dfu-util libusb-1.0-0
+```
+
+macOS (Homebrew):
+
+```sh
+brew install cmake ninja dfu-util python3
+```
+
+**Clone and install**
+
+```sh
+mkdir -p ~/esp && cd ~/esp
+git clone -b v5.1.4 --recursive https://github.com/espressif/esp-idf.git
+cd esp-idf
+./install.sh esp32s3
+```
+
+**Source the environment in every new shell**
+
+```sh
+. ~/esp/esp-idf/export.sh
+```
+
+After this, both `idf.py` and `esptool.py` are on PATH (esptool ships with ESP-IDF, so the backup/restore recipes below work as soon as the env is sourced).
+
+You'll also need a USB-C cable for flashing + serial monitor (`/dev/ttyACM0` on Linux, `/dev/cu.usbmodem*` on macOS).
 
 ## Configure
 
@@ -22,6 +54,20 @@ Edit `main/config.h`:
 - `BACKEND_HOST`, `BACKEND_PORT` — the Mac running `voice-chatbot` (must be on the same LAN; default port is 8080 per `.env` `WEBRTC_PORT`)
 
 Until the backend WebRTC changes land (see `docs/web-rtc.md`, "Backend changes — deferred"), the device will boot, hear the wake phrase, and fail at the HTTP `POST /api/offer` step with no answer. The LCD will show `error: no answer`. That's the expected pre-backend state.
+
+## Back up the factory firmware (do this before your first flash)
+
+This firmware uses a custom partition table and overwrites the stock Box3 app entirely. **If you ever want to revert to the factory app, dump the current 16 MB flash to a file now** — otherwise the only recovery path is re-flashing Espressif's stock image from source (see [Restoring firmware](#restoring-firmware) below).
+
+```sh
+. ~/esp/esp-idf/export.sh
+esptool.py --chip esp32s3 -p /dev/ttyACM0 -b 460800 \
+    read_flash 0x0 0x1000000 box3-factory-backup.bin
+```
+
+macOS: swap `-p /dev/ttyACM0` for `-p /dev/cu.usbmodem*` (or whatever `ls /dev/cu.usbmodem*` shows).
+
+This captures everything — bootloader, partition table, factory app, NVS, anything Espressif preloaded — so the dump is a true full-image backup. Expect ~3–4 minutes at 460800 baud. Store `box3-factory-backup.bin` somewhere outside this repo; it's a 16 MB binary and shouldn't be committed.
 
 ## Drop in the wake-word models
 
@@ -39,6 +85,8 @@ make install-stock   # downloads okay_nabu.tflite into both slots
 See `main/models/README.md` for details.
 
 ## Build, flash, monitor
+
+> If you haven't backed up the stock firmware yet and want the option to revert, do that first — see [Back up the factory firmware](#back-up-the-factory-firmware-do-this-before-your-first-flash) above. Flashing overwrites it.
 
 ```sh
 make set-target      # one-time, picks esp32s3
@@ -125,6 +173,42 @@ You can iterate on UI, wake-word detection, and audio I/O without the backend up
 4. Confirm the wake-word detector logs the phrase + confidence, and the LCD transitions look right.
 
 Once `voice-chatbot` is patched to expose `/api/offer` (see deferred work in `docs/web-rtc.md`), point `BACKEND_HOST` at the Mac's LAN IP and try the full loop.
+
+## Restoring firmware
+
+### From your own backup
+
+If you ran the `read_flash` recipe under [Back up the factory firmware](#back-up-the-factory-firmware-do-this-before-your-first-flash) before your first flash, write it back the same way:
+
+```sh
+. ~/esp/esp-idf/export.sh
+esptool.py --chip esp32s3 -p /dev/ttyACM0 -b 460800 \
+    write_flash 0x0 box3-factory-backup.bin
+```
+
+This restores the device byte-for-byte to whatever was on it when you took the dump. No separate erase step is needed — `write_flash` from offset 0 overwrites everything, including the custom partition table this firmware installed.
+
+### From Espressif's stock image (no backup taken)
+
+There's no factory-reset button on the Box3; without a dump, the stock app has to be rebuilt from source:
+
+```sh
+git clone --recursive https://github.com/espressif/esp-box.git
+cd esp-box/examples/factory_demo
+idf.py set-target esp32s3
+idf.py -p /dev/ttyACM0 flash
+```
+
+Espressif also publishes pre-built binaries on the [esp-box releases](https://github.com/espressif/esp-box/releases) page that you can flash with `esptool.py write_flash` if you'd rather not build from source. Run `make erase-flash` first if the device is in a weird state.
+
+### Recovery from a botched flash
+
+If `idf.py flash` can't talk to the device (e.g. `Failed to connect to ESP32-S3`), force download mode manually:
+
+1. Hold the **BOOT** button.
+2. Press and release **RST** while still holding BOOT.
+3. Release BOOT.
+4. Retry the flash command.
 
 ## Layout
 

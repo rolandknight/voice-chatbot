@@ -26,18 +26,35 @@ RUN pip install \
         tflite-runtime==2.14.0
 
 # microWakeWord itself (Kevin Ahrendt). The repo is the source of truth for the
-# trainer; install from a pinned commit so re-runs are reproducible.
-ARG MWW_REF=v1.0.0
-RUN git clone --depth 1 --branch ${MWW_REF} \
-        https://github.com/kahrendt/microWakeWord.git /opt/microWakeWord \
+# trainer; pin to a specific commit on main so re-runs are reproducible. The
+# upstream repo has no semver tags — only model-checkpoint tags — so we pin
+# the SHA directly rather than --branch v1.0.0 (which doesn't exist).
+ARG MWW_REF=a70bd740d4e79ee8a8bb3db843fe862b88d5d6b0
+RUN git clone https://github.com/kahrendt/microWakeWord.git /opt/microWakeWord \
+    && git -C /opt/microWakeWord checkout ${MWW_REF} \
     && pip install -e /opt/microWakeWord
+
+# Patch upstream train.py to work under TF 2.16 / Keras 3. Upstream's
+# validate_nonstreaming() calls `.numpy()` on model.evaluate(return_dict=True)
+# results, which were EagerTensors under Keras 2 but are already numpy arrays
+# under Keras 3 — so the original code crashes after the first eval step:
+#   AttributeError: 'numpy.ndarray' object has no attribute 'numpy'
+# Strip the 4 known call sites; the surrounding arithmetic works fine on the
+# bare numpy arrays. No upstream fix exists at the pinned SHA.
+RUN sed -i \
+    -e 's/result\["fp"\]\.numpy()/result["fp"]/' \
+    -e 's/ambient_predictions\["tp"\]\.numpy()/ambient_predictions["tp"]/' \
+    -e 's/ambient_predictions\["fp"\]\.numpy()/ambient_predictions["fp"]/' \
+    -e 's/ambient_predictions\["fn"\]\.numpy()/ambient_predictions["fn"]/' \
+    /opt/microWakeWord/microwakeword/train.py \
+    && grep -c '\.numpy()' /opt/microWakeWord/microwakeword/train.py | grep -qx 0
 
 # Audio + augmentation deps. Some overlap with the openWakeWord image but
 # pinned independently — these two trainers should not have to share versions.
 RUN pip install \
+        --extra-index-url https://download.pytorch.org/whl/cu121 \
         audiomentations==0.36.0 \
         torch==2.1.2 torchaudio==2.1.2 \
-            --index-url https://download.pytorch.org/whl/cu121 \
     && pip install \
         huggingface_hub==0.24.5 \
         datasets==2.20.0 \
