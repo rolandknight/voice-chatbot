@@ -943,6 +943,43 @@ async def main():
                     "options": {"num_predict": 1},
                 },
             )
+            # Confirm the model is actually resident and flag co-tenants. Ollama
+            # evicts to fit new requests under unified-memory pressure, so a
+            # second client (e.g. the Ollama desktop app sending screenshots
+            # to a vision-capable model) silently bumping our weights out is
+            # the most common cause of multi-second cold-load TTFB spikes
+            # mid-conversation. /api/ps is cheap (in-memory state) and exists
+            # on every Ollama version that supports the streaming chat API.
+            try:
+                ps_resp = await _warm_client.get(f"{ollama_host}/api/ps")
+                ps_resp.raise_for_status()
+                resident = [
+                    m.get("name") or m.get("model")
+                    for m in ps_resp.json().get("models", [])
+                ]
+                resident = [name for name in resident if name]
+                if ollama_model not in resident:
+                    logger.error(
+                        f"Ollama pre-warm did not leave {ollama_model!r} resident. "
+                        f"Currently loaded: {resident or '(none)'}. The first user "
+                        f"turn will pay a full cold-load."
+                    )
+                else:
+                    co_tenants = [n for n in resident if n != ollama_model]
+                    if co_tenants:
+                        logger.warning(
+                            f"Ollama has {ollama_model!r} resident alongside "
+                            f"{co_tenants} — under memory pressure one will be "
+                            f"evicted. Check for other Ollama clients (the "
+                            f"desktop app, IDE extensions, scheduled jobs) "
+                            f"that hit /api/chat while this app is running."
+                        )
+                    else:
+                        logger.info(
+                            f"Ollama resident: {ollama_model} (sole tenant)"
+                        )
+            except Exception as e:
+                logger.debug(f"Ollama /api/ps probe skipped: {e}")
     except Exception as e:
         logger.debug(f"Ollama warmup skipped: {e}")
 

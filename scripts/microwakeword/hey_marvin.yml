@@ -42,6 +42,7 @@ augmentation_rounds: 1
 positive_dir: "/work/data/positives/hey_marvin"
 
 batch_size: 128
-epochs: 30
-learning_rate: 0.001
-target_false_positives_per_hour: 0.5
+training_steps: [10000]
+learning_rates: [0.001]
+positive_class_weight: [1]
+negative_class_weight: [20]

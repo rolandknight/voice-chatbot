@@ -37,11 +37,15 @@ _work/output/hey_marvin/hey_marvin.json
 ## Plug the models into the firmware
 
 ```sh
-cp _work/output/hey_babel/hey_babel.tflite   ../../firmware/box3/main/models/
-cp _work/output/hey_marvin/hey_marvin.tflite ../../firmware/box3/main/models/
+make install            # copies both .tflite into firmware/box3/main/models/
+# or just one:
+make install-babel
+make install-marvin
 ```
 
-Then rebuild the firmware (`idf.py build`). The `.tflite` files are embedded via `EMBED_FILES` — no flash partition changes needed.
+Then rebuild the firmware (`cd ../../firmware/box3 && make build`). The `.tflite` files are embedded via `EMBED_FILES` — no flash partition changes needed.
+
+The firmware tree has its own mirror target (`make install` under `firmware/box3/`) that pulls from `_work/output/`; either side works.
 
 ## Sanity check the model on the host
 
@@ -62,11 +66,15 @@ If FAR is high, add the misfiring phrases to `custom_negative_phrases` in the YA
 
 `hey_babel.yml` / `hey_marvin.yml`:
 
-- `n_samples` — bump from 20 000 to 50 000+ once the pipeline is validated end-to-end.
-- `tile_size` — how many 20 ms frames the on-device runtime concatenates per inference. Smaller = lower latency, more CPU; default 3 = 60 ms per inference, which is plenty fast on the S3.
-- `custom_negative_phrases` — the single highest-leverage knob for cleaning up false positives. Add anything you observe the model misfiring on after a real-world test.
-- `target_false_positives_per_hour` — lower = stricter; raise if recall suffers.
-- `n_mels`, `window_size_ms`, `window_stride_ms` — feature extractor params. Must match what the firmware feeds at inference time; the runtime in `firmware/box3/main/wakeword.c` reads these from the embedded metadata JSON.
+- `n_samples` — number of Piper-synthesized positive utterances. Bump from 20 000 to 50 000+ once the pipeline is validated end-to-end.
+- `training_steps` / `learning_rates` — list-of-stages, one entry per training phase. e.g. `[8000, 4000]` with `[0.001, 0.0001]` does an 8 k step warmup at 1e-3 then a 4 k step refine at 1e-4. Lists must be the same length; entries get padded to match if not.
+- `negative_class_weight` — penalty multiplier on false positives during training. Default `[20]` is aggressive; lower (e.g. `[10]`) if recall is suffering.
+- `positive_class_weight` — usually leave at `[1]`.
+- `batch_size` — 128 fits a 6 GB RTX 2060. Drop to 64 if OOM.
+
+`custom_negative_phrases` is **read but currently unused** — kept around so that future negative-spectrogram synthesis (per phrase, via Piper) can pick it up. The current pipeline relies on upstream microWakeWord's pre-generated `dinner_party` / `no_speech` / `speech` negative spectrograms, which already cover the failure modes most phrases hit. If you still see FP on a specific phonetic neighbour after `negative_class_weight` tuning, the next step is generating phrase-specific TTS negatives and adding them as a feature set in entrypoint.sh's `features` list.
+
+Feature-extractor params (`n_mels`, `window_size_ms`, `window_stride_ms`) are fixed by upstream's `micro_frontend` preprocessor (40 features, 30 ms window, 10 ms step) and ignored if set in the YAML — the firmware-side preprocessor must match these constants.
 
 ## Troubleshooting
 
@@ -85,6 +93,6 @@ If FAR is high, add the misfiring phrases to `custom_negative_phrases` in the YA
 - `Dockerfile` — CUDA + TF + microWakeWord + Piper image.
 - `entrypoint.sh` — in-container: stage data, generate positives, extract features, train, quantize.
 - `train.sh` — host-side launcher; builds the image and runs the container.
-- `Makefile` — `babel` / `marvin` / `eval` shortcuts.
+- `Makefile` — `babel` / `marvin` / `eval` / `install` shortcuts.
 - `hey_babel.yml`, `hey_marvin.yml` — per-phrase training configs.
 - `_work/` — generated; datasets, intermediate features, final `.tflite` + `.json`.

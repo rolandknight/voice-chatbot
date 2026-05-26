@@ -29,11 +29,21 @@ fi
 mkdir -p "$WORK_DIR/data" "$WORK_DIR/output" "$WORK_DIR/config"
 cp "$SCRIPT_DIR/$CONFIG_NAME" "$WORK_DIR/config/$CONFIG_NAME"
 
-# Symlink shared corpora if the openWakeWord pipeline has already downloaded them.
+# Reuse shared corpora from the openWakeWord pipeline via bind-mounts. A previous
+# version used host-side symlinks, but those resolve to absolute host paths that
+# don't exist inside the container, so huggingface_hub's mkdir(parents=True)
+# tripped on the dangling link. Bind-mounts make the data appear at the same
+# in-container path without any symlink indirection.
+EXTRA_MOUNTS=()
 for shared in mit_rirs background_clips; do
-    if [ -d "$SIBLING_DATA/$shared" ] && [ ! -e "$WORK_DIR/data/$shared" ]; then
-        ln -s "$(realpath "$SIBLING_DATA/$shared")" "$WORK_DIR/data/$shared"
-        echo "Reusing $shared from scripts/wakeword/_work/data/"
+    target="$WORK_DIR/data/$shared"
+    # Remove any leftover dangling symlink from the old approach.
+    if [ -L "$target" ]; then
+        rm -f "$target"
+    fi
+    if [ -d "$SIBLING_DATA/$shared" ] && [ ! -e "$target" ]; then
+        EXTRA_MOUNTS+=( -v "$(realpath "$SIBLING_DATA/$shared"):/work/data/$shared" )
+        echo "Reusing $shared from $(realpath "$SIBLING_DATA/$shared")"
     fi
 done
 
@@ -41,10 +51,16 @@ echo "==> Building image $IMAGE"
 docker build -t "$IMAGE" "$SCRIPT_DIR"
 
 echo "==> Running training (first run can take several hours; datasets cached in $WORK_DIR/data)"
-docker run --rm -it \
+# -it only when we actually have a TTY, so this works under `make ... &`, CI, etc.
+TTY_FLAGS=()
+if [ -t 0 ] && [ -t 1 ]; then
+    TTY_FLAGS=(-it)
+fi
+docker run --rm "${TTY_FLAGS[@]}" \
     --gpus all \
     --shm-size=2g \
     -v "$WORK_DIR:/work" \
+    "${EXTRA_MOUNTS[@]}" \
     -e CONFIG="/work/config/$CONFIG_NAME" \
     "$IMAGE"
 

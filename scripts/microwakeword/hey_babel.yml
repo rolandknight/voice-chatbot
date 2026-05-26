@@ -1,8 +1,11 @@
 # Training config for the "hey babel" microWakeWord model.
 # Output: int8 TFLite Micro model suitable for ESP32-S3.
 #
-# The schema mirrors microWakeWord's example configs. If you change keys, also
-# update entrypoint.sh's argparse invocations.
+# This is the user-friendly schema consumed by entrypoint.sh; it synthesizes
+# the upstream `training_parameters.yaml` (with `features` / `train_dir` /
+# `training_steps` / etc.) from these fields. The synthesized file lands at
+# _work/output/<model_name>/training_parameters.yaml — inspect it after a run
+# to see the full set of values that were passed to model_train_eval.
 
 model_name: "hey_babel"
 
@@ -52,8 +55,11 @@ background_paths:
 augmentation_rounds: 1
 positive_dir: "/work/data/positives/hey_babel"
 
-# Training hyperparameters.
+# Training hyperparameters. microWakeWord trains in step counts (not epochs);
+# each entry in `training_steps` runs for that many minibatches at the
+# matching learning_rate / class_weight.
 batch_size: 128
-epochs: 30
-learning_rate: 0.001
-target_false_positives_per_hour: 0.5
+training_steps: [10000]
+learning_rates: [0.001]
+positive_class_weight: [1]
+negative_class_weight: [20]  # bias hard against false positives

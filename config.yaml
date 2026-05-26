@@ -44,7 +44,7 @@ wake:
   models:
     - model: models/wakeword/hey_babel.onnx
       persona: babel
-    - model: hey_jarvis_v0.1
+    - model: models/wakeword/hey_marvin.onnx
       persona: marvin
   # Per-chunk probability threshold. Raise if mis-fires happen on
   # similar-sounding speech; lower if real wakes get missed.

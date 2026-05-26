@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Runs inside the microWakeWord training container.
 #
-# Stages datasets, generates synthetic positives via Piper, augments + extracts
-# 40-band log-mel features, trains the streaming DS-CNN classifier, and
-# emits an int8 TFLite Micro model.
+# Stages datasets, generates synthetic positives via Piper, builds spectrogram
+# features, trains the streaming MixedNet classifier via the upstream CLI, and
+# copies out the int8 TFLite Micro model.
 #
 # Idempotent: every stage skips if its output already exists.
 
@@ -109,7 +109,7 @@ if [ ! -d "$POS_DIR" ] || [ "$(find "$POS_DIR" -name '*.wav' 2>/dev/null | head 
     log "Generating $N_POS synthetic positives for '$PHRASE'"
     mkdir -p "$POS_DIR"
     python /opt/piper-sample-generator/generate_samples.py \
-        --text "$PHRASE" \
+        "$PHRASE" \
         --max-samples "$N_POS" \
         --batch-size 16 \
         --output-dir "$POS_DIR" \
@@ -119,31 +119,210 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 4. Feature extraction + training + quantization.
-#    microWakeWord ships a CLI that takes a YAML config and runs end-to-end;
-#    we invoke it once per phase so a crash mid-train can resume.
+# 4a. Build positive spectrogram features (RaggedMmap) for training,
+#     validation, and testing splits. Mirrors microWakeWord's
+#     basic_training_notebook augmentation + spectrogram pipeline.
 # ---------------------------------------------------------------------------
-log "Extracting 40-band log-mel features"
-python -m microwakeword.feature_extraction \
-    --config "$CONFIG" \
-    --output_dir "$OUT_DIR/features"
+POS_FEAT_DIR="$DATA_DIR/features/${MODEL_NAME}"
+if [ ! -d "$POS_FEAT_DIR/training/wakeword_mmap" ]; then
+    log "Generating positive spectrogram features for $MODEL_NAME"
+    mkdir -p "$POS_FEAT_DIR"
+    POS_DIR="$POS_DIR" RIR_DIR="$DATA_DIR/mit_rirs" BG_DIR="$BG_DIR" \
+    OUT="$POS_FEAT_DIR" python - <<'PY'
+import os
+from microwakeword.audio.augmentation import Augmentation
+from microwakeword.audio.clips import Clips
+from microwakeword.audio.spectrograms import SpectrogramGeneration
+from mmap_ninja.ragged import RaggedMmap
 
-log "Training the streaming DS-CNN classifier"
-python -m microwakeword.train \
-    --config "$CONFIG" \
-    --features_dir "$OUT_DIR/features" \
-    --output_dir "$OUT_DIR/checkpoints"
+POS_DIR = os.environ["POS_DIR"]
+RIR_DIR = os.environ["RIR_DIR"]
+BG_DIR  = os.environ["BG_DIR"]
+OUT     = os.environ["OUT"]
 
-log "Quantizing to int8 + converting to TFLite Micro"
-python -m microwakeword.quantize \
-    --config "$CONFIG" \
-    --checkpoint "$OUT_DIR/checkpoints/best.h5" \
-    --output "$OUT_DIR/${MODEL_NAME}.tflite"
+clips = Clips(
+    input_directory=POS_DIR,
+    file_pattern="*.wav",
+    max_clip_duration_s=None,
+    remove_silence=False,
+    random_split_seed=10,
+    split_count=0.1,
+)
+augmenter = Augmentation(
+    augmentation_duration_s=3.2,
+    augmentation_probabilities={
+        "SevenBandParametricEQ": 0.1,
+        "TanhDistortion": 0.1,
+        "PitchShift": 0.1,
+        "BandStopFilter": 0.1,
+        "AddColorNoise": 0.1,
+        "AddBackgroundNoise": 0.75,
+        "Gain": 1.0,
+        "RIR": 0.5,
+    },
+    impulse_paths=[RIR_DIR],
+    background_paths=[BG_DIR],
+    background_min_snr_db=-5,
+    background_max_snr_db=10,
+    min_jitter_s=0.195,
+    max_jitter_s=0.205,
+)
+
+# (split, split_name, repetition, slide_frames). The testing split uses
+# slide_frames=1 because the streaming evaluation doesn't need artificial
+# repetition — the model will see real shifted windows at inference time.
+splits = [
+    ("training",   "train",      2, 10),
+    ("validation", "validation", 1, 10),
+    ("testing",    "test",       1,  1),
+]
+for split, split_name, repetition, slide in splits:
+    out_dir = os.path.join(OUT, split, "wakeword_mmap")
+    if os.path.exists(out_dir):
+        print(f"skip {split}: exists at {out_dir}")
+        continue
+    os.makedirs(os.path.join(OUT, split), exist_ok=True)
+    specs = SpectrogramGeneration(
+        clips=clips,
+        augmenter=augmenter,
+        slide_frames=slide,
+        step_ms=10,
+    )
+    RaggedMmap.from_generator(
+        out_dir=out_dir,
+        sample_generator=specs.spectrogram_generator(split=split_name, repeat=repetition),
+        batch_size=100,
+        verbose=True,
+    )
+PY
+else
+    log "Positive features already present at $POS_FEAT_DIR, skipping"
+fi
+
+# ---------------------------------------------------------------------------
+# 4b. Pre-generated negative spectrogram features. These come from upstream
+#     microWakeWord's HF dataset and are required for sane training — the
+#     positive-only/background pipeline doesn't produce speech-like negatives
+#     that the streaming model needs to suppress.
+# ---------------------------------------------------------------------------
+NEG_BASE="$DATA_DIR/negative_datasets"
+mkdir -p "$NEG_BASE"
+for name in dinner_party dinner_party_eval no_speech speech; do
+    if [ -d "$NEG_BASE/$name" ] && [ -n "$(ls -A "$NEG_BASE/$name" 2>/dev/null)" ]; then
+        continue
+    fi
+    zip="$NEG_BASE/$name.zip"
+    # Skip the redownload if a previous run already pulled the zip down but
+    # failed to extract it (e.g. unzip missing). 423 MB per zip is worth saving.
+    if [ ! -s "$zip" ]; then
+        log "Downloading negative spectrogram dataset: $name"
+        curl -fL --retry 3 \
+            -o "$zip" \
+            "https://huggingface.co/datasets/kahrendt/microwakeword/resolve/main/$name.zip"
+    fi
+    log "Extracting $name"
+    python -c "import zipfile; zipfile.ZipFile('$zip').extractall('$NEG_BASE')"
+    rm -f "$zip"
+done
+
+# ---------------------------------------------------------------------------
+# 4c. Synthesize the upstream-format training_parameters.yaml from the
+#     user-friendly per-phrase YAML. Saved into $OUT_DIR so `make eval` can
+#     reuse it with --train 0.
+# ---------------------------------------------------------------------------
+TRAIN_DIR="$OUT_DIR/checkpoints"
+TRAINING_YAML="$OUT_DIR/training_parameters.yaml"
+mkdir -p "$TRAIN_DIR"
+
+log "Writing $TRAINING_YAML"
+CONFIG="$CONFIG" POS_FEAT_DIR="$POS_FEAT_DIR" NEG_BASE="$NEG_BASE" \
+TRAIN_DIR="$TRAIN_DIR" TRAINING_YAML="$TRAINING_YAML" python - <<'PY'
+import os, yaml
+
+with open(os.environ["CONFIG"]) as f:
+    user = yaml.safe_load(f)
+
+POS_FEAT_DIR = os.environ["POS_FEAT_DIR"]
+NEG_BASE     = os.environ["NEG_BASE"]
+TRAIN_DIR    = os.environ["TRAIN_DIR"]
+
+cfg = {
+    "train_dir": TRAIN_DIR,
+    "window_step_ms": 10,
+    "features": [
+        {"features_dir": POS_FEAT_DIR,
+         "sampling_weight": 2.0,  "penalty_weight": 1.0, "truth": True,
+         "truncation_strategy": "truncate_start", "type": "mmap"},
+        {"features_dir": f"{NEG_BASE}/speech",
+         "sampling_weight": 10.0, "penalty_weight": 1.0, "truth": False,
+         "truncation_strategy": "random", "type": "mmap"},
+        {"features_dir": f"{NEG_BASE}/dinner_party",
+         "sampling_weight": 10.0, "penalty_weight": 1.0, "truth": False,
+         "truncation_strategy": "random", "type": "mmap"},
+        {"features_dir": f"{NEG_BASE}/no_speech",
+         "sampling_weight": 5.0,  "penalty_weight": 1.0, "truth": False,
+         "truncation_strategy": "random", "type": "mmap"},
+        # Used only for ambient FAR estimation during validation/testing.
+        {"features_dir": f"{NEG_BASE}/dinner_party_eval",
+         "sampling_weight": 0.0,  "penalty_weight": 1.0, "truth": False,
+         "truncation_strategy": "split", "type": "mmap"},
+    ],
+    "training_steps":        user.get("training_steps", [10000]),
+    "positive_class_weight": user.get("positive_class_weight", [1]),
+    "negative_class_weight": user.get("negative_class_weight", [20]),
+    "learning_rates":        user.get("learning_rates",
+                                       [user.get("learning_rate", 0.001)]),
+    "batch_size":            user.get("batch_size", 128),
+    # SpecAugment disabled by default; matches the notebook starting point.
+    "time_mask_max_size":  [0],
+    "time_mask_count":     [0],
+    "freq_mask_max_size":  [0],
+    "freq_mask_count":     [0],
+    "eval_step_interval":  500,
+    "clip_duration_ms":    1500,
+    "target_minimization": user.get("target_minimization", 0.9),
+    "minimization_metric": user.get("minimization_metric", None),
+    "maximization_metric": user.get("maximization_metric",
+                                    "average_viable_recall"),
+}
+with open(os.environ["TRAINING_YAML"], "w") as f:
+    yaml.dump(cfg, f, sort_keys=False)
+print("wrote", os.environ["TRAINING_YAML"])
+PY
+
+# ---------------------------------------------------------------------------
+# 4d. Train + quantize + convert to streaming TFLite Micro int8. MixedNet
+#     architecture args mirror the upstream basic_training_notebook defaults;
+#     start here, tune via hey_*.yml later.
+# ---------------------------------------------------------------------------
+log "Training mixednet and quantizing to int8 streaming TFLite"
+python -m microwakeword.model_train_eval \
+    --training_config "$TRAINING_YAML" \
+    --train 1 \
+    --restore_checkpoint 1 \
+    --test_tflite_streaming_quantized 1 \
+    --use_weights best_weights \
+    mixednet \
+    --pointwise_filters "64,64,64,64" \
+    --repeat_in_block "1,1,1,1" \
+    --mixconv_kernel_sizes "[5],[7,11],[9,15],[23]" \
+    --residual_connection "0,0,0,0" \
+    --first_conv_filters 32 \
+    --first_conv_kernel_size 5 \
+    --stride 3
+
+# ---------------------------------------------------------------------------
+# 4e. Copy out the streaming int8 model to a stable name the firmware tree
+#     and `make install` can find.
+# ---------------------------------------------------------------------------
+SRC_TFLITE="$TRAIN_DIR/tflite_stream_state_internal_quant/stream_state_internal_quant.tflite"
+DST_TFLITE="$OUT_DIR/${MODEL_NAME}.tflite"
+cp -v "$SRC_TFLITE" "$DST_TFLITE"
 
 # Tiny metadata file so the firmware can print which model it loaded.
 python - <<PY
 import json, hashlib, os
-path = "$OUT_DIR/${MODEL_NAME}.tflite"
+path = "$DST_TFLITE"
 with open(path, "rb") as f:
     data = f.read()
 meta = {
@@ -151,9 +330,10 @@ meta = {
     "phrase": "${PHRASE}",
     "size_bytes": len(data),
     "sha256": hashlib.sha256(data).hexdigest(),
-    "feature_type": "log_mel_40",
+    "feature_type": "micro_frontend_40",
     "sample_rate": 16000,
-    "frame_ms": 20,
+    "window_step_ms": 10,
+    "architecture": "mixednet_streaming",
 }
 with open(os.path.join("$OUT_DIR", "${MODEL_NAME}.json"), "w") as f:
     json.dump(meta, f, indent=2)
@@ -161,4 +341,4 @@ print("Wrote", os.path.join("$OUT_DIR", "${MODEL_NAME}.json"))
 PY
 
 log "Done. Artifacts:"
-find "$OUT_DIR" -maxdepth 1 \( -name '*.tflite' -o -name '*.json' \) -print
+find "$OUT_DIR" -maxdepth 1 \( -name '*.tflite' -o -name '*.json' -o -name 'training_parameters.yaml' \) -print
