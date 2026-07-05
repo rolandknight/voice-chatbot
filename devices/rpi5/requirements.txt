@@ -1,0 +1,11 @@
+aiortc>=1.9
+aiohttp>=3.9
+fastapi>=0.110
+uvicorn[standard]>=0.27
+
+# On-device wake word (openWakeWord, ONNX) + the audio I/O it needs. Runs on
+# the Pi and on the dev Mac. sounddevice also backs macOS WebRTC playback
+# (--audio-format=avfoundation).
+openwakeword>=0.6
+sounddevice>=0.4
+numpy>=1.24

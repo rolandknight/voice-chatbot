@@ -18,7 +18,7 @@ MODELS         := $(BABEL_MODEL) $(MARVIN_MODEL)
 
 # Stock microWakeWord model used to validate the firmware/transport before
 # custom phrases are trained. See main/models/README.md.
-STOCK_MODEL_URL := https://github.com/kahrendt/microWakeWord/raw/main/models/okay_nabu.tflite
+STOCK_MODEL_URL := https://github.com/esphome/micro-wake-word-models/raw/refs/heads/main/models/hey_jarvis.tflite
 
 # ------------------------------------------------------------------------------
 # Serial port autodetect — override with `make PORT=/dev/...`
@@ -53,7 +53,7 @@ IDF_REPO    := https://github.com/espressif/esp-idf.git
 # ------------------------------------------------------------------------------
 .PHONY: help install install-stock install-idf set-target build flash monitor \
         flash-monitor erase-flash menuconfig size clean fullclean reconfigure \
-        dump check-idf check-port check-models
+        dump check-idf check-port check-models install-os
 
 help:
 	@echo "firmware/box3 — ESP32-S3-BOX-3 voice client"
@@ -206,3 +206,8 @@ clean: check-idf
 
 fullclean: check-idf
 	idf.py fullclean
+
+# after install: . ~/esp/esp-idf/export.sh
+install-os:
+	sudo apt install git wget flex bison gperf python3 python3-pip python3-venv \
+    	cmake ninja-build ccache libffi-dev libssl-dev dfu-util libusb-1.0-0

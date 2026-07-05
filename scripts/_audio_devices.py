@@ -50,6 +50,10 @@ def resolve_from_config(audio) -> tuple[int, int, str, str]:
     `audio` must expose input_device_name / input_device_index /
     output_device_name / output_device_index attributes (the AudioConfig
     pydantic model from `config.schema`).
+
+    A fresh PyAudio instance is created (and terminated) on every call, so
+    repeated calls re-enumerate devices — that's what makes the server's
+    hot-attach watcher pick up a Jabra plugged in after startup.
     """
     pa = pyaudio.PyAudio()
     try:
@@ -70,3 +74,17 @@ def resolve_from_config(audio) -> tuple[int, int, str, str]:
         return in_idx, out_idx, str(in_info.get("name", "")), str(out_info.get("name", ""))
     finally:
         pa.terminate()
+
+
+def try_resolve_from_config(audio) -> Optional[tuple[int, int, str, str]]:
+    """Like `resolve_from_config` but returns None instead of raising when the
+    requested device can't be found (or PortAudio itself fails to init).
+
+    Used by the server's optional local-audio watcher, which must tolerate the
+    Jabra being absent at boot and hot-plugged later — so a missing device is a
+    "scan again in a moment" condition, not a fatal startup error.
+    """
+    try:
+        return resolve_from_config(audio)
+    except Exception:
+        return None

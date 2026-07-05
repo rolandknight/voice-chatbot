@@ -1,0 +1,27 @@
+[Unit]
+Description=voice-chatbot Raspberry Pi 5 WebRTC wake client
+# Wait for the network and sound stack before arming the mic.
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Edit these paths for your install location.
+WorkingDirectory=/opt/voice-chatbot
+EnvironmentFile=/etc/rpi-voice.env
+ExecStart=/opt/voice-chatbot/.venv/bin/python devices/rpi5/rpi_webrtc_voice.py --local-wake
+Restart=on-failure
+RestartSec=3
+# Normal user; must be in the 'audio' group for ALSA/Jabra access.
+User=pi
+SupplementaryGroups=audio
+
+[Install]
+WantedBy=multi-user.target
+
+# Install:
+#   sudo cp devices/rpi5/rpi-voice.env.example /etc/rpi-voice.env   # then edit
+#   sudo cp devices/rpi5/rpi-voice.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now rpi-voice
+#   journalctl -u rpi-voice -f     # follow logs
