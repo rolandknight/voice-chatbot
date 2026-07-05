@@ -13,15 +13,40 @@ import asyncio
 import json
 import logging
 import os
+from pathlib import Path
 import signal
+import subprocess
+import urllib.error
+import urllib.request
 from contextlib import suppress
 from typing import Any
 
-import aiohttp
-from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription
-from aiortc.contrib.media import MediaPlayer, MediaRecorder
+try:
+    from aiortc import (
+        RTCConfiguration,
+        RTCIceServer,
+        RTCPeerConnection,
+        RTCSessionDescription,
+    )
+    from aiortc.contrib.media import MediaPlayer, MediaRecorder
+except ModuleNotFoundError as exc:
+    if exc.name != "aiortc":
+        raise
+    raise SystemExit(
+        "Missing Python package: aiortc\n\n"
+        "Install the Raspberry Pi WebRTC dependencies in the same environment "
+        "used to run this script:\n\n"
+        "  cd devices/rpi5\n"
+        "  python3 -m venv .venv\n"
+        "  . .venv/bin/activate\n"
+        "  pip install -r requirements.txt\n\n"
+        "Then rerun:\n\n"
+        "  python rpi_webrtc_voice.py\n"
+    ) from exc
 
 log = logging.getLogger("rpi5.webrtc_voice")
+
+DEFAULT_ALSA_CONFIG = Path("/usr/share/alsa/alsa.conf")
 
 
 def _json_env(name: str, default: Any) -> Any:
@@ -48,18 +73,87 @@ async def _wait_for_ice_gathering(pc: RTCPeerConnection, timeout: float) -> None
 
 
 def _build_player(device: str, sample_rate: int, channels: int) -> MediaPlayer:
-    return MediaPlayer(
-        device,
-        format="alsa",
-        options={
-            "sample_rate": str(sample_rate),
-            "channels": str(channels),
-        },
-    )
+    try:
+        return MediaPlayer(
+            device,
+            format="alsa",
+            options={
+                "sample_rate": str(sample_rate),
+                "channels": str(channels),
+            },
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            f"Could not open ALSA capture device {device!r}.\n\n"
+            "Run this to see valid device names:\n\n"
+            "  python rpi_webrtc_voice.py --list-devices\n\n"
+            "Use the numeric card/device form from the output, for example "
+            "`--input-device plughw:2,0`, or the named form "
+            "`--input-device plughw:CARD=<card>,DEV=0`. "
+            "`plughw:PCM,0` is only valid if ALSA lists a card whose id is "
+            "exactly `PCM`."
+        ) from exc
 
 
 def _build_recorder(device: str) -> MediaRecorder:
-    return MediaRecorder(device, format="alsa")
+    try:
+        return MediaRecorder(device, format="alsa")
+    except Exception as exc:
+        raise RuntimeError(
+            f"Could not open ALSA playback device {device!r}.\n\n"
+            "Run this to see valid device names:\n\n"
+            "  python rpi_webrtc_voice.py --list-devices\n\n"
+            "Use the numeric card/device form from the output, for example "
+            "`--output-device plughw:2,0`, or the named form "
+            "`--output-device plughw:CARD=<card>,DEV=0`."
+        ) from exc
+
+
+def _configure_alsa(args: argparse.Namespace) -> None:
+    if args.alsa_config:
+        os.environ["ALSA_CONFIG_PATH"] = args.alsa_config
+    elif "ALSA_CONFIG_PATH" not in os.environ and DEFAULT_ALSA_CONFIG.exists():
+        os.environ["ALSA_CONFIG_PATH"] = str(DEFAULT_ALSA_CONFIG)
+
+
+def _post_json(url: str, payload: dict[str, str], timeout: float) -> dict[str, Any]:
+    body = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            response_body = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        error_body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"offer failed: HTTP {exc.code}: {error_body}") from exc
+
+    return json.loads(response_body)
+
+
+def _run_alsa_list(args: list[str]) -> str:
+    try:
+        return subprocess.check_output(args, text=True, stderr=subprocess.STDOUT)
+    except FileNotFoundError:
+        return f"{args[0]} not found. Install alsa-utils: sudo apt install alsa-utils\n"
+    except subprocess.CalledProcessError as exc:
+        return exc.output
+
+
+def print_alsa_devices() -> None:
+    sections = [
+        ("Capture hardware cards", ["arecord", "-l"]),
+        ("Playback hardware cards", ["aplay", "-l"]),
+        ("Capture PCM names", ["arecord", "-L"]),
+        ("Playback PCM names", ["aplay", "-L"]),
+    ]
+    for title, command in sections:
+        print(title)
+        print("=" * len(title))
+        print(_run_alsa_list(command))
 
 
 async def run(args: argparse.Namespace) -> None:
@@ -141,14 +235,12 @@ async def run(args: argparse.Namespace) -> None:
             "sdp": pc.localDescription.sdp,
             "type": pc.localDescription.type,
         }
-        async with aiohttp.ClientSession() as session:
-            async with session.post(args.offer_url, json=payload) as response:
-                body = await response.text()
-                if response.status >= 400:
-                    raise RuntimeError(
-                        f"offer failed: HTTP {response.status}: {body}"
-                    )
-                answer = json.loads(body)
+        answer = await asyncio.to_thread(
+            _post_json,
+            args.offer_url,
+            payload,
+            args.signaling_timeout,
+        )
 
         await pc.setRemoteDescription(
             RTCSessionDescription(sdp=answer["sdp"], type=answer["type"])
@@ -190,12 +282,28 @@ def parse_args() -> argparse.Namespace:
         help="ICE server URL. Repeatable. Defaults to no STUN for LAN/local testing.",
     )
     parser.add_argument("--ice-gathering-timeout", type=float, default=2.0)
+    parser.add_argument("--signaling-timeout", type=float, default=10.0)
+    parser.add_argument(
+        "--alsa-config",
+        default=os.environ.get("ALSA_CONFIG_PATH"),
+        help="Path to alsa.conf. Defaults to /usr/share/alsa/alsa.conf when present.",
+    )
     parser.add_argument("--log-level", default=os.environ.get("LOG_LEVEL", "info"))
+    parser.add_argument(
+        "--list-devices",
+        action="store_true",
+        help="Print ALSA capture/playback devices and exit.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    _configure_alsa(args)
+    if args.list_devices:
+        print_alsa_devices()
+        return
+
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",

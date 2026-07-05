@@ -16,12 +16,16 @@ def _run(args: list[str]) -> str:
 
 
 def main() -> None:
-    print("Capture devices")
-    print("===============")
-    print(_run(["arecord", "-L"]))
-    print("Playback devices")
-    print("================")
-    print(_run(["aplay", "-L"]))
+    sections = [
+        ("Capture hardware cards", ["arecord", "-l"]),
+        ("Playback hardware cards", ["aplay", "-l"]),
+        ("Capture PCM names", ["arecord", "-L"]),
+        ("Playback PCM names", ["aplay", "-L"]),
+    ]
+    for title, command in sections:
+        print(title)
+        print("=" * len(title))
+        print(_run(command))
 
 
 if __name__ == "__main__":

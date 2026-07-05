@@ -27,11 +27,16 @@ Plug in the Jabra Speak2 40, then list ALSA names:
 
 ```bash
 python list_alsa_devices.py
+# or
+python rpi_webrtc_voice.py --list-devices
 ```
 
 Look for a capture and playback device such as
 `plughw:CARD=Speaker,DEV=0`, `hw:CARD=Speaker,DEV=0`, or another Jabra-specific
 name. Prefer `plughw:` because ALSA can adapt sample format/rate when needed.
+If `plughw:CARD=UC,DEV=0` fails with `Unknown PCM`, the card name is not `UC`
+on that Pi. Use the exact card name from `arecord -l` / `aplay -l`, or use the
+numeric form, for example `plughw:2,0`.
 
 ## Run the local loopback server
 
@@ -52,8 +57,8 @@ cd devices/rpi5
 . .venv/bin/activate
 python rpi_webrtc_voice.py \
   --offer-url http://127.0.0.1:8080/api/offer \
-  --input-device plughw:CARD=Speaker,DEV=0 \
-  --output-device plughw:CARD=Speaker,DEV=0
+  --input-device plughw:2,0 \
+  --output-device plughw:2,0
 ```
 
 If the server is running on another host on the LAN, replace the URL:
@@ -61,8 +66,8 @@ If the server is running on another host on the LAN, replace the URL:
 ```bash
 python rpi_webrtc_voice.py \
   --offer-url http://192.168.1.50:8080/api/offer \
-  --input-device plughw:CARD=Speaker,DEV=0 \
-  --output-device plughw:CARD=Speaker,DEV=0
+  --input-device plughw:2,0 \
+  --output-device plughw:2,0
 ```
 
 Successful loopback means audio captured from the Jabra is sent over WebRTC and
@@ -72,8 +77,8 @@ played back through the Jabra speaker.
 
 ```bash
 export WEBRTC_OFFER_URL=http://127.0.0.1:8080/api/offer
-export ALSA_INPUT_DEVICE=plughw:CARD=Speaker,DEV=0
-export ALSA_OUTPUT_DEVICE=plughw:CARD=Speaker,DEV=0
+export ALSA_INPUT_DEVICE=plughw:2,0
+export ALSA_OUTPUT_DEVICE=plughw:2,0
 export AUDIO_SAMPLE_RATE=48000
 export AUDIO_CHANNELS=1
 export DEVICE_ID=rpi5-jabra
