@@ -126,6 +126,30 @@ async def _wait_for_ice_gathering(pc: RTCPeerConnection, timeout: float) -> None
         await asyncio.wait_for(done.wait(), timeout=timeout)
 
 
+def _ssl_arg(args: argparse.Namespace) -> Any:
+    """`ssl=` value for aiohttp: False to skip verification (self-signed dev
+    server), an SSLContext for a custom CA, or None for default verification."""
+    if getattr(args, "insecure", False):
+        return False
+    if getattr(args, "ca_cert", None):
+        import ssl
+
+        return ssl.create_default_context(cafile=args.ca_cert)
+    return None
+
+
+async def _post_offer(url: str, payload: dict, *, auth_token: str | None, ssl_arg: Any) -> dict:
+    """POST an SDP offer (with optional bearer auth + TLS control) and return
+    the SDP answer. Shared by the always-on and wake clients."""
+    headers = {"Authorization": f"Bearer {auth_token}"} if auth_token else {}
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, json=payload, headers=headers, ssl=ssl_arg) as resp:
+            body = await resp.text()
+            if resp.status >= 400:
+                raise RuntimeError(f"offer failed: HTTP {resp.status}: {body}")
+            return json.loads(body)
+
+
 def _build_player(device: str, sample_rate: int, channels: int, fmt: str) -> MediaPlayer:
     return MediaPlayer(
         device,
@@ -267,14 +291,9 @@ async def run(args: argparse.Namespace) -> None:
             "type": pc.localDescription.type,
             "mode": args.mode,
         }
-        async with aiohttp.ClientSession() as session:
-            async with session.post(args.offer_url, json=payload) as response:
-                body = await response.text()
-                if response.status >= 400:
-                    raise RuntimeError(
-                        f"offer failed: HTTP {response.status}: {body}"
-                    )
-                answer = json.loads(body)
+        answer = await _post_offer(
+            args.offer_url, payload, auth_token=args.auth_token, ssl_arg=_ssl_arg(args)
+        )
 
         await pc.setRemoteDescription(
             RTCSessionDescription(sdp=answer["sdp"], type=answer["type"])
@@ -583,12 +602,9 @@ class WakeClient:
             await pc.setLocalDescription(offer)
             await _wait_for_ice_gathering(pc, args.ice_gathering_timeout)
             payload = {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type, "mode": "push"}
-            async with aiohttp.ClientSession() as session:
-                async with session.post(args.offer_url, json=payload) as resp:
-                    body = await resp.text()
-                    if resp.status >= 400:
-                        raise RuntimeError(f"offer failed: HTTP {resp.status}: {body}")
-                    answer = json.loads(body)
+            answer = await _post_offer(
+                args.offer_url, payload, auth_token=args.auth_token, ssl_arg=_ssl_arg(args)
+            )
             await pc.setRemoteDescription(
                 RTCSessionDescription(sdp=answer["sdp"], type=answer["type"])
             )
@@ -677,6 +693,23 @@ def parse_args() -> argparse.Namespace:
         "--offer-url",
         default=os.environ.get("WEBRTC_OFFER_URL", "http://127.0.0.1:8080/api/offer"),
         help="WebRTC signaling endpoint.",
+    )
+    parser.add_argument(
+        "--auth-token",
+        default=os.environ.get("WEBRTC_AUTH_TOKEN") or None,
+        help="Shared secret sent as 'Authorization: Bearer <token>' (must match "
+        "the server's WEBRTC_AUTH_TOKEN).",
+    )
+    parser.add_argument(
+        "--insecure",
+        action="store_true",
+        default=os.environ.get("WEBRTC_INSECURE", "").lower() in ("1", "true", "yes"),
+        help="Skip TLS cert verification (self-signed dev server over HTTPS).",
+    )
+    parser.add_argument(
+        "--ca-cert",
+        default=os.environ.get("WEBRTC_CA_CERT") or None,
+        help="CA cert file to verify the server's TLS certificate.",
     )
     parser.add_argument(
         "--audio-format",

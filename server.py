@@ -30,14 +30,19 @@ Run:
 from __future__ import annotations
 
 import asyncio
+import hmac
+import json
 import logging
 import os
 import shutil
 import socket
 import time
+from collections import deque
 from contextlib import asynccontextmanager, contextmanager, suppress
 from pathlib import Path
 from typing import Any, Callable
+
+from aiortc import RTCIceServer
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -126,6 +131,73 @@ HERE = Path(__file__).resolve().parent
 WEB_DIR = HERE / "web"
 
 logging.basicConfig(level=logging.INFO)
+
+
+# ───────────────────────── remote hardening (Step F) ─────────────────────────
+
+
+def _ice_servers_from_env() -> list[RTCIceServer]:
+    """Parse WEBRTC_ICE_SERVERS for the server side (STUN/TURN for NAT
+    traversal). Accepts either a comma-separated list of URLs (STUN) or a JSON
+    array of objects for TURN with credentials:
+        WEBRTC_ICE_SERVERS=stun:stun.l.google.com:19302
+        WEBRTC_ICE_SERVERS=[{"urls":"turn:host:3478","username":"u","credential":"p"}]
+    """
+    raw = os.environ.get("WEBRTC_ICE_SERVERS", "").strip()
+    if not raw:
+        return []
+    try:
+        if raw.startswith("["):
+            out = []
+            for e in json.loads(raw):
+                out.append(
+                    RTCIceServer(
+                        urls=e["urls"],
+                        username=e.get("username"),
+                        credential=e.get("credential"),
+                    )
+                )
+            return out
+        return [RTCIceServer(urls=u.strip()) for u in raw.split(",") if u.strip()]
+    except Exception as e:
+        logger.warning(f"ignoring malformed WEBRTC_ICE_SERVERS: {e!r}")
+        return []
+
+
+def _auth_ok(request: Request) -> bool:
+    """True if the request carries the shared secret (or auth is disabled).
+
+    Set WEBRTC_AUTH_TOKEN to require `Authorization: Bearer <token>` (or the
+    `X-Auth-Token` header) on the offer endpoint. Unset = open (localhost dev).
+    """
+    token = os.environ.get("WEBRTC_AUTH_TOKEN", "").strip()
+    if not token:
+        return True
+    auth = request.headers.get("authorization", "")
+    provided = auth[7:] if auth[:7].lower() == "bearer " else request.headers.get("x-auth-token", "")
+    return hmac.compare_digest(provided, token)
+
+
+# Sliding-window per-IP rate limit for /api/offer.
+_offer_hits: dict[str, deque] = {}
+
+
+def _rate_limited(ip: str) -> bool:
+    limit = int(os.environ.get("WEBRTC_MAX_OFFERS_PER_MIN", "30"))
+    if limit <= 0:
+        return False
+    now = time.monotonic()
+    dq = _offer_hits.setdefault(ip, deque())
+    while dq and now - dq[0] > 60.0:
+        dq.popleft()
+    if len(dq) >= limit:
+        return True
+    dq.append(now)
+    return False
+
+
+# Active WebRTC sessions, for the /api/sessions observability endpoint.
+_active_sessions: dict[str, dict[str, Any]] = {}
 
 
 class _KeepaliveMixer(BaseAudioMixer):
@@ -1404,6 +1476,9 @@ async def _load_runtime(cfg) -> dict[str, Any]:
         # dropped network that never sent `bye`). Deliberately >> the
         # conversational idle timeout so it can't pre-empt a live device.
         "stale_session_secs": float(os.environ.get("STALE_SESSION_SECS", "300")),
+        # STUN/TURN servers for the server side of the peer connection (NAT
+        # traversal for remote clients). Empty = host candidates only (LAN).
+        "ice_servers": _ice_servers_from_env(),
     }
 
 
@@ -1605,6 +1680,13 @@ async def lifespan(app: FastAPI):
         b=sorted(rc["available_backends"]),
         l=local_task is not None,
     )
+    logger.info(
+        "security: auth={auth} rate_limit={rl}/min ice_servers={ice} stale_session={ss:.0f}s",
+        auth="on" if os.environ.get("WEBRTC_AUTH_TOKEN", "").strip() else "OFF",
+        rl=os.environ.get("WEBRTC_MAX_OFFERS_PER_MIN", "30"),
+        ice=len(rc["ice_servers"]),
+        ss=rc["stale_session_secs"],
+    )
     try:
         yield
     finally:
@@ -1671,8 +1753,29 @@ async def options() -> dict[str, Any]:
     }
 
 
+@app.get("/api/sessions")
+async def sessions(request: Request) -> JSONResponse:
+    """Active WebRTC sessions — lightweight observability for remote deploys."""
+    if not _auth_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    now = time.time()
+    out = [
+        {**s, "age_secs": round(now - s["started"], 1)}
+        for s in _active_sessions.values()
+    ]
+    return JSONResponse({"count": len(out), "sessions": out})
+
+
 @app.post("/api/offer")
 async def offer(request: Request) -> JSONResponse:
+    client_ip = request.client.host if request.client else "unknown"
+    if not _auth_ok(request):
+        logger.warning(f"rejected offer from {client_ip}: bad/missing auth token")
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    if _rate_limited(client_ip):
+        logger.warning(f"rate-limited offer from {client_ip}")
+        return JSONResponse({"error": "too many requests"}, status_code=429)
+
     payload = await request.json()
     if "sdp" not in payload or "type" not in payload:
         return JSONResponse({"error": "expected {sdp, type}"}, status_code=400)
@@ -1689,7 +1792,7 @@ async def offer(request: Request) -> JSONResponse:
         logger.warning("wake mode requested but no wake models — using push mode")
         mode = "push"
 
-    connection = SmallWebRTCConnection()
+    connection = SmallWebRTCConnection(ice_servers=rc["ice_servers"])
     await connection.initialize(sdp=payload["sdp"], type=payload["type"])
 
     # Per-connection state — two clients can be on different backends/personas
@@ -1722,10 +1825,17 @@ async def offer(request: Request) -> JSONResponse:
         mode=mode,
     )
     logger.info(f"connection accepted: mode={mode!r} pc_id={connection.pc_id}")
+    _active_sessions[connection.pc_id] = {
+        "pc_id": connection.pc_id,
+        "mode": mode,
+        "ip": client_ip,
+        "started": time.time(),
+    }
 
     @connection.event_handler("closed")
     async def _on_closed(conn: SmallWebRTCConnection) -> None:
         control.close()
+        _active_sessions.pop(conn.pc_id, None)
         # Stop the pipeline when the peer goes away. Otherwise the transport's
         # read loop spins on MediaStreamError (hundreds of "unexpected media
         # stream error" warnings/sec) because nothing ends the task — critical

@@ -186,18 +186,26 @@ A minimal browser reference client: one HTML page, vanilla JS, no build step.
 
 Start `uvicorn server:app --host 0.0.0.0 --port 8080` (or `python server.py`) instead of `python app.py`. Ollama, Chatterbox, and Woosh launches unchanged.
 
-#### `.env.example`
-
-Add:
+#### Server environment
 
 ```
 WEBRTC_HOST=0.0.0.0
 WEBRTC_PORT=8080
+
+# Remote hardening (Step F) — all optional; unset = open LAN dev mode:
+WEBRTC_SSL_CERT=.certs/cert.pem        # HTTPS (also WEBRTC_SSL_KEY); `make run-server-lan` generates these
+WEBRTC_SSL_KEY=.certs/key.pem
+WEBRTC_AUTH_TOKEN=change-me             # require Authorization: Bearer <token> on /api/offer + /api/sessions
+WEBRTC_MAX_OFFERS_PER_MIN=30           # per-IP rate limit on /api/offer (0 disables)
 WEBRTC_ICE_SERVERS=stun:stun.l.google.com:19302
-IDLE_TIMEOUT_SEC=20
+#   or, for TURN with credentials (symmetric NAT):
+#   WEBRTC_ICE_SERVERS=[{"urls":"turn:turn.example.com:3478","username":"u","credential":"p"}]
+STALE_SESSION_SECS=300                  # reap an abandoned peer after this long
 ```
 
-Remove (or comment out): `INPUT_DEVICE_INDEX`, `OUTPUT_DEVICE_INDEX`, `WAKE_PHRASES`, `CLAUDE_WAKE_PHRASES`.
+The startup log prints `security: auth=on/OFF rate_limit=…/min ice_servers=N stale_session=…s` so the effective posture is visible. `/api/sessions` returns `{count, sessions:[{pc_id, mode, ip, age_secs}]}` for monitoring.
+
+The RPi client's matching config is `devices/rpi5/rpi-voice.env.example` (installed as `/etc/rpi-voice.env`, consumed by `rpi-voice.service`).
 
 ### Backend selection without wake-phrase regex
 
@@ -330,7 +338,7 @@ The `--local-audio` path resolves the Jabra by name at startup (`_audio_devices.
 | C | ✅ done | **Parallel-session isolation.** Found + fixed the real hazard: persona TTS services were shared singletons (a Pipecat `FrameProcessor` can't be linked into two live pipelines). Now built per-connection via `runtime["persona_tts_factory"]`, reusing one shared Kokoro ONNX model (no per-session reload). | `server.py` (`_build_shared_kokoro_model`, `_reuse_kokoro_model`, factory) |
 | D | ✅ done | **Session boundaries.** Client owns session end; server keeps `cancel_on_idle_timeout=False` (idle only resets context). Added an absolute **stale-session guard** (`STALE_SESSION_SECS`, default 300 s) that reaps abandoned peers, reset on real user activity so it can't pre-empt a live device. `bye` → immediate peer close (client sends it on exit). `mode:"push"` already skips the server `WakeWordDetector` — confirmed. | `server.py` (`ControlChannel.bye`, `PipelineStateEmitter.on_activity`, `build_pipeline_task` idle handler), `devices/rpi5/` |
 | E | ◐ built, needs live test | **On-device wake + lifecycle.** `LocalWakeDetector` (openWakeWord) + `wake_test.py` (`make run-wake-test`) — **verified** on the Jabra. Client `--local-wake` mode (`make run-wake-client`): one **full-duplex** `sd.Stream` feeds the detector + a custom `_MicTrack` and plays remote TTS from a shared buffer (a single device stream — two separate PortAudio streams starved capture on the Jabra). On wake it connects (`mode:"push"`), replays a ~500 ms pre-roll, sends the model's `persona`, closes on `--session-timeout` silence (+`bye`), and re-arms. Two transport bugs fixed + loopback-verified: `_MicTrack` emits **20 ms** frames (aiortc stamps all RTP packets of one encoded frame identically, so larger frames dropped all but one → 1 frame delivered; now 155), and duplex I/O removed the device contention. Session lifetime is driven by the server's `speaking`/`idle`/`listening` control messages (not the always-on audio buffer); the detector is fed continuously and a `--rearm-delay` prevents the just-ended wake word from re-firing. **Exponential reconnect-backoff** (`--connect-retries`/`--reconnect-backoff`) and **dual-model→`backend`** (`--wake-backend-map`) are wired. Clean Ctrl-C on client + server. **Pending:** live end-to-end confirmation of a full spoken turn. | `devices/rpi5/wake.py`, `wake_test.py`, `rpi_webrtc_voice.py` |
-| F | ⬜ | **Remote hardening.** Configurable ICE/STUN/TURN, offer-POST auth token, rate limit, HTTPS, systemd unit + device config, `/api/sessions`. | `server.py`, `devices/rpi5/`, deploy scripts |
+| F | ✅ done | **Remote hardening.** Server: configurable STUN/TURN (`WEBRTC_ICE_SERVERS`, STUN URLs or JSON w/ TURN creds), bearer-token auth on `/api/offer` + `/api/sessions` (`WEBRTC_AUTH_TOKEN`, constant-time), per-IP sliding-window rate limit (`WEBRTC_MAX_OFFERS_PER_MIN`), `/api/sessions` observability, HTTPS via existing `WEBRTC_SSL_CERT/KEY`. Client: `--auth-token`, `--insecure`/`--ca-cert` for TLS, ICE via `WEBRTC_ICE_SERVERS`. Deploy: `devices/rpi5/rpi-voice.service` (systemd) + `rpi-voice.env.example`. | `server.py`, `devices/rpi5/rpi_webrtc_voice.py`, `devices/rpi5/rpi-voice.*` |
 
 ### Verification (RPi 5)
 
