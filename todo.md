@@ -1,0 +1,2 @@
+- do research into how we can add speaker recognition. first step is within a session. later, store voiceprints and identify people. this needs to be done with minimal impact on latency
+- what needs to be done to add mcp client support? is gemma4 27b good at mcp? 

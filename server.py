@@ -34,9 +34,10 @@ import logging
 import os
 import shutil
 import socket
-from contextlib import asynccontextmanager
+import time
+from contextlib import asynccontextmanager, contextmanager, suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -107,7 +108,7 @@ from wakeword_detector import WakeWordDetector, WakeWordUserTurnStartStrategy
 import sys
 HERE_BOOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE_BOOT / "scripts"))
-from _audio_devices import resolve_from_config  # noqa: E402
+from _audio_devices import try_resolve_from_config  # noqa: E402
 from radio import RadioPlayer  # noqa: E402
 from spotify import SpotifyPlayer  # noqa: E402
 from skills import (  # noqa: E402
@@ -403,7 +404,15 @@ class ControlChannel:
             logger.info(f"persona: {prev!r} -> {name!r}")
             self._send({"type": "persona", "name": name})
         elif mtype == "bye":
-            logger.info("client sent bye")
+            # The client owns session end (see docs/web-rtc.md). A graceful
+            # `bye` tears the peer down immediately rather than waiting for the
+            # stale-session guard.
+            logger.info("client sent bye — closing connection")
+            self._closed = True
+            try:
+                await self._conn.disconnect()
+            except Exception as e:
+                logger.debug(f"bye disconnect raised: {e!r}")
         else:
             logger.debug(f"control: ignoring unknown message type {mtype!r}")
 
@@ -421,15 +430,22 @@ class PipelineStateEmitter(FrameProcessor):
         persona_state: PersonaState,
         *,
         label: str = "ctrl",
+        on_activity: Callable[[], None] | None = None,
     ) -> None:
         super().__init__()
         self._control = control
         self._persona_state = persona_state
         self._label = label
+        # Called when the user actually interacts (starts speaking) so the
+        # stale-session guard's clock resets — a live-but-quiet session is never
+        # reaped, only a truly abandoned peer.
+        self._on_activity = on_activity
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         await super().process_frame(frame, direction)
         if isinstance(frame, UserStartedSpeakingFrame):
+            if self._on_activity is not None:
+                self._on_activity()
             self._emit_state("listening")
         elif isinstance(frame, UserStoppedSpeakingFrame):
             logger.info(f"[{self._label}] user stopped speaking")
@@ -508,6 +524,48 @@ async def _probe_chatterbox(base_url: str) -> bool:
         return False
 
 
+def _build_shared_kokoro_model(persona_config: PersonaConfig) -> Any | None:
+    """Load the Kokoro ONNX model exactly once at startup.
+
+    Every per-connection KokoroTTSService reuses this single model object (see
+    `_reuse_kokoro_model`) so N concurrent sessions get N isolated
+    FrameProcessors without each reloading ~350MB of weights. kokoro-onnx's
+    inference (onnxruntime) is stateless per call and thread-safe, so sharing
+    the model across sessions is safe. Returns None if no persona uses Kokoro.
+    """
+    if not any(
+        p.backend == KOKORO_BACKEND for p in persona_config.personas.values()
+    ):
+        return None
+    from kokoro_onnx import Kokoro
+    from pipecat.services.kokoro.tts import KOKORO_CACHE_DIR, _ensure_model_files
+
+    model_file = KOKORO_CACHE_DIR / "kokoro-v1.0.onnx"
+    voices = KOKORO_CACHE_DIR / "voices-v1.0.bin"
+    _ensure_model_files(model_file, voices)
+    logger.info("Loading shared Kokoro ONNX model (reused across sessions)...")
+    return Kokoro(str(model_file), str(voices))
+
+
+@contextmanager
+def _reuse_kokoro_model(model: Any | None):
+    """Within this context, `KokoroTTSService(...)` reuses the pre-loaded model
+    instead of building its own — the model load in `KokoroTTSService.__init__`
+    (`self._kokoro = Kokoro(...)`) is the only expensive step. Scoped so it
+    can't leak into unrelated construction."""
+    if model is None:
+        yield
+        return
+    import pipecat.services.kokoro.tts as _kokoro_mod
+
+    orig = _kokoro_mod.Kokoro
+    _kokoro_mod.Kokoro = lambda *_a, **_k: model
+    try:
+        yield
+    finally:
+        _kokoro_mod.Kokoro = orig
+
+
 def _build_persona_tts_services(
     persona_config: PersonaConfig,
     *,
@@ -516,33 +574,41 @@ def _build_persona_tts_services(
     chatterbox_api_key: str,
     chatterbox_model: str,
     chatterbox_available: bool,
+    kokoro_model: Any | None = None,
 ) -> dict[str, FrameProcessor]:
+    """Build a FRESH set of per-persona TTS services. Called once per WebRTC
+    connection so each session owns its own FrameProcessor instances (a single
+    Pipecat processor can't be linked into two concurrent pipelines). The heavy
+    Kokoro model is shared via `kokoro_model`; Chatterbox services are just HTTP
+    clients, cheap to build per connection."""
     services: dict[str, FrameProcessor] = {}
-    for persona in persona_config.personas.values():
-        if persona.backend == KOKORO_BACKEND:
-            services[persona.id] = KokoroTTSService(
-                settings=KokoroTTSService.Settings(voice=persona.voice),
-                text_aggregation_mode=TextAggregationMode.SENTENCE,
-            )
-        elif persona.backend == CHATTERBOX_BACKEND:
-            if not chatterbox_available:
-                logger.warning(
-                    f"persona {persona.id!r} uses chatterbox but the server "
-                    f"at {chatterbox_base_url} is not reachable; skipping. "
-                    "Start it via run.sh or scripts/start_chatterbox.sh."
+    with _reuse_kokoro_model(kokoro_model):
+        for persona in persona_config.personas.values():
+            if persona.backend == KOKORO_BACKEND:
+                services[persona.id] = KokoroTTSService(
+                    settings=KokoroTTSService.Settings(voice=persona.voice),
+                    text_aggregation_mode=TextAggregationMode.SENTENCE,
                 )
                 continue
-            services[persona.id] = ChatterboxTTSService(
-                api_key=chatterbox_api_key,
-                base_url=chatterbox_base_url,
-                sample_rate=out_sr,
-                settings=ChatterboxTTSService.Settings(
-                    voice=persona.voice,
-                    model=chatterbox_model,
-                ),
-                text_aggregation_mode=TextAggregationMode.SENTENCE,
-            )
-        else:
+            if persona.backend == CHATTERBOX_BACKEND:
+                if not chatterbox_available:
+                    logger.warning(
+                        f"persona {persona.id!r} uses chatterbox but the server "
+                        f"at {chatterbox_base_url} is not reachable; skipping. "
+                        "Start it via run.sh or scripts/start_chatterbox.sh."
+                    )
+                    continue
+                services[persona.id] = ChatterboxTTSService(
+                    api_key=chatterbox_api_key,
+                    base_url=chatterbox_base_url,
+                    sample_rate=out_sr,
+                    settings=ChatterboxTTSService.Settings(
+                        voice=persona.voice,
+                        model=chatterbox_model,
+                    ),
+                    text_aggregation_mode=TextAggregationMode.SENTENCE,
+                )
+                continue
             logger.error(
                 f"persona {persona.id!r}: unsupported backend {persona.backend!r}"
             )
@@ -714,7 +780,9 @@ def build_pipeline_task(
     llm_dispatch = _build_llm_dispatch(
         ollama_llm, claude_llm, backend_state, claude_cue=claude_cue
     )
-    tts_dispatch = _build_tts_dispatch(runtime["persona_tts"], persona_state)
+    # Fresh per-connection TTS services (shared Kokoro model, isolated
+    # FrameProcessors) so concurrent sessions don't cross-link the same nodes.
+    tts_dispatch = _build_tts_dispatch(runtime["persona_tts_factory"](), persona_state)
 
     # in_flight defers wake teardown across the quiet ask_claude dispatch
     # window. Constructed up front so wake_strategy can read its is_busy hook.
@@ -837,8 +905,21 @@ def build_pipeline_task(
         stages.append(MediaDuckWatcher(duckable))
     if sfx_tracker is not None:
         stages.append(sfx_tracker)
+    # Stale-session guard: the client owns normal session end (`bye` / peer
+    # close), but a crashed device or dropped network can leave a peer
+    # "connected" with the pipeline idling forever. `last_activity` is reset
+    # whenever the user actually speaks; the idle handler reaps the peer once
+    # it's been silent for stale_session_secs (much longer than the 10s
+    # conversational idle reset, so it never pre-empts a live device).
+    last_activity = {"t": time.monotonic()}
+
+    def _mark_activity() -> None:
+        last_activity["t"] = time.monotonic()
+
     stages += [
-        PipelineStateEmitter(control, persona_state, label="webrtc"),
+        PipelineStateEmitter(
+            control, persona_state, label="webrtc", on_activity=_mark_activity
+        ),
         aggregator.assistant(),
     ]
     pipeline = Pipeline(stages)
@@ -856,6 +937,19 @@ def build_pipeline_task(
 
     @task.event_handler("on_idle_timeout")
     async def _on_conversation_idle(_task):
+        # Reap first — independent of context/in-flight state, so an abandoned
+        # peer (whose context was already reset to empty) still gets closed.
+        idle_for = time.monotonic() - last_activity["t"]
+        if idle_for >= runtime["stale_session_secs"]:
+            logger.info(
+                f"[webrtc {connection.pc_id}] no activity for {idle_for:.0f}s "
+                f">= {runtime['stale_session_secs']:.0f}s — closing stale peer."
+            )
+            try:
+                await connection.disconnect()
+            except Exception:
+                logger.debug("stale disconnect raised (already closing?)", exc_info=True)
+            return
         # Defer reset while a tool call / Claude response is mid-flight — the
         # idle handler re-fires on the next interval, so a silent return is
         # enough. Mirrors app.py.
@@ -946,7 +1040,9 @@ def build_local_pipeline_task(
     llm_dispatch = _build_llm_dispatch(
         ollama_llm, claude_llm, backend_state, claude_cue=claude_cue
     )
-    tts_dispatch = _build_tts_dispatch(runtime["persona_tts"], persona_state)
+    # Fresh per-connection TTS services (shared Kokoro model, isolated
+    # FrameProcessors) so concurrent sessions don't cross-link the same nodes.
+    tts_dispatch = _build_tts_dispatch(runtime["persona_tts_factory"](), persona_state)
 
     in_flight = InFlightTracker()
     wake_strategy: WakeWordUserTurnStartStrategy | None = None
@@ -1157,14 +1253,27 @@ async def _load_runtime(cfg) -> dict[str, Any]:
         else:
             logger.info(f"Chatterbox-TTS-Server reachable at {chatterbox_base}")
 
-    persona_tts = _build_persona_tts_services(
-        persona_config,
-        out_sr=cfg.audio.out_sample_rate,
-        chatterbox_base_url=chatterbox_base,
-        chatterbox_api_key=cfg.tts.chatterbox.api_key.get_secret_value(),
-        chatterbox_model=cfg.tts.chatterbox.model,
-        chatterbox_available=chatterbox_available,
-    )
+    # Shared Kokoro model (loaded once) + a factory that builds a fresh set of
+    # per-persona TTS services per connection, so two concurrent sessions each
+    # own their own FrameProcessor instances rather than sharing (and
+    # cross-linking) a singleton. See _build_persona_tts_services.
+    kokoro_model = _build_shared_kokoro_model(persona_config)
+
+    def _persona_tts_factory() -> dict[str, FrameProcessor]:
+        return _build_persona_tts_services(
+            persona_config,
+            out_sr=cfg.audio.out_sample_rate,
+            chatterbox_base_url=chatterbox_base,
+            chatterbox_api_key=cfg.tts.chatterbox.api_key.get_secret_value(),
+            chatterbox_model=cfg.tts.chatterbox.model,
+            chatterbox_available=chatterbox_available,
+            kokoro_model=kokoro_model,
+        )
+
+    # One startup instance set — used only to probe which personas are usable
+    # and to pre-warm the shared model. Pipelines build their own via the
+    # factory; these are never linked into a running pipeline.
+    persona_tts = _persona_tts_factory()
     if not persona_tts:
         raise RuntimeError(
             "no usable persona TTS services — check personas.yaml and that "
@@ -1256,6 +1365,8 @@ async def _load_runtime(cfg) -> dict[str, Any]:
         "vad_stop_secs": cfg.wake.vad_stop_secs,
         "persona_config": persona_config,
         "persona_tts": persona_tts,
+        "persona_tts_factory": _persona_tts_factory,
+        "kokoro_model": kokoro_model,
         "available_personas": set(persona_tts.keys()),
         "default_persona": persona_config.default
         if persona_config.default in persona_tts
@@ -1289,6 +1400,10 @@ async def _load_runtime(cfg) -> dict[str, Any]:
         "radio_player": radio_player,
         "spotify_player": spotify_player,
         "idle_timeout_secs": cfg.conversation.idle_timeout_secs,
+        # Absolute reap time for an abandoned WebRTC peer (crashed client /
+        # dropped network that never sent `bye`). Deliberately >> the
+        # conversational idle timeout so it can't pre-empt a live device.
+        "stale_session_secs": float(os.environ.get("STALE_SESSION_SECS", "300")),
     }
 
 
@@ -1296,6 +1411,10 @@ async def _load_runtime(cfg) -> dict[str, Any]:
 
 
 _pipeline_tasks: set[asyncio.Task[Any]] = set()
+# The PipelineTask objects behind the runner tasks above. Kept so shutdown can
+# stop them *gracefully* (await task.cancel()) instead of asyncio-cancelling the
+# wrapper, which leaves pipecat's per-processor frame handlers dangling.
+_pipeline_task_objs: set[Any] = set()
 
 
 async def _prewarm_whisper(model: str, language: str, in_sr: int) -> None:
@@ -1398,6 +1517,59 @@ async def _ollama_keepalive(host: str, model: str) -> None:
 # ─────────────────────────── FastAPI app ─────────────────────────────────
 
 
+LOCAL_AUDIO_POLL_SECS = 5.0
+
+
+async def _local_audio_supervisor(rc: dict[str, Any], cfg: Any) -> None:
+    """Own the optional always-on local (Jabra) pipeline for its whole lifetime.
+
+    The device is allowed to be missing at boot and hot-plugged afterwards, so
+    we poll `try_resolve_from_config` every LOCAL_AUDIO_POLL_SECS: start the
+    pipeline once the device resolves, and — if the pipeline exits (e.g. the
+    device was unplugged and PortAudio raised) — fall back to scanning again.
+    Cancellation (server shutdown) propagates out and stops the loop.
+    """
+    announced_waiting = False
+    while True:
+        resolved = try_resolve_from_config(cfg.audio)
+        if resolved is None:
+            if not announced_waiting:
+                logger.info(
+                    "[local] audio device not found — scanning every "
+                    f"{LOCAL_AUDIO_POLL_SECS:.0f}s until it's attached"
+                )
+                announced_waiting = True
+            await asyncio.sleep(LOCAL_AUDIO_POLL_SECS)
+            continue
+
+        announced_waiting = False
+        in_idx, out_idx, in_name, out_name = resolved
+        logger.info(
+            f"[local] audio devices: in=[{in_idx}] {in_name!r} "
+            f"out=[{out_idx}] {out_name!r}"
+        )
+        pipeline = build_local_pipeline_task(
+            runtime=rc,
+            input_device_index=in_idx,
+            output_device_index=out_idx,
+        )
+        runner = PipelineRunner(handle_sigint=False)
+        logger.info("[local] pipeline started")
+        try:
+            await runner.run(pipeline)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Most likely the device was unplugged mid-stream (PortAudio error).
+            # Drop back to scanning so it reconnects when plugged back in.
+            logger.exception(
+                "[local] pipeline stopped (device unplugged?) — rescanning"
+            )
+        else:
+            logger.info("[local] pipeline ended — rescanning")
+        await asyncio.sleep(LOCAL_AUDIO_POLL_SECS)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     cfg = load_config()
@@ -1415,31 +1587,15 @@ async def lifespan(app: FastAPI):
 
     # Optional always-on local-audio pipeline (Jabra etc.) — enabled by the
     # --local-audio CLI flag, plumbed through env so it survives the
-    # uvicorn-managed app load.
+    # uvicorn-managed app load. The device may be absent at boot or hot-plugged
+    # later, so this is a supervisor task that scans every LOCAL_AUDIO_POLL_SECS
+    # and (re)starts the pipeline when the device appears — the WebRTC endpoint
+    # itself never depends on local audio being present.
     local_task: asyncio.Task[Any] | None = None
     if os.environ.get("VOICE_CHATBOT_LOCAL_AUDIO") == "1":
-        in_idx, out_idx, in_name, out_name = resolve_from_config(cfg.audio)
-        logger.info(
-            f"[local] audio devices: in=[{in_idx}] {in_name!r} "
-            f"out=[{out_idx}] {out_name!r}"
+        local_task = asyncio.create_task(
+            _local_audio_supervisor(rc, cfg), name="local-audio-supervisor"
         )
-        local_pipeline = build_local_pipeline_task(
-            runtime=rc,
-            input_device_index=in_idx,
-            output_device_index=out_idx,
-        )
-
-        async def _run_local() -> None:
-            runner = PipelineRunner(handle_sigint=False)
-            try:
-                await runner.run(local_pipeline)
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                logger.exception("[local] pipeline runner crashed")
-
-        local_task = asyncio.create_task(_run_local(), name="local-audio-pipeline")
-        logger.info("[local] pipeline started")
 
     logger.info(
         "ready: whisper={whisper} ollama={ollama} personas={p} backends={b} local={l}",
@@ -1458,6 +1614,11 @@ async def lifespan(app: FastAPI):
         # are only for the pathological case where a task is stuck. Past ~2s
         # the user is double-Ctrl-C'ing anyway, which would SIGKILL us.
         heartbeat.cancel()
+        # Gracefully stop each pipeline first (drains frame handlers, so no
+        # "dangling tasks" warnings), then cancel the runner wrappers.
+        for pt in list(_pipeline_task_objs):
+            with suppress(Exception):
+                await pt.cancel()
         for t in list(_pipeline_tasks):
             t.cancel()
         pending = [heartbeat, *_pipeline_tasks]
@@ -1467,12 +1628,12 @@ async def lifespan(app: FastAPI):
             try:
                 await asyncio.wait_for(
                     asyncio.gather(*pending, return_exceptions=True),
-                    timeout=1.5,
+                    timeout=3.0,
                 )
             except asyncio.TimeoutError:
                 logger.warning(
                     f"shutdown: {len(pending)} task(s) didn't exit within "
-                    "1.5s — abandoning"
+                    "3s — abandoning"
                 )
         # Stop the singleton media players last — anything still mid-tool-call
         # at shutdown has already had its task cancelled above.
@@ -1552,11 +1713,6 @@ async def offer(request: Request) -> JSONResponse:
     async def _on_app(_conn: SmallWebRTCConnection, message: Any) -> None:
         await control.handle(message)
 
-    @connection.event_handler("closed")
-    async def _on_closed(conn: SmallWebRTCConnection) -> None:
-        control.close()
-        logger.info(f"connection closed pc_id={conn.pc_id}")
-
     task = build_pipeline_task(
         connection,
         control,
@@ -1566,6 +1722,17 @@ async def offer(request: Request) -> JSONResponse:
         mode=mode,
     )
     logger.info(f"connection accepted: mode={mode!r} pc_id={connection.pc_id}")
+
+    @connection.event_handler("closed")
+    async def _on_closed(conn: SmallWebRTCConnection) -> None:
+        control.close()
+        # Stop the pipeline when the peer goes away. Otherwise the transport's
+        # read loop spins on MediaStreamError (hundreds of "unexpected media
+        # stream error" warnings/sec) because nothing ends the task — critical
+        # for smart clients that open/close a peer per wake session.
+        with suppress(Exception):
+            await task.cancel()
+        logger.info(f"connection closed pc_id={conn.pc_id}")
 
     async def _run() -> None:
         runner = PipelineRunner(handle_sigint=False)
@@ -1583,7 +1750,13 @@ async def offer(request: Request) -> JSONResponse:
 
     bg = asyncio.create_task(_run(), name=f"pipeline-{connection.pc_id}")
     _pipeline_tasks.add(bg)
-    bg.add_done_callback(_pipeline_tasks.discard)
+    _pipeline_task_objs.add(task)
+
+    def _cleanup(_b: asyncio.Task[Any]) -> None:
+        _pipeline_tasks.discard(bg)
+        _pipeline_task_objs.discard(task)
+
+    bg.add_done_callback(_cleanup)
 
     answer = connection.get_answer()
     if answer is None:
@@ -1631,6 +1804,8 @@ def main() -> None:
         print()
         print("  --local-audio: also running an always-on local pipeline")
         print("  against the configured Jabra device (wake mode).")
+        print("  The device may be absent at boot — it's scanned for every")
+        print("  5s and the pipeline starts automatically once it's attached.")
     print()
 
     uvicorn.run(

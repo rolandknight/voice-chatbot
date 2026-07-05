@@ -48,10 +48,13 @@ echo "Installing Python dependencies..."
 # openwakeword -> audio-based wake-word detection (hey_babel + hey_jarvis)
 #                upstream of Whisper STT; replaces the older text-based
 #                WakePhraseUserTurnStartStrategy.
+# sounddevice  -> PortAudio playback for the RPi5 WebRTC client's avfoundation
+#                path (macOS is capture-only in ffmpeg), i.e. running
+#                `make run-webrtc-client` on this Mac.
 python -m pip install \
   "pipecat-ai[local,mlx-whisper,kokoro,openai,ollama,silero,anthropic]" \
   python-dotenv loguru pyaudio pyyaml websockets yt-dlp spotipy \
-  openwakeword \
+  openwakeword sounddevice \
   "pydantic>=2" "pydantic-settings>=2"
 
 echo "Downloading openwakeword shared backbone + hey_jarvis model..."
