@@ -57,8 +57,9 @@ journalctl -u rpi-voice -f          # follow logs
 ```
 
 Override `SERVER_IP`, `INPUT_DEVICE`, `OUTPUT_DEVICE`, `AUTH_TOKEN`, or
-`SERVICE_NAME` via env vars. The script auto-detects the repo path and venv and
-runs the service as your user (in the `audio` group). Manage it with
+`SERVICE_NAME` via env vars. The generated service sources
+`./bin/activate-hermit` (Hermit-managed toolchain) before running, and runs as
+your user (in the `audio` group). Manage it with
 `sudo systemctl {restart,stop,disable} rpi-voice`.
 
 ## Run the local loopback server

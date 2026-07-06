@@ -5,6 +5,9 @@
 #
 #   ./install_service.sh
 #
+# Toolchain is managed by Hermit: the service sources ./bin/activate-hermit to
+# put `python` (and everything else) on PATH, then execs the client.
+#
 # Override any default with an env var, e.g.:
 #   SERVER_IP=192.168.0.245 INPUT_DEVICE=Jabra OUTPUT_DEVICE=Jabra ./install_service.sh
 #   AUTH_TOKEN=secret ./install_service.sh
@@ -19,15 +22,10 @@ SERVICE_NAME="${SERVICE_NAME:-rpi-voice}"
 # Repo root = two levels up from devices/rpi5/.
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 
-# Pick the venv the same way `make run-wake-client` does (repo-root .venv),
-# falling back to devices/rpi5/.venv.
-if [ -x "$REPO/.venv/bin/python" ]; then
-  PYBIN="$REPO/.venv/bin/python"
-elif [ -x "$REPO/devices/rpi5/.venv/bin/python" ]; then
-  PYBIN="$REPO/devices/rpi5/.venv/bin/python"
-else
-  echo "ERROR: no venv found at $REPO/.venv or $REPO/devices/rpi5/.venv" >&2
-  echo "Create it and install deps first (see devices/rpi5/README.md)." >&2
+# Hermit provides the toolchain; the service activates it before running.
+if [ ! -f "$REPO/bin/activate-hermit" ]; then
+  echo "ERROR: Hermit not found at $REPO/bin/activate-hermit" >&2
+  echo "Set up Hermit for this repo first (it manages python, etc.)." >&2
   exit 1
 fi
 
@@ -40,9 +38,13 @@ UNIT="/etc/systemd/system/${SERVICE_NAME}.service"
 EXTRA=""
 [ -n "${AUTH_TOKEN:-}" ] && EXTRA=" --auth-token ${AUTH_TOKEN}"
 
+# The client command, run under an activated Hermit env. `exec` replaces bash so
+# systemd's main PID is python (clean stop/restart signalling).
+CLIENT_CMD="python devices/rpi5/rpi_webrtc_voice.py --local-wake --offer-url ${OFFER_URL} --input-device ${INPUT_DEVICE} --output-device ${OUTPUT_DEVICE}${EXTRA}"
+
 echo "Installing ${SERVICE_NAME}.service:"
 echo "  repo:    $REPO"
-echo "  python:  $PYBIN"
+echo "  runtime: Hermit (source ./bin/activate-hermit)"
 echo "  user:    $RUN_USER"
 echo "  server:  $OFFER_URL"
 echo "  devices: in=$INPUT_DEVICE out=$OUTPUT_DEVICE"
@@ -56,7 +58,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=$REPO
-ExecStart=$PYBIN devices/rpi5/rpi_webrtc_voice.py --local-wake --offer-url $OFFER_URL --input-device $INPUT_DEVICE --output-device $OUTPUT_DEVICE$EXTRA
+ExecStart=/bin/bash -c 'source ./bin/activate-hermit && exec $CLIENT_CMD'
 Restart=on-failure
 RestartSec=3
 User=$RUN_USER
