@@ -763,6 +763,12 @@ def parse_args() -> argparse.Namespace:
         help="ICE server URL. Repeatable. Defaults to no STUN for LAN/local testing.",
     )
     parser.add_argument("--ice-gathering-timeout", type=float, default=2.0)
+    parser.add_argument("--signaling-timeout", type=float, default=10.0)
+    parser.add_argument(
+        "--alsa-config",
+        default=os.environ.get("ALSA_CONFIG_PATH"),
+        help="Path to alsa.conf. Defaults to /usr/share/alsa/alsa.conf when present.",
+    )
     parser.add_argument("--log-level", default=os.environ.get("LOG_LEVEL", "info"))
 
     # --- on-device wake mode (--local-wake) ---

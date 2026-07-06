@@ -7,10 +7,12 @@
 # existing configs and appending it to the PHRASES list below.
 #
 # `make train` — trains every phrase in PHRASES sequentially (currently
-#   hey_babel then hey_marvin). Equivalent to running `train-hey-babel` and
-#   `train-hey-marvin` back to back.
+#   hey_babel, hey_marvin, then hey_one_one). Equivalent to running
+#   `train-hey-babel`, `train-hey-marvin`, and `train-hey-one-one` back to
+#   back.
 #
-# `make train-hey-babel` / `make train-hey-marvin` — train a single phrase.
+# `make train-hey-babel` / `make train-hey-marvin` / `make train-hey-one-one`
+#   — train a single phrase.
 #
 # Two clean variants per phrase because clip regeneration is expensive (1–2 h
 # of Piper TTS) and most config changes don't need it:
@@ -44,7 +46,7 @@ DEST ?= ../../models/wakeword
 # field and the .onnx/.tflite filenames openWakeWord emits. User-facing
 # target names dash-ify these (train-hey-babel, not train-hey_babel) since
 # make targets conventionally use dashes.
-PHRASES := hey_babel hey_marvin
+PHRASES := hey_babel hey_marvin hey_one_one
 TARGETS := $(subst _,-,$(PHRASES))
 
 .PHONY: train clean clean-all install \

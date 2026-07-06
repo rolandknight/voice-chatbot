@@ -1,5 +1,4 @@
 aiortc>=1.9
-aiohttp>=3.9
 fastapi>=0.110
 uvicorn[standard]>=0.27
 
