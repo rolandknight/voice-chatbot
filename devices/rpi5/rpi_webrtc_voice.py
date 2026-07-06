@@ -586,10 +586,10 @@ class WakeClient:
                     self._last_activity = now
             elif mtype == "transcript":
                 self._last_activity = now
-            elif mtype == "media" and data.get("state") == "playing":
-                # Music streaming over the session — keep it alive past the
-                # silence timeout (heartbeat arrives every few seconds).
-                self._last_activity = now
+            # Spotify plays natively via librespot on this Pi, not over the
+            # session, so there's no music heartbeat to keep the wake session
+            # alive — it idles out during playback and reconnects on the next
+            # wake word, while the music keeps going independently.
             log.debug("control recv: %s", message)
 
         pc.addTrack(track)
