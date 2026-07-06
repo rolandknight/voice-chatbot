@@ -3,9 +3,19 @@ aiohttp>=3.9
 fastapi>=0.110
 uvicorn[standard]>=0.27
 
-# On-device wake word (openWakeWord, ONNX) + the audio I/O it needs. Runs on
-# the Pi and on the dev Mac. sounddevice also backs macOS WebRTC playback
-# (--audio-format=avfoundation).
-openwakeword>=0.6
+# On-device wake audio I/O (Pi + dev Mac). sounddevice also backs macOS
+# WebRTC playback (--audio-format=avfoundation).
 sounddevice>=0.4
 numpy>=1.24
+
+# openWakeWord runtime deps (the ONNX inference path). openWakeWord itself is
+# installed separately with --no-deps (see install_rpi.sh), because its
+# packaging pins a Linux-only `tflite-runtime` that has no wheels for
+# Python >= 3.12 — and we don't use tflite. Installing these here means the
+# `pip install --no-deps openwakeword` step has everything it needs and works
+# on both Python 3.11 and 3.12.
+onnxruntime>=1.10
+tqdm
+scipy
+scikit-learn
+requests

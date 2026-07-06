@@ -16,12 +16,24 @@ On Raspberry Pi OS:
 
 ```bash
 sudo apt update
-sudo apt install -y python3-venv ffmpeg alsa-utils libavdevice-dev
+# libportaudio2 is REQUIRED: sounddevice (used for on-device wake capture +
+# playback) is only a binding to the system PortAudio library.
+sudo apt install -y python3-venv ffmpeg alsa-utils libavdevice-dev libportaudio2 portaudio19-dev
 cd devices/rpi5
 python3 -m venv .venv
 . .venv/bin/activate
-pip install -r requirements.txt
+./install_rpi.sh          # requirements.txt + openWakeWord (see note below)
 ```
+
+### Python 3.12 note (openWakeWord)
+
+`install_rpi.sh` works on **Python 3.11 and 3.12**. openWakeWord 0.6.0's
+packaging pins a Linux-only `tflite-runtime`, which has **no wheels for Python
+>= 3.12** — so a plain `pip install openwakeword` fails there with "requires
+Python < 3.12". We use the ONNX inference path (the tflite import is lazy and
+unused), so the script installs openWakeWord with `--no-deps` after its real
+runtime deps. Plain Python **3.11** (the Pi OS default) also works with a normal
+`pip install` — it just pulls an unused `tflite-runtime`.
 
 Plug in the Jabra Speak2 40, then list ALSA names:
 
@@ -32,6 +44,22 @@ python list_alsa_devices.py
 Look for a capture and playback device such as
 `plughw:CARD=Speaker,DEV=0`, `hw:CARD=Speaker,DEV=0`, or another Jabra-specific
 name. Prefer `plughw:` because ALSA can adapt sample format/rate when needed.
+
+## Auto-start on boot (systemd)
+
+The easiest way to run the wake client as a background service that starts on
+boot and restarts on failure:
+
+```bash
+# From the repo root on the Pi (server IP defaults to 192.168.0.245):
+SERVER_IP=192.168.0.245 ./devices/rpi5/install_service.sh
+journalctl -u rpi-voice -f          # follow logs
+```
+
+Override `SERVER_IP`, `INPUT_DEVICE`, `OUTPUT_DEVICE`, `AUTH_TOKEN`, or
+`SERVICE_NAME` via env vars. The script auto-detects the repo path and venv and
+runs the service as your user (in the `audio` group). Manage it with
+`sudo systemctl {restart,stop,disable} rpi-voice`.
 
 ## Run the local loopback server
 
