@@ -119,65 +119,56 @@ commands to a librespot "Babel" Connect endpoint running here. (Music does not
 go through WebRTC; that path was choppy/staticky because it forced 44.1 kHz
 stereo through a 24 kHz-mono voice channel.)
 
-Install and configure librespot (installs raspotify — librespot + a systemd
-service):
+Raspberry Pi OS Bookworm runs **PipeWire**, which owns the sound card and mixes
+multiple streams natively — so there's no dmix/ALSA-sharing to set up. The catch
+is that PipeWire is **per-user**: to share the Jabra, both librespot and the
+voice client must run as *your* user (so they join your PipeWire session), as
+**user services** with linger enabled (starts at boot, no login needed).
+
+Install librespot as a user service (routes through PipeWire, points the default
+sink at the Jabra, enables linger):
 
 ```bash
-# From the repo root on the Pi:
+# From the repo root on the Pi, as your normal user (NOT sudo):
 ./devices/rpi5/install_librespot.sh
-# Or target the Jabra card directly (see the dmix note below first):
-LIBRESPOT_DEVICE=plughw:CARD=Speaker,DEV=0 ./devices/rpi5/install_librespot.sh
 ```
 
-Then bind it once: open Spotify on your phone → **Connect** → pick **Babel**.
-From the server, confirm it's visible:
+Bind it once: open Spotify on your phone → **Connect** → pick **Babel**. From the
+server, confirm it's visible:
 
 ```bash
 python scripts/spotify.py --list-devices
 ```
 
+Then (re)install the voice client as a **user service** too, so it shares the
+card with librespot via PipeWire (defaults its audio devices to `pulse`):
+
+```bash
+SERVER_IP=<your-server-ip> USER_SERVICE=1 ./devices/rpi5/install_service.sh
+```
+
+Now the bot voice and Spotify mix automatically — while the bot speaks, music
+keeps playing (there's no ducking).
+
 Server-side prerequisites: `skills.spotify.enabled: true`, `SPOTIPY_CLIENT_ID`
 set, and the one-time OAuth done (`python scripts/spotify.py --bootstrap`). See
 the repo README's Spotify section.
 
-### Sharing the Jabra between the bot voice and Spotify
-
-There's no ducking: while the bot speaks, Spotify keeps playing, so **both** the
-voice client and librespot drive the Jabra at once. A raw ALSA `hw:`/`plughw:`
-device is single-owner — one process locks the card and the other gets silence
-or an error. To let them mix, install a shared `default` (dmix for playback,
-dsnoop for capture, plug-wrapped so the 16 kHz wake stream, the bot's TTS, and
-44.1 kHz librespot all mix):
+### Quick sanity checks
 
 ```bash
-# From the repo root on the Pi. Auto-detects the Jabra card from `aplay -l`.
-./devices/rpi5/setup_alsa_sharing.sh
-# Force the card / params if auto-detect is wrong:
-CARD=Speaker RATE=48000 CHANNELS=2 ./devices/rpi5/setup_alsa_sharing.sh
+pactl get-default-sink                       # should name the Jabra, not HDMI
+speaker-test -D pulse -c 2 -t sine -f 440 -l 1   # tone via PipeWire
+systemctl --user status librespot rpi-voice  # both running as your user
 ```
 
-Test the mixer, then point **both** sides at `default`:
+If Spotify comes out of HDMI instead of the Jabra, set the default sink by hand:
+`pactl set-default-sink <name>` (list them with `pactl list short sinks`).
 
-```bash
-speaker-test -D default -c 2 -t sine -f 440 -l 1        # should play a tone
-
-# librespot already defaults to LIBRESPOT_DEVICE=default:
-./devices/rpi5/install_librespot.sh
-
-# point the client at the shared default (both directions):
-INPUT_DEVICE=default OUTPUT_DEVICE=default ./devices/rpi5/install_service.sh
-# ...or set ALSA_INPUT_DEVICE=default / ALSA_OUTPUT_DEVICE=default in /etc/rpi-voice.env
-```
-
-If you never need simultaneous playback, skip all this and point librespot
-straight at `plughw:...` — but the bot voice and Spotify will then contend for
-the card.
-
-Then run:
-
-```bash
-python rpi_webrtc_voice.py
-```
+> **Bare-ALSA Pis (no PipeWire, e.g. a Lite image):** run librespot and the
+> client against a `dmix`/`dsnoop` shared `default` in `/etc/asound.conf`
+> instead, and install the client with the plain (system) service:
+> `./devices/rpi5/install_service.sh`.
 
 ## Notes
 
