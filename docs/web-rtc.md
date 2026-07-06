@@ -5,9 +5,9 @@ Reference design for streaming audio (and, later, control / sensor / output data
 The backend is **client-agnostic**. It accepts a WebRTC peer connection and a JSON-over-DataChannel control protocol. Two reference clients are anticipated:
 
 - **Simple client.** A WebRTC-only browser (or other thin client) with no wake word. The user explicitly opens a session — clicking a button, opening a tab. The connection itself is the turn-start signal.
-- **Smart client.** An embedded device — initially the **ESP32-S3-BOX-3** (firmware at `firmware/box3/`), later a Raspberry Pi — that runs an on-device wake word (microWakeWord) and may, in future, expose sensors (motion, ambient light, temperature) and outputs (LCD, LEDs, relays, servos).
+- **Smart client.** An embedded device that runs an on-device wake word and may, in future, expose sensors (motion, ambient light, temperature) and outputs (LCD, LEDs, relays, servos). The **first hardware target is a Raspberry Pi 5 + Jabra Speak2 40** (Python client at `devices/rpi5/`). The **ESP32-S3-BOX-3** (firmware at `firmware/box3/`) is a parallel smart-client target.
 
-The firmware (`firmware/box3/`) and the microWakeWord training pipeline (`scripts/microwakeword/`) implement the smart-client side of this design today. The backend changes described below are **not yet implemented** — they are recorded here so the integration can be picked up later without re-deriving the design.
+**Implementation status.** The backend transport, signaling, and control protocol are **implemented** — see `server.py` (`POST /api/offer`, `ControlChannel`, `PipelineStateEmitter`, `build_pipeline_task`) and the browser reference client in `web/`. A first-cut RPi 5 Python client exists at `devices/rpi5/rpi_webrtc_voice.py` (continuous streaming, no on-device wake yet). The firmware (`firmware/box3/`) and the microWakeWord training pipeline (`scripts/microwakeword/`) implement the Box-3 smart-client side. The **remaining work to ship the RPi 5 as a remote client** is specified in [Raspberry Pi 5 smart client — first hardware target](#raspberry-pi-5-smart-client--first-hardware-target) below.
 
 ---
 
@@ -151,11 +151,13 @@ The `static/` page is the same code that will become `web/` in build step 1 — 
 
 ---
 
-## Backend changes (deferred — to implement later)
+## Backend changes (IMPLEMENTED — recorded for reference)
 
-### Files to modify
+> **Status:** This section described the plan before the WebRTC backend existed. It is now implemented in **`server.py`** (not `app.py` — the original local-audio `app.py` is kept as the legacy `make run` path). `server.py` builds a per-connection Pipecat pipeline on `SmallWebRTCTransport`, wires a `ControlChannel` (`hello`/`ready`/`backend`/`persona`/`state`/`transcript`/`wake`), and keeps `--local-audio` as an optional always-on Jabra pipeline alongside the WebRTC endpoint. The original design notes below are retained for context.
 
-#### `app.py`
+### Files modified
+
+#### `app.py` → `server.py`
 
 - Replace `LocalAudioTransport` (line 51 import, lines 456–474 setup) with `SmallWebRTCTransport` from `pipecat.transports.network.small_webrtc`.
 - Remove the `WakePhraseUserTurnStartStrategy` block (lines 705–745). Use the default Silero-VAD turn strategy.
@@ -184,18 +186,26 @@ A minimal browser reference client: one HTML page, vanilla JS, no build step.
 
 Start `uvicorn server:app --host 0.0.0.0 --port 8080` (or `python server.py`) instead of `python app.py`. Ollama, Chatterbox, and Woosh launches unchanged.
 
-#### `.env.example`
-
-Add:
+#### Server environment
 
 ```
 WEBRTC_HOST=0.0.0.0
 WEBRTC_PORT=8080
+
+# Remote hardening (Step F) — all optional; unset = open LAN dev mode:
+WEBRTC_SSL_CERT=.certs/cert.pem        # HTTPS (also WEBRTC_SSL_KEY); `make run-server-lan` generates these
+WEBRTC_SSL_KEY=.certs/key.pem
+WEBRTC_AUTH_TOKEN=change-me             # require Authorization: Bearer <token> on /api/offer + /api/sessions
+WEBRTC_MAX_OFFERS_PER_MIN=30           # per-IP rate limit on /api/offer (0 disables)
 WEBRTC_ICE_SERVERS=stun:stun.l.google.com:19302
-IDLE_TIMEOUT_SEC=20
+#   or, for TURN with credentials (symmetric NAT):
+#   WEBRTC_ICE_SERVERS=[{"urls":"turn:turn.example.com:3478","username":"u","credential":"p"}]
+STALE_SESSION_SECS=300                  # reap an abandoned peer after this long
 ```
 
-Remove (or comment out): `INPUT_DEVICE_INDEX`, `OUTPUT_DEVICE_INDEX`, `WAKE_PHRASES`, `CLAUDE_WAKE_PHRASES`.
+The startup log prints `security: auth=on/OFF rate_limit=…/min ice_servers=N stale_session=…s` so the effective posture is visible. `/api/sessions` returns `{count, sessions:[{pc_id, mode, ip, age_secs}]}` for monitoring.
+
+The RPi client's matching config is `devices/rpi5/rpi-voice.env.example` (installed as `/etc/rpi-voice.env`, consumed by `rpi-voice.service`).
 
 ### Backend selection without wake-phrase regex
 
@@ -279,6 +289,65 @@ Out of scope for v1, but the control protocol is designed to absorb them without
 - **Outputs (server-commanded).** LCD strings (`output: "lcd_text"`), LEDs / RGB (`output: "led"`), relays, servos. Server emits `{"type":"output","output":"led","value":{"r":0,"g":255,"b":0}}`. Smart client advertises which outputs it has in `hello.capabilities`; server only sends commands the client advertised.
 
 The pipeline-side machinery for these arrives only when a concrete use case lands. The protocol shape is fixed now so firmware can stub it.
+
+---
+
+## Raspberry Pi 5 smart client — first hardware target
+
+The first physical smart client is a **Raspberry Pi 5 with a Jabra Speak2 40** USB speakerphone. Unlike the Box-3, the Pi runs the standard aiortc Python client (`devices/rpi5/rpi_webrtc_voice.py`) rather than ESP-IDF firmware. This is the shortest path to a real remote client because the transport, signaling, and control protocol already exist and are shared with the browser.
+
+### Target lifecycle (RPi 5)
+
+1. Pi boots, opens the Jabra over ALSA, arms an **on-device wake word** (openWakeWord/TFLite on the Pi's CPU). No WebRTC peer open yet.
+2. Wake fires locally → Pi POSTs an SDP offer to `/api/offer` with `mode:"push"` and `hello.capabilities:["audio","wakeword"]`.
+3. Server answers; peer establishes. Server runs **VAD-only turn segmentation — no server-side wake detection** (the Pi already gated on wake).
+4. Pi streams from a small pre-roll ring buffer (so the first phoneme isn't clipped), then live mic. STT → LLM → TTS round-trip plays back through the Jabra.
+5. **The Pi decides when the interaction is over** (local end-of-turn / silence timeout) and closes the peer, sending `bye` first. The server does *not* race it — its idle timeout only resets context; a longer **stale-session guard** force-closes truly abandoned peers.
+6. Pi re-arms wake and returns to step 1.
+
+### Requirements and design decisions
+
+**1. Backend must start without the Jabra attached, and hot-attach it.**
+The `--local-audio` path resolves the Jabra by name at startup (`_audio_devices.resolve_from_config`) and currently *raises and exits* if it's absent. Change this to be non-fatal: start the WebRTC endpoint regardless, and run a background task that **rescans every 5 s** and starts (or restarts) the local Jabra pipeline the moment the device appears — and tears it down cleanly if the device is unplugged. The WebRTC endpoint never depends on local audio.
+
+*Local dev corollary (the "run the client here" workflow):* because the RPi client is Python, it can run on the dev Mac too. Run `make run-server` (which does **not** bind local audio) and run the client locally against `localhost:8080`, letting the *client* own the Jabra. The client's audio format must be OS-aware — `alsa` on Linux (the Pi), `avfoundation` on macOS (the dev Mac) — exposed via a `--audio-format` flag.
+
+**2. Parallel sessions must be isolated.**
+`/api/offer` already builds a fresh `backend_state`, `persona_state`, `ControlChannel`, skill registry, and pipeline per connection (`server.py:1536`, `build_pipeline_task`). Two clients (e.g. browser + Pi, or two Pis) can run different backends/personas concurrently without cross-talk. This must be **verified**, not assumed — see the verification checklist. Known shared singletons (Chatterbox/Kokoro TTS servers, Whisper MLX model, radio/Spotify players) are shared *services*, not shared *routing state*; confirm they multiplex without interleaving audio or state across sessions.
+
+**3. Device-side wake; server trusts the client's session boundaries.**
+- **No server-side wake for smart clients.** Smart clients connect in `mode:"push"`, which already skips the `WakeWordDetector` and uses VAD-only turn-start (`build_pipeline_task`, `mode == "wake"` branch is not taken). The server never re-checks the wake word.
+- **Client ends the session, not the server.** To avoid teardown races, the server keeps `cancel_on_idle_timeout=False` (idle only resets conversation context) and relies on the client's `bye` / peer close for teardown.
+- **Longer stale-session guard.** So an abandoned peer (crashed Pi, dropped Wi-Fi) doesn't leak a pipeline forever, add an absolute **stale-session timeout** (e.g. 5 min of no inbound audio) that force-closes the connection. This is deliberately much longer than the conversational idle timeout so it can never pre-empt a live device.
+
+**4. Additional items to support *remote* (off-LAN) RPi 5 clients.**
+- **ICE/STUN/TURN.** Both server and client currently configure no ICE servers (host candidates only — LAN-only). Remote clients across NAT need STUN and, for symmetric NAT, a **TURN relay** (e.g. self-hosted coturn). Make ICE servers configurable on both ends (`WEBRTC_ICE_SERVERS` already exists on the client).
+- **Transport security + auth.** `/api/offer` is unauthenticated. A remote endpoint needs HTTPS (cert plumbing already exists via `WEBRTC_SSL_CERT/KEY`) plus a shared-secret/token check on the offer POST, and basic rate limiting.
+- **Client reconnection.** The client currently exits on `disconnected`/`failed`. Add a reconnect-with-backoff loop that re-arms wake rather than terminating.
+- **Backend/persona from dual wake models.** When the Pi loads both "hey babel" and "hey claude" models, it sends `{"type":"backend","name":...}` (and/or `persona`) right after `hello` based on which model fired — the server honors it per session.
+- **Pre-roll ring buffer** on the client so the first phoneme after wake isn't clipped (~300–500 ms).
+- **Echo handling.** The Jabra Speak2 40 has hardware AEC, so TTS played through it should not re-trigger the on-device wake — confirm empirically; no server-side AEC needed.
+- **Deployment.** systemd unit on the Pi, a device config file (`offer_url`, `device_id`, ICE, wake models), and a `device_id` in `hello` for observability. Add a lightweight `/api/sessions` count / heartbeat for monitoring active peers.
+
+### Build plan (RPi 5)
+
+| Step | Status | Scope | Files |
+|---|---|---|---|
+| A | ✅ done | **Server: start without Jabra + 5 s hot-attach watcher.** `try_resolve_from_config` is non-raising; the local pipeline runs under `_local_audio_supervisor`, which scans every 5 s and (re)starts on attach, rescans on crash/detach. | `server.py` (lifespan / `_local_audio_supervisor`), `scripts/_audio_devices.py` |
+| B | ✅ done | **Client runs on macOS + LAN.** OS-aware audio format (`--audio-format`, default `avfoundation` on Darwin / `alsa` on Linux); macOS playback via PortAudio (sounddevice). Makefile targets `run-webrtc-client`, `run-jabra`. Full loop on one Mac. | `devices/rpi5/rpi_webrtc_voice.py`, `Makefile`, `install_mac.sh` |
+| C | ✅ done | **Parallel-session isolation.** Found + fixed the real hazard: persona TTS services were shared singletons (a Pipecat `FrameProcessor` can't be linked into two live pipelines). Now built per-connection via `runtime["persona_tts_factory"]`, reusing one shared Kokoro ONNX model (no per-session reload). | `server.py` (`_build_shared_kokoro_model`, `_reuse_kokoro_model`, factory) |
+| D | ✅ done | **Session boundaries.** Client owns session end; server keeps `cancel_on_idle_timeout=False` (idle only resets context). Added an absolute **stale-session guard** (`STALE_SESSION_SECS`, default 300 s) that reaps abandoned peers, reset on real user activity so it can't pre-empt a live device. `bye` → immediate peer close (client sends it on exit). `mode:"push"` already skips the server `WakeWordDetector` — confirmed. | `server.py` (`ControlChannel.bye`, `PipelineStateEmitter.on_activity`, `build_pipeline_task` idle handler), `devices/rpi5/` |
+| E | ◐ built, needs live test | **On-device wake + lifecycle.** `LocalWakeDetector` (openWakeWord) + `wake_test.py` (`make run-wake-test`) — **verified** on the Jabra. Client `--local-wake` mode (`make run-wake-client`): one **full-duplex** `sd.Stream` feeds the detector + a custom `_MicTrack` and plays remote TTS from a shared buffer (a single device stream — two separate PortAudio streams starved capture on the Jabra). On wake it connects (`mode:"push"`), replays a ~500 ms pre-roll, sends the model's `persona`, closes on `--session-timeout` silence (+`bye`), and re-arms. Two transport bugs fixed + loopback-verified: `_MicTrack` emits **20 ms** frames (aiortc stamps all RTP packets of one encoded frame identically, so larger frames dropped all but one → 1 frame delivered; now 155), and duplex I/O removed the device contention. Session lifetime is driven by the server's `speaking`/`idle`/`listening` control messages (not the always-on audio buffer); the detector is fed continuously and a `--rearm-delay` prevents the just-ended wake word from re-firing. **Exponential reconnect-backoff** (`--connect-retries`/`--reconnect-backoff`) and **dual-model→`backend`** (`--wake-backend-map`) are wired. Clean Ctrl-C on client + server. **Pending:** live end-to-end confirmation of a full spoken turn. | `devices/rpi5/wake.py`, `wake_test.py`, `rpi_webrtc_voice.py` |
+| F | ✅ done | **Remote hardening.** Server: configurable STUN/TURN (`WEBRTC_ICE_SERVERS`, STUN URLs or JSON w/ TURN creds), bearer-token auth on `/api/offer` + `/api/sessions` (`WEBRTC_AUTH_TOKEN`, constant-time), per-IP sliding-window rate limit (`WEBRTC_MAX_OFFERS_PER_MIN`), `/api/sessions` observability, HTTPS via existing `WEBRTC_SSL_CERT/KEY`. Client: `--auth-token`, `--insecure`/`--ca-cert` for TLS, ICE via `WEBRTC_ICE_SERVERS`. Deploy: `devices/rpi5/rpi-voice.service` (systemd) + `rpi-voice.env.example`. | `server.py`, `devices/rpi5/rpi_webrtc_voice.py`, `devices/rpi5/rpi-voice.*` |
+
+### Verification (RPi 5)
+
+- **Step A:** start `make run-server-local` with the Jabra unplugged → server comes up, logs "scanning for local audio device". Plug the Jabra → within 5 s the local wake pipeline starts. Unplug → it stops cleanly, server stays up.
+- **Step B:** on the Mac, `make run-server` + `make run-rpi-client-local` → speak into the Jabra, hear the LLM reply back through it. Full transport + pipeline exercised with no Pi hardware.
+- **Step C:** browser on Claude + local client on Ollama simultaneously → each transcript/response stays on its own backend; switching persona on one doesn't move the other.
+- **Step D:** kill the client mid-session (SIGKILL, no `bye`) → server force-closes the peer after the stale timeout, not before; a slow user (long thinking pauses) is never dropped.
+- **Step E:** on the Pi, "hey babel …" opens a peer, streams (no clipped first phoneme), plays back through the Jabra, then closes; wake re-arms. Wi-Fi drop → client reconnects.
+- **Step F:** Pi on a *different* network than the server connects through STUN/TURN; an offer without the auth token is rejected.
 
 ---
 
