@@ -1,17 +1,17 @@
 """Spotify Connect playback for the Babel voice agent.
 
 Audio flow:
-    librespot --backend pipe   →   mpv (raw PCM, stdin)   →   Jabra (CoreAudio)
+    librespot --backend pipe (stdout PCM)  →  reader thread  →  registered sink
 
 librespot advertises a Spotify Connect endpoint named "Babel" on the LAN;
 the user binds it once from any Spotify client (phone, desktop), then we
 control playback via the Web API through spotipy, always targeting that
-device. mpv handles audio output and lets us pause/resume locally over an
-IPC socket for VAD ducking (same pattern as scripts/radio.py).
-
-We pipe librespot to mpv (instead of using librespot's rodio backend
-directly) because rodio cannot select a specific CoreAudio output device
-on macOS — mpv can.
+device. librespot's `pipe` backend writes raw 44.1 kHz/s16le/stereo PCM to
+stdout; a reader thread hands each chunk to whatever sink is registered via
+`set_pcm_sink` — the active pipeline's SpotifyMediaInjector — which streams it
+out that session's transport (WebRTC peer, or the server's Jabra in
+--local-audio mode). Ducking is handled in the pipeline by the injector, not
+here.
 """
 from __future__ import annotations
 
@@ -22,9 +22,10 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from loguru import logger
 
@@ -98,8 +99,16 @@ class SpotifyPlayer:
         self._device_name = device_name
         self._librespot: Optional[subprocess.Popen] = None
         self._mpv: Optional[subprocess.Popen] = None
-        self._paused = False  # duck-pause state (mpv IPC)
+        self._paused = False  # legacy duck-pause state (mpv IPC path, unused)
         self._jabra: Optional[str] = None
+        # librespot's raw PCM (44.1k/s16le/stereo) is read here and handed to a
+        # registered sink — the active pipeline's Spotify injector — so music
+        # plays out that session's transport (WebRTC peer or local Jabra)
+        # instead of a local mpv → CoreAudio speaker.
+        self._reader: Optional[threading.Thread] = None
+        self._reader_stop = threading.Event()
+        self._pcm_sink: Optional[Callable[[bytes], None]] = None
+        self._sink_lock = threading.Lock()
         self._sp = None  # spotipy.Spotify, lazy
         self._device_id: Optional[str] = self._load_cached_device_id()
         self._now_playing_cache: Optional[tuple[float, Optional[dict]]] = None
@@ -108,8 +117,29 @@ class SpotifyPlayer:
 
     # ---------- Audio sink ----------
 
+    def set_pcm_sink(self, sink: Callable[[bytes], None]) -> None:
+        """Register the consumer for librespot's raw PCM (44.1k/s16le/stereo).
+
+        The active pipeline's Spotify injector calls this so music flows out its
+        WebRTC peer (or the local Jabra) rather than a local speaker. Only one
+        sink at a time — a new registration takes over."""
+        with self._sink_lock:
+            self._pcm_sink = sink
+
+    def clear_pcm_sink(self, sink: Optional[Callable[[bytes], None]] = None) -> bool:
+        """Clear the sink. If `sink` is given, only clear it if it's the current
+        one (so a stale connection can't unhook a newer one). Returns True if a
+        sink was actually cleared — the caller can then stop the audio sink."""
+        with self._sink_lock:
+            if sink is not None and self._pcm_sink is not sink:
+                return False
+            had = self._pcm_sink is not None
+            self._pcm_sink = None
+            return had
+
     def ensure_audio_sink(self) -> bool:
-        """Start librespot+mpv if not already running. Returns True on success.
+        """Start librespot (if not already running) and a reader thread that
+        streams its PCM to the registered sink. Returns True on success.
 
         When this spawns a fresh sink the cached device id is invalidated —
         librespot generates a new id per session, so the next resolve_device()
@@ -126,15 +156,6 @@ class SpotifyPlayer:
                 "librespot not found. Install with `brew install librespot`."
             )
             return False
-        mpv_bin = shutil.which("mpv")
-        if mpv_bin is None:
-            logger.error("mpv not found. Install with `brew install mpv`.")
-            return False
-
-        try:
-            os.unlink(self._ipc_path)
-        except FileNotFoundError:
-            pass
 
         # librespot 0.8.x: zeroconf discovery is on by default; there's only
         # --disable-discovery to opt out. Passing the (now-removed) flag
@@ -157,70 +178,53 @@ class SpotifyPlayer:
             logger.error(f"Failed to spawn librespot: {e}")
             return False
 
-        mpv_cmd = [
-            mpv_bin,
-            "--no-video",
-            "--no-terminal",
-            "--idle=no",
-            f"--input-ipc-server={self._ipc_path}",
-            "--demuxer=rawaudio",
-            "--demuxer-rawaudio-format=s16le",
-            f"--demuxer-rawaudio-rate={_PCM_RATE}",
-            "--demuxer-rawaudio-channels=2",
-        ]
-        device = self._jabra_device()
-        if device:
-            mpv_cmd.append(f"--audio-device={device}")
-        mpv_cmd.append("-")  # read from stdin
-
-        try:
-            self._mpv = subprocess.Popen(
-                mpv_cmd,
-                stdin=self._librespot.stdout,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-            )
-        except OSError as e:
-            logger.error(f"Failed to spawn mpv: {e}")
-            self._terminate(self._librespot, "librespot")
-            self._librespot = None
-            return False
-
-        # Close the parent's copy of librespot's stdout so SIGPIPE propagates
-        # to librespot when mpv exits.
-        if self._librespot.stdout is not None:
-            self._librespot.stdout.close()
-
         self._paused = False
-        logger.info(
-            f"Spotify sink started: librespot[{self._librespot.pid}] | "
-            f"mpv[{self._mpv.pid}] -> {device or 'system default'}"
+        self._reader_stop.clear()
+        self._reader = threading.Thread(
+            target=self._pump_pcm, name="spotify-pcm", daemon=True
         )
-
-        # Wait briefly for the mpv IPC socket so the first duck call doesn't race.
-        deadline = time.monotonic() + 2.0
-        while time.monotonic() < deadline:
-            if os.path.exists(self._ipc_path):
-                return True
-            time.sleep(0.05)
-        logger.warning(
-            f"mpv IPC socket {self._ipc_path} did not appear within 2s; "
-            "ducking may fail until it does."
+        self._reader.start()
+        logger.info(
+            f"Spotify sink started: librespot[{self._librespot.pid}] -> pipeline injector"
         )
         return True
 
+    def _pump_pcm(self) -> None:
+        """Read librespot's stdout PCM and hand each chunk to the current sink.
+        Runs on a daemon thread; exits when librespot's stdout closes."""
+        stream = self._librespot.stdout if self._librespot else None
+        if stream is None:
+            return
+        # 4096 bytes = 1024 stereo s16 frames ≈ 23 ms at 44.1 kHz — low latency.
+        while not self._reader_stop.is_set():
+            try:
+                data = stream.read1(4096)
+            except (ValueError, OSError):
+                break
+            if not data:
+                break  # librespot exited / stdout closed
+            with self._sink_lock:
+                sink = self._pcm_sink
+            if sink is not None:
+                try:
+                    sink(data)
+                except Exception as e:
+                    logger.debug(f"spotify pcm sink raised: {e!r}")
+
     def stop_audio_sink(self) -> None:
-        # mpv first so it stops consuming librespot's pipe; librespot exits on
-        # SIGPIPE or via the explicit terminate below.
-        self._terminate(self._mpv, "mpv")
-        self._mpv = None
+        self._reader_stop.set()
         self._terminate(self._librespot, "librespot")
+        # Closing librespot's stdout unblocks the reader's read1().
+        if self._librespot is not None and self._librespot.stdout is not None:
+            try:
+                self._librespot.stdout.close()
+            except OSError:
+                pass
         self._librespot = None
+        if self._reader is not None:
+            self._reader.join(timeout=1.0)
+            self._reader = None
         self._paused = False
-        try:
-            os.unlink(self._ipc_path)
-        except FileNotFoundError:
-            pass
 
     def _terminate(self, proc: Optional[subprocess.Popen], label: str) -> None:
         if proc is None or proc.poll() is not None:
@@ -236,12 +240,7 @@ class SpotifyPlayer:
             logger.debug(f"{label} terminate raised: {e}")
 
     def _sink_alive(self) -> bool:
-        return (
-            self._librespot is not None
-            and self._librespot.poll() is None
-            and self._mpv is not None
-            and self._mpv.poll() is None
-        )
+        return self._librespot is not None and self._librespot.poll() is None
 
     def _jabra_device(self) -> Optional[str]:
         if self._jabra is None:
@@ -670,19 +669,13 @@ class SpotifyPlayer:
     # ---------- Ducking (mpv IPC) ----------
 
     def duck_pause(self) -> None:
-        """Pause the local mpv via IPC for VAD ducking. Does NOT touch the
-        Spotify API — the Connect session keeps running on Spotify's clock,
-        we just stop emitting audio locally."""
-        if not self._sink_alive() or self._paused:
-            return
-        if self._send_ipc({"command": ["set_property", "pause", True]}):
-            self._paused = True
+        """No-op: ducking is now handled in the pipeline by the Spotify injector
+        (it drops music frames while the bot speaks), so the shared player has
+        nothing to pause. Kept so MediaDuckWatcher's capability dispatch still
+        routes here instead of calling the API-level pause()."""
 
     def duck_resume(self) -> None:
-        if not self._sink_alive() or not self._paused:
-            return
-        if self._send_ipc({"command": ["set_property", "pause", False]}):
-            self._paused = False
+        """No-op — see duck_pause."""
 
     def _send_ipc(self, payload: dict) -> bool:
         if not os.path.exists(self._ipc_path):
@@ -770,7 +763,6 @@ def _start_sink_blocking() -> int:
                 # so the failure is debuggable instead of silent.
                 for proc, label in (
                     (p._librespot, "librespot"),
-                    (p._mpv, "mpv"),
                 ):
                     if proc is None:
                         continue
