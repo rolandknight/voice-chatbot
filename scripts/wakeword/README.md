@@ -114,6 +114,7 @@ Log each phrase's iterations in its own `<phrase>-training.md`:
 
 - [`hey-babel-training.md`](hey-babel-training.md)
 - [`hey-marvin-training.md`](hey-marvin-training.md)
+- [`hey-one-one-training.md`](hey-one-one-training.md)
 
 ## Troubleshooting
 
@@ -154,6 +155,6 @@ via `HF_HOME`. Delete the half-downloaded file there and re-run; it will resume.
   Drives one phrase per invocation (selected via `WAKEWORD_CONFIG`).
 - `Makefile` — per-phrase + aggregate `train`/`clean`/`clean-all`/`install`
   wrappers around the above. The `PHRASES` list is the source of truth.
-- `hey_babel.yml`, `hey_marvin.yml` — training config (one per phrase).
-- `hey-babel-training.md`, `hey-marvin-training.md` — iteration log (one per phrase).
+- `hey_babel.yml`, `hey_marvin.yml`, `hey_one_one.yml` — training config (one per phrase).
+- `hey-babel-training.md`, `hey-marvin-training.md`, `hey-one-one-training.md` — iteration log (one per phrase).
 - `_work/` — generated; datasets (shared), intermediate clips, and final models.
