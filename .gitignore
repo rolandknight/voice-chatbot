@@ -2,6 +2,7 @@
 .env
 __pycache__/
 *.pyc
+.hermit/
 
 # Chatterbox-TTS-Server clone, its venv, and any model caches it pulls.
 vendor/

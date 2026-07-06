@@ -63,7 +63,7 @@ run-webrtc-client:
 	@echo ""
 	@echo "WebRTC client -> $(OFFER_URL)"
 	@echo ""
-	.venv/bin/python devices/rpi5/rpi_webrtc_voice.py \
+	python devices/rpi5/rpi_webrtc_voice.py \
 	  --offer-url $(OFFER_URL) \
 	  $(if $(AUDIO_FORMAT),--audio-format $(AUDIO_FORMAT),) \
 	  $(if $(INPUT_DEVICE),--input-device $(INPUT_DEVICE),) \
@@ -113,7 +113,7 @@ run-wake-test:
 # after "hey babel"/"hey marvin". Capture+playback on the Jabra (its AEC keeps
 # TTS out of the mic). Pair with `make run-server`. Override with THRESHOLD=,
 # SESSION_TIMEOUT=, INPUT_DEVICE=, OUTPUT_DEVICE=.
-run-wake-client: OFFER_URL := http://localhost:8080/api/offer
+run-wake-client: OFFER_URL := http://192.168.0.245:8080/api/offer
 run-wake-client: INPUT_DEVICE ?= Jabra
 run-wake-client: OUTPUT_DEVICE ?= Jabra
 run-wake-client:
@@ -121,7 +121,7 @@ run-wake-client:
 	@echo "On-device wake loop -> $(OFFER_URL)  (in=$(INPUT_DEVICE) out=$(OUTPUT_DEVICE))"
 	@echo "Say 'hey babel' or 'hey marvin'; it connects only after wake."
 	@echo ""
-	.venv/bin/python devices/rpi5/rpi_webrtc_voice.py --local-wake \
+	python devices/rpi5/rpi_webrtc_voice.py --local-wake \
 	  --offer-url $(OFFER_URL) --input-device $(INPUT_DEVICE) --output-device $(OUTPUT_DEVICE) \
 	  $(if $(THRESHOLD),--threshold $(THRESHOLD),) \
 	  $(if $(SESSION_TIMEOUT),--session-timeout $(SESSION_TIMEOUT),)
