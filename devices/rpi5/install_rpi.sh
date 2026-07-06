@@ -8,7 +8,8 @@
 # install openWakeWord with --no-deps and provide its real runtime deps via
 # requirements.txt.
 #
-# Usage:  ./install_rpi.sh            (uses ./.venv or the active venv)
+# Usage:  ./install_rpi.sh            (installs into the active python env; run
+#                                      `. bin/activate-hermit` from the repo root first)
 #         PYTHON=python3.12 ./install_rpi.sh
 set -euo pipefail
 

@@ -23,7 +23,7 @@ Skills, wake words, idle reset, ducking, and SFX are all wired in — see
 build_pipeline_task and build_local_pipeline_task.
 
 Run:
-    .venv/bin/python server.py            # http://localhost:8080
+    python server.py            # http://localhost:8080
     make run-server-lan                   # https://<lan-ip>:8080 (HTTPS for LAN clients)
 """
 

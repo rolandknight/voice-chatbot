@@ -1,4 +1,7 @@
-.PHONY: help run run-webrtc-smoke run-webrtc-smoke-lan run-server run-server-lan run-server-local run-server-lan-local run-webrtc-client run-rpi-client-local run-jabra run-wake-test run-wake-client
+.PHONY: help install-server install-server-os run run-webrtc-smoke run-webrtc-smoke-lan run-server run-server-lan run-server-local run-server-lan-local run-webrtc-client run-rpi-client-local run-jabra run-wake-test run-wake-client
+
+# Homebrew packages the server needs (macOS). Keep in sync with install_mac.sh.
+BREW_PKGS := portaudio ffmpeg mpv librespot git cmake pkg-config ollama corelocationcli
 
 OFFER_URL ?= http://localhost:8080/api/offer
 
@@ -8,6 +11,8 @@ KEY := $(CERT_DIR)/key.pem
 
 help:
 	@echo "Targets:"
+	@echo "  install-server-os         - install the server's OS packages (Homebrew)"
+	@echo "  install-server            - install the server's Python packages (pip -> Hermit env)"
 	@echo "  run                       - legacy local-audio backend (./run.sh)"
 	@echo "  run-server                - WebRTC backend on http://localhost:8080"
 	@echo "  run-server-lan            - WebRTC backend on HTTPS, reachable from LAN"
@@ -21,38 +26,46 @@ help:
 	@echo "  run-wake-test             - on-device openWakeWord test (mic only, no server)"
 	@echo "  run-wake-client           - full on-device-wake loop HERE (connects only after wake)"
 
+install-server-os:
+	brew install $(BREW_PKGS)
+
+# Installs into the active Python env — run `. bin/activate-hermit` first so
+# pip targets the Hermit toolchain.
+install-server:
+	python -m pip install -r requirements.txt
+
 run:
 	./run.sh
 
 run-webrtc-smoke:
-	.venv/bin/python webrtc_smoke/server.py
+	python webrtc_smoke/server.py
 
 run-webrtc-smoke-lan: $(CERT)
 	@echo ""
 	@echo "First visit from another machine: accept the self-signed cert warning."
 	@echo "If the OS firewall prompts, allow incoming connections for Python."
 	@echo ""
-	WEBRTC_SSL_CERT=$(CERT) WEBRTC_SSL_KEY=$(KEY) .venv/bin/python webrtc_smoke/server.py
+	WEBRTC_SSL_CERT=$(CERT) WEBRTC_SSL_KEY=$(KEY) python webrtc_smoke/server.py
 
 run-server:
-	.venv/bin/python server.py
+	python server.py
 
 run-server-lan: $(CERT)
 	@echo ""
 	@echo "First visit from another machine: accept the self-signed cert warning."
 	@echo "If the OS firewall prompts, allow incoming connections for Python."
 	@echo ""
-	WEBRTC_SSL_CERT=$(CERT) WEBRTC_SSL_KEY=$(KEY) .venv/bin/python server.py
+	WEBRTC_SSL_CERT=$(CERT) WEBRTC_SSL_KEY=$(KEY) python server.py
 
 run-server-local:
-	.venv/bin/python server.py --local-audio
+	python server.py --local-audio
 
 run-server-lan-local: $(CERT)
 	@echo ""
 	@echo "First visit from another machine: accept the self-signed cert warning."
 	@echo "If the OS firewall prompts, allow incoming connections for Python."
 	@echo ""
-	WEBRTC_SSL_CERT=$(CERT) WEBRTC_SSL_KEY=$(KEY) .venv/bin/python server.py --local-audio
+	WEBRTC_SSL_CERT=$(CERT) WEBRTC_SSL_KEY=$(KEY) python server.py --local-audio
 
 # General WebRTC client. Audio backend auto-selects per OS (alsa on Linux /
 # the Pi, avfoundation on macOS); override with AUDIO_FORMAT=. Point at any
@@ -105,7 +118,7 @@ run-rpi-client-local:
 	  $(if $(BACKEND),BACKEND=$(BACKEND),)
 
 run-wake-test:
-	.venv/bin/python devices/rpi5/wake_test.py \
+	python devices/rpi5/wake_test.py \
 	  $(if $(INPUT_DEVICE),--device $(INPUT_DEVICE),) \
 	  $(if $(THRESHOLD),--threshold $(THRESHOLD),)
 

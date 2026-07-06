@@ -18,18 +18,11 @@ TLS. Localhost / LAN dev only.
 
 ## Install
 
-From the repo root, in the project venv (the same `.venv` `install_mac.sh`
-sets up):
+From the repo root, with the project's Hermit env active
+(`. bin/activate-hermit` — the same toolchain `install_mac.sh` sets up):
 
 ```
-.venv/bin/pip install -r webrtc_smoke/requirements.txt
-```
-
-Or in a throwaway venv:
-
-```
-python3 -m venv webrtc_smoke/.venv
-webrtc_smoke/.venv/bin/pip install -r webrtc_smoke/requirements.txt
+pip install -r webrtc_smoke/requirements.txt
 ```
 
 ## Run

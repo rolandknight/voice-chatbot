@@ -19,7 +19,7 @@ a malformed `config.yaml` fails loudly before any audio device is opened.
 Dump the resolved tree:
 
 ```bash
-.venv/bin/python -m config.loader --print-effective
+python -m config.loader --print-effective
 ```
 
 ## Pick the Jabra device
@@ -232,13 +232,13 @@ same CoreAudio device would garble the output.
    unless you revoke them):
 
    ```bash
-   .venv/bin/python scripts/spotify.py --bootstrap
+   python scripts/spotify.py --bootstrap
    ```
 
 4. **Bind "Babel" from a Spotify client.** Start the sink (blocks):
 
    ```bash
-   .venv/bin/python scripts/spotify.py --start-sink
+   python scripts/spotify.py --start-sink
    ```
 
    Then, on your phone or any Spotify client, open the Now Playing bar
@@ -258,9 +258,9 @@ same CoreAudio device would garble the output.
   Connect, choose Babel. The bot retries device discovery on every play
   command.
 - *"Spotify isn't authorised yet."* — token cache is missing or revoked.
-  Re-run `.venv/bin/python scripts/spotify.py --bootstrap`.
+  Re-run `python scripts/spotify.py --bootstrap`.
 - *librespot crashed mid-playback* — the next play command respawns the
-  sink. If it keeps crashing, run `.venv/bin/python scripts/spotify.py --start-sink`
+  sink. If it keeps crashing, run `python scripts/spotify.py --start-sink`
   by hand and read its stderr.
 - *Playback ignores `--audio-device` and uses the system default* — the
   Jabra wasn't found via `mpv --audio-device=help`. Plug the Jabra in
@@ -307,7 +307,7 @@ the HF metadata check.
 
 ```bash
 brew install portaudio
-source .venv/bin/activate
+. bin/activate-hermit
 python -m pip install --no-cache-dir pyaudio
 ```
 
