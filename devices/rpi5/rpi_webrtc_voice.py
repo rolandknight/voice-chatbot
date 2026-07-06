@@ -586,6 +586,10 @@ class WakeClient:
                     self._last_activity = now
             elif mtype == "transcript":
                 self._last_activity = now
+            elif mtype == "media" and data.get("state") == "playing":
+                # Music streaming over the session — keep it alive past the
+                # silence timeout (heartbeat arrives every few seconds).
+                self._last_activity = now
             log.debug("control recv: %s", message)
 
         pc.addTrack(track)

@@ -23,7 +23,7 @@ Skills, wake words, idle reset, ducking, and SFX are all wired in — see
 build_pipeline_task and build_local_pipeline_task.
 
 Run:
-    .venv/bin/python server.py            # http://localhost:8080
+    python server.py            # http://localhost:8080
     make run-server-lan                   # https://<lan-ip>:8080 (HTTPS for LAN clients)
 """
 
@@ -57,6 +57,7 @@ from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
     CancelFrame,
+    EndFrame,
     Frame,
     FunctionCallResultFrame,
     FunctionCallsStartedFrame,
@@ -65,6 +66,7 @@ from pipecat.frames.frames import (
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
     LLMTextFrame,
+    OutputAudioRawFrame,
     TranscriptionFrame,
     TTSSpeakFrame,
     UserStartedSpeakingFrame,
@@ -410,6 +412,12 @@ class ControlChannel:
     def send_wake(self, state: str, **extra: Any) -> None:
         self._send({"type": "wake", "state": state, **extra})
 
+    def send_media(self, state: str) -> None:
+        # `playing` heartbeats keep a smart client's wake session alive while
+        # music streams (it would otherwise time out on silence); `stopped`
+        # lets the normal idle timeout resume.
+        self._send({"type": "media", "state": state})
+
     def send_error(self, code: str, message: str) -> None:
         self._send({"type": "error", "code": code, "message": message})
 
@@ -537,6 +545,145 @@ class PipelineStateEmitter(FrameProcessor):
     def _emit_state(self, state: str, **extra: Any) -> None:
         if self._control is not None:
             self._control.send_state(state, **extra)
+
+
+# Sample rate of librespot's pipe backend (see scripts/spotify.py).
+SPOTIFY_PCM_RATE = 44100
+
+
+class SpotifyMediaInjector(FrameProcessor):
+    """Streams SpotifyPlayer's librespot PCM into *this* session's output as
+    OutputAudioRawFrames, so music plays out the session's transport (WebRTC
+    peer, or the local Jabra in --local-audio mode) instead of a local speaker.
+
+    - Downmixes librespot's 44.1 kHz stereo s16 to mono; the transport resamples
+      to its own output rate.
+    - Ducks by dropping music frames while the bot is speaking (so TTS isn't
+      overlaid), staying in sync with Spotify's clock.
+    - While audio flows, calls `on_media(True)` as a heartbeat so a smart
+      client's wake session doesn't time out on silence; `on_media(False)` when
+      it stops.
+
+    Placed just upstream of transport.output(). Fed by SpotifyPlayer's reader
+    thread via `feed()` (thread-safe); a lazy asyncio task pushes the frames.
+    """
+
+    _HEARTBEAT_SECS = 3.0
+
+    def __init__(
+        self,
+        spotify_player: Any,
+        *,
+        on_media: Callable[[bool], None] | None = None,
+    ) -> None:
+        super().__init__()
+        self._player = spotify_player
+        self._on_media = on_media
+        self._queue: asyncio.Queue = asyncio.Queue(maxsize=256)
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._pump: asyncio.Task | None = None
+        # Ducked from user-start through bot-stop (music drops so the user is
+        # heard and TTS isn't overlaid). A safety timer un-ducks if the bot
+        # never replies. Mirrors MediaDuckWatcher.
+        self._ducked = False
+        self._safety: asyncio.Task | None = None
+        self._active = False
+        self._last_heartbeat = 0.0
+
+    def start(self) -> None:
+        """Arm the injector (call from the event loop when playback begins)."""
+        self._loop = asyncio.get_event_loop()
+        if self._pump is None or self._pump.done():
+            self._pump = asyncio.ensure_future(self._run())
+
+    def feed(self, pcm_stereo_s16: bytes) -> None:
+        """Enqueue raw PCM from SpotifyPlayer's reader thread (thread-safe)."""
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+        try:
+            loop.call_soon_threadsafe(self._enqueue, pcm_stereo_s16)
+        except RuntimeError:
+            pass  # loop shutting down
+
+    def _enqueue(self, data: bytes) -> None:
+        if self._queue.full():
+            try:
+                self._queue.get_nowait()  # drop oldest to bound latency
+            except asyncio.QueueEmpty:
+                pass
+        try:
+            self._queue.put_nowait(data)
+        except asyncio.QueueFull:
+            pass
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
+        await super().process_frame(frame, direction)
+        if isinstance(frame, (UserStartedSpeakingFrame, BotStartedSpeakingFrame)):
+            self._ducked = True
+            self._arm_safety()
+        elif isinstance(frame, BotStoppedSpeakingFrame):
+            self._ducked = False
+            self._cancel_safety()
+        elif isinstance(frame, (EndFrame, CancelFrame)):
+            # Session tearing down: unhook from the shared player and stop the
+            # librespot process if we were the active consumer.
+            self._cancel_safety()
+            if self._player is not None and self._player.clear_pcm_sink(self.feed):
+                self._player.stop_audio_sink()
+            if self._active and self._on_media is not None:
+                self._on_media(False)
+            self._active = False
+        await self.push_frame(frame, direction)
+
+    def _arm_safety(self) -> None:
+        self._cancel_safety()
+
+        async def _resume_later() -> None:
+            await asyncio.sleep(8.0)
+            self._ducked = False  # bot never replied — un-duck
+
+        self._safety = asyncio.ensure_future(_resume_later())
+
+    def _cancel_safety(self) -> None:
+        if self._safety is not None:
+            self._safety.cancel()
+            self._safety = None
+
+    async def _run(self) -> None:
+        import numpy as np
+
+        while True:
+            try:
+                data = await asyncio.wait_for(self._queue.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                if self._active:  # audio stopped flowing
+                    self._active = False
+                    if self._on_media is not None:
+                        self._on_media(False)
+                continue
+
+            now = time.monotonic()
+            if not self._active:
+                self._active = True
+                self._last_heartbeat = 0.0
+            if self._on_media is not None and now - self._last_heartbeat >= self._HEARTBEAT_SECS:
+                self._last_heartbeat = now
+                self._on_media(True)
+
+            if self._ducked:
+                continue  # duck: drop music this turn (keeps sync with Spotify)
+
+            stereo = np.frombuffer(data, dtype=np.int16)
+            if stereo.size % 2:
+                stereo = stereo[:-1]
+            mono = stereo.reshape(-1, 2).mean(axis=1).astype(np.int16).tobytes()
+            await self.push_frame(
+                OutputAudioRawFrame(
+                    audio=mono, sample_rate=SPOTIFY_PCM_RATE, num_channels=1
+                ),
+                FrameDirection.DOWNSTREAM,
+            )
 
 
 # ─────────────────────────── persona / TTS plumbing ───────────────────────
@@ -759,6 +906,7 @@ def _build_skill_runtime(
     *,
     persona_state: PersonaState,
     backend_state: dict[str, str],
+    spotify_injector: Any | None = None,
 ):
     """Build the per-connection skill plumbing: SkillContext + SkillRegistry +
     optional BotSpeakingTracker. Singleton resources (RadioPlayer,
@@ -773,6 +921,7 @@ def _build_skill_runtime(
     ctx = SkillContext(
         radio_player=runtime["radio_player"],
         spotify_player=runtime["spotify_player"],
+        spotify_injector=spotify_injector,
         sfx_tracker=sfx_tracker,
         sfx_backends=runtime["sfx_backends"],
         sfx_backend_override=runtime["sfx_backend_override"],
@@ -844,8 +993,21 @@ def build_pipeline_task(
     # Skills + sfx_tracker are per-connection: their handlers close over this
     # connection's persona_state/backend_state, so two clients won't switch
     # each other's persona or backend by issuing voice commands.
+    #
+    # Route Spotify audio into this session's output (WebRTC peer) instead of a
+    # local speaker; the heartbeat keeps a smart client's wake session alive
+    # while music streams.
+    spotify_injector: SpotifyMediaInjector | None = None
+    if runtime["spotify_player"] is not None:
+        spotify_injector = SpotifyMediaInjector(
+            runtime["spotify_player"],
+            on_media=(lambda playing: control.send_media("playing" if playing else "stopped")),
+        )
     skill_registry, sfx_tracker = _build_skill_runtime(
-        runtime, persona_state=persona_state, backend_state=backend_state
+        runtime,
+        persona_state=persona_state,
+        backend_state=backend_state,
+        spotify_injector=spotify_injector,
     )
 
     claude_cue = ClaudeCueEmitter() if claude_llm is not None else None
@@ -966,10 +1128,15 @@ def build_pipeline_task(
         in_flight,
         PersonaTagRouter(runtime["persona_config"], persona_state),
         tts_dispatch,
+        # Upstream of output so its music frames reach the transport and it can
+        # see Bot speaking frames to duck.
+        *([spotify_injector] if spotify_injector is not None else []),
         transport.output(),
     ]
+    # Spotify ducks itself in SpotifyMediaInjector; only radio (local mpv) needs
+    # the transport-level duck watcher.
     duckable = [
-        p for p in (runtime["radio_player"], runtime["spotify_player"]) if p is not None
+        p for p in (runtime["radio_player"],) if p is not None
     ]
     if duckable:
         # MediaDuckWatcher must sit downstream of transport.output() so it
@@ -1005,6 +1172,11 @@ def build_pipeline_task(
         ),
         idle_timeout_secs=runtime["idle_timeout_secs"],
         cancel_on_idle_timeout=False,
+        # Our clients use the custom control protocol (state/transcript/wake),
+        # not RTVI. Disabling it drops the redundant `rtvi-ai` data-channel
+        # traffic and the "Ignoring not RTVI message" warnings our own control
+        # messages (hello/persona/backend/bye) otherwise trigger.
+        enable_rtvi=False,
     )
 
     @task.event_handler("on_idle_timeout")
@@ -1104,8 +1276,17 @@ def build_local_pipeline_task(
                 extra={"tools": runtime["claude_tools"]} if runtime["claude_tools"] else {},
             ),
         )
+    # Local pipeline (server's own Jabra): Spotify audio flows through this
+    # pipeline's LocalAudioTransport output. No control channel, so no wake
+    # session to keep alive — on_media stays None.
+    spotify_injector: SpotifyMediaInjector | None = None
+    if runtime["spotify_player"] is not None:
+        spotify_injector = SpotifyMediaInjector(runtime["spotify_player"])
     skill_registry, sfx_tracker = _build_skill_runtime(
-        runtime, persona_state=persona_state, backend_state=backend_state
+        runtime,
+        persona_state=persona_state,
+        backend_state=backend_state,
+        spotify_injector=spotify_injector,
     )
 
     claude_cue = ClaudeCueEmitter() if claude_llm is not None else None
@@ -1207,10 +1388,15 @@ def build_local_pipeline_task(
         in_flight,
         PersonaTagRouter(runtime["persona_config"], persona_state),
         tts_dispatch,
+        # Upstream of output so its music frames reach the transport and it can
+        # see Bot speaking frames to duck.
+        *([spotify_injector] if spotify_injector is not None else []),
         transport.output(),
     ]
+    # Spotify ducks itself in SpotifyMediaInjector; only radio (local mpv) needs
+    # the transport-level duck watcher.
     duckable = [
-        p for p in (runtime["radio_player"], runtime["spotify_player"]) if p is not None
+        p for p in (runtime["radio_player"],) if p is not None
     ]
     if duckable:
         stages.append(MediaDuckWatcher(duckable))
@@ -1230,6 +1416,7 @@ def build_local_pipeline_task(
         ),
         idle_timeout_secs=runtime["idle_timeout_secs"],
         cancel_on_idle_timeout=False,
+        enable_rtvi=False,  # local audio has no data channel; RTVI is unused
     )
 
     @task.event_handler("on_idle_timeout")

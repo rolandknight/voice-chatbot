@@ -4,12 +4,13 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$PROJECT_DIR"
 
-if [[ ! -d .venv ]]; then
-  echo "Missing .venv. Run ./install_mac.sh first."
+if [[ ! -f bin/activate-hermit ]]; then
+  echo "Missing Hermit (bin/activate-hermit). Run ./install_mac.sh first."
   exit 1
 fi
 
-source .venv/bin/activate
+# Hermit provides python + the installed packages on PATH.
+. bin/activate-hermit
 
 # Pull the handful of config values that this script (sidecar launch
 # gating) needs, as shell-quoted exports. config/shell.py validates

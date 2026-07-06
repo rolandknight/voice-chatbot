@@ -1,6 +1,6 @@
 """Emit a fixed allowlist of config values as shell-quoted KEY=VALUE lines.
 
-run.sh evals the output:  eval "$(.venv/bin/python -m config.shell)"
+run.sh evals the output:  eval "$(python -m config.shell)"
 
 Only values bash itself consumes (sidecar launch gating) are listed here.
 """

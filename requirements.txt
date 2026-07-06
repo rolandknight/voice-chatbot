@@ -1,0 +1,31 @@
+# Server Python dependencies. Install with `make install-server`
+# (run `. bin/activate-hermit` first so pip targets the Hermit env).
+#
+# pipecat extras:
+#   local        PyAudio local-audio transport
+#   mlx-whisper  Apple-Silicon Whisper STT
+#   kokoro       local Kokoro ONNX TTS (babel persona)
+#   openai       OpenAI-compatible client for the local Chatterbox TTS server
+#   ollama       local LLM via Ollama's OpenAI-compatible API
+#   silero       VAD
+#   anthropic    Claude backend (ask_claude skill)
+#   webrtc       SmallWebRTCTransport (aiortc) — the RPi5 / browser WebRTC path
+#   whisper      faster-whisper (imported by pipecat's whisper.stt module,
+#                even though we use the MLX variant)
+pipecat-ai[local,mlx-whisper,whisper,kokoro,openai,ollama,silero,anthropic,webrtc]
+
+# WebRTC signaling server: server.py runs its own FastAPI /api/offer app.
+fastapi
+uvicorn[standard]
+
+python-dotenv
+loguru
+pyaudio
+pyyaml
+websockets
+yt-dlp
+spotipy
+openwakeword          # audio wake-word detection (ONNX)
+sounddevice           # PortAudio playback (macOS avfoundation client path)
+pydantic>=2
+pydantic-settings>=2

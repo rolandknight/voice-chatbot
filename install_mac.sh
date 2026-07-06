@@ -22,47 +22,28 @@ if ! command -v brew >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "Installing system dependencies..."
-brew update
+echo "Installing system dependencies (Homebrew)..."
 # mpv plays the BBC HLS radio streams targeted at the Jabra via CoreAudio.
-# librespot is a headless Spotify Connect endpoint; we pipe its PCM into mpv
-# so Spotify playback can target the Jabra the same way radio does.
-brew install python@3.12 portaudio ffmpeg mpv librespot git cmake pkg-config ollama corelocationcli
+# librespot is a headless Spotify Connect endpoint whose PCM we stream into the
+# pipeline. The package list lives in the Makefile (BREW_PKGS).
+brew update
+make install-server-os
 
-echo "Creating Python virtualenv..."
-/opt/homebrew/bin/python3.12 -m venv .venv
-source .venv/bin/activate
+echo "Activating Hermit toolchain (provides python + pip)..."
+# Hermit manages the Python binary; packages install into its environment —
+# no separate virtualenv.
+. bin/activate-hermit
 python -m pip install --upgrade pip wheel setuptools
 
-echo "Installing Python dependencies..."
-# Extras used:
-# local       -> PyAudio local audio transport
-# mlx-whisper -> Apple Silicon optimized Whisper STT
-# kokoro      -> local Kokoro ONNX TTS (kept for the babel persona)
-# openai      -> OpenAI-compatible TTS client used to talk to the local
-#                Chatterbox-TTS-Server for the cloned chatterbox personas
-# ollama      -> local LLM service via Ollama's OpenAI-compatible API
-# anthropic   -> Claude cloud backend reachable via the ask_claude skill
-# spotipy     -> Spotify Web API client used to control playback on the
-#                librespot Connect device
-# openwakeword -> audio-based wake-word detection (hey_babel + hey_jarvis)
-#                upstream of Whisper STT; replaces the older text-based
-#                WakePhraseUserTurnStartStrategy.
-# sounddevice  -> PortAudio playback for the RPi5 WebRTC client's avfoundation
-#                path (macOS is capture-only in ffmpeg), i.e. running
-#                `make run-webrtc-client` on this Mac.
-python -m pip install \
-  "pipecat-ai[local,mlx-whisper,kokoro,openai,ollama,silero,anthropic]" \
-  python-dotenv loguru pyaudio pyyaml websockets yt-dlp spotipy \
-  openwakeword sounddevice \
-  "pydantic>=2" "pydantic-settings>=2"
+echo "Installing Python dependencies (requirements.txt)..."
+make install-server
 
 echo "Downloading openwakeword shared backbone + hey_jarvis model..."
 # openwakeword ships the melspec/embedding/silero_vad backbone files via a
 # CDN, not the wheel. WakeWordDetector tries to use them at startup, so we
 # fetch them now — also downloads the bundled 'hey_jarvis_v0.1' model that
 # the marvin persona is wired to in config.yaml.
-.venv/bin/python -c "import openwakeword.utils as u; u.download_models(['hey_jarvis_v0.1'])"
+python -c "import openwakeword.utils as u; u.download_models(['hey_jarvis_v0.1'])"
 
 echo "Starting Ollama if needed..."
 if ! pgrep -x ollama >/dev/null 2>&1; then
@@ -99,15 +80,15 @@ echo ""
 echo "Configuration:"
 echo "  Non-secret config lives in config.yaml (committed)."
 echo "  Secrets (API keys) live in .env (gitignored; see .env.example)."
-echo "  Dump the resolved config: .venv/bin/python -m config.loader --print-effective"
+echo "  Dump the resolved config: python -m config.loader --print-effective"
 echo ""
 echo "Optional - Spotify:"
 echo "  1) Create an app at https://developer.spotify.com/dashboard."
 echo "  2) Put SPOTIPY_CLIENT_ID (and optionally SPOTIPY_CLIENT_SECRET) into .env."
 echo "     The redirect URI in the dashboard must match skills.spotify.redirect_uri"
 echo "     in config.yaml exactly."
-echo "  3) Run: .venv/bin/python scripts/spotify.py --bootstrap   (one-time OAuth)"
-echo "  4) Run: .venv/bin/python scripts/spotify.py --start-sink  (blocking),"
+echo "  3) Run: python scripts/spotify.py --bootstrap   (one-time OAuth)"
+echo "  4) Run: python scripts/spotify.py --start-sink  (blocking),"
 echo "     then open Spotify on your phone and pick 'Babel' from the Connect menu."
 echo ""
 echo "Optional - Chatterbox cloned voices:"

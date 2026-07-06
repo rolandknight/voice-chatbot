@@ -16,6 +16,10 @@ async def handle(params: FunctionCallParams, ctx: SkillContext) -> None:
             await asyncio.to_thread(ctx.radio_player.stop)
         except Exception as e:
             logger.debug(f"cross-stop radio failed: {e}")
+    # Route audio into this session's pipeline output (see play_spotify).
+    if ctx.spotify_injector is not None:
+        ctx.spotify_injector.start()
+        ctx.spotify_player.set_pcm_sink(ctx.spotify_injector.feed)
     try:
         _, spoken = await asyncio.to_thread(ctx.spotify_player.play_playlist, name)
     except Exception as e:

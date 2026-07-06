@@ -18,11 +18,10 @@ On Raspberry Pi OS:
 sudo apt update
 # libportaudio2 is REQUIRED: sounddevice (used for on-device wake capture +
 # playback) is only a binding to the system PortAudio library.
-sudo apt install -y python3-venv ffmpeg alsa-utils libavdevice-dev libportaudio2 portaudio19-dev
-cd devices/rpi5
-python3 -m venv .venv
-. .venv/bin/activate
-./install_rpi.sh          # requirements.txt + openWakeWord (see note below)
+sudo apt install -y ffmpeg alsa-utils libavdevice-dev libportaudio2 portaudio19-dev
+# From the repo root: Hermit provides python; then install the Pi deps.
+. bin/activate-hermit
+./devices/rpi5/install_rpi.sh   # requirements.txt + openWakeWord (see note below)
 ```
 
 ### Python 3.12 note (openWakeWord)
@@ -72,8 +71,8 @@ your user (in the `audio` group). Manage it with
 On this machine or on the Pi:
 
 ```bash
+. bin/activate-hermit          # from the repo root (puts python on PATH)
 cd devices/rpi5
-. .venv/bin/activate
 python webrtc_loopback_server.py --host 0.0.0.0 --port 8080
 ```
 
@@ -82,8 +81,8 @@ python webrtc_loopback_server.py --host 0.0.0.0 --port 8080
 On the Pi, with the loopback server running:
 
 ```bash
+. bin/activate-hermit          # from the repo root (puts python on PATH)
 cd devices/rpi5
-. .venv/bin/activate
 python rpi_webrtc_voice.py \
   --offer-url http://127.0.0.1:8080/api/offer \
   --input-device plughw:2,0 \
