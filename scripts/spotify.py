@@ -531,7 +531,7 @@ class SpotifyPlayer:
         self._user_paused = False
 
 
-def _bootstrap() -> int:
+def _bootstrap(headless: bool = False) -> int:
     spotipy = _spotipy_module()
     from spotipy.oauth2 import SpotifyPKCE
     spotify_cfg = get_config().skills.spotify
@@ -541,6 +541,10 @@ def _bootstrap() -> int:
         return 1
     redirect_uri = spotify_cfg.redirect_uri
     _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    # headless (e.g. SSH'd into the Pi with no browser): open_browser=False makes
+    # spotipy PKCE print the auth URL and prompt for the redirected URL instead
+    # of spinning up a local callback server (which the redirect would never
+    # reach from a browser on another machine).
     auth = SpotifyPKCE(
         client_id=client_id,
         redirect_uri=redirect_uri,
@@ -548,15 +552,23 @@ def _bootstrap() -> int:
         cache_handler=spotipy.cache_handler.CacheFileHandler(
             cache_path=str(_TOKEN_CACHE),
         ),
-        open_browser=True,
+        open_browser=not headless,
     )
     if auth.cache_handler.get_cached_token() is not None:
         sp = spotipy.Spotify(auth_manager=auth)
         me = sp.current_user()
         print(f"Already authorised as {me.get('display_name') or me.get('id')}.")
         return 0
-    # No cached token — trigger the interactive flow. PKCE opens the
-    # browser, captures the redirect, then caches the token to disk.
+    if headless:
+        print(
+            "Headless auth: open the URL below in a browser on ANY device,\n"
+            "approve, then copy the FULL URL it redirects to (it'll show a\n"
+            f"'can't connect' page at {redirect_uri} — that's fine) and paste\n"
+            "it back at the prompt.\n"
+        )
+    # No cached token — trigger the interactive flow. PKCE captures the redirect
+    # (local server if a browser is available, else the pasted URL), then caches
+    # the token to disk.
     token = auth.get_access_token()
     if not token:
         print("ERROR: bootstrap failed - no token cached.", file=sys.stderr)
@@ -599,6 +611,12 @@ if __name__ == "__main__":
         help="Run the one-time OAuth flow.",
     )
     parser.add_argument(
+        "--headless", action="store_true",
+        help="With --bootstrap: no local browser. Prints the auth URL and "
+        "prompts for the redirected URL (paste it back). Use over SSH / on "
+        "a headless Pi.",
+    )
+    parser.add_argument(
         "--list-devices", action="store_true",
         help="List visible Spotify Connect devices (check the client's "
         f"'{_LIBRESPOT_DEVICE_NAME}' librespot endpoint is reachable).",
@@ -606,7 +624,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.bootstrap:
-        sys.exit(_bootstrap())
+        sys.exit(_bootstrap(headless=args.headless))
     if args.list_devices:
         sys.exit(_list_devices())
     parser.print_help()
