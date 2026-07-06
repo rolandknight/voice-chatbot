@@ -28,8 +28,28 @@ fi
 # --no-deps: skip openWakeWord's Linux-only tflite-runtime pin (unused; we run ONNX).
 "$PY" -m pip install --no-deps "openwakeword==0.6.0"
 
+# openWakeWord's melspectrogram + embedding backbone (and the Silero VAD) ship
+# via CDN, not the wheel. The client loads them at startup to run ANY wake
+# model — without them it fails with "cannot find melspectrogram.onnx". Our
+# wake models are the custom ones under models/wakeword/, so we only need the
+# shared backbone; download_models() always fetches it regardless of the model
+# list. Mirrors the server's install_mac.sh.
+echo
+echo "Downloading openWakeWord shared backbone (melspectrogram/embedding/VAD)..."
+"$PY" -c "import openwakeword.utils as u; u.download_models(['hey_jarvis_v0.1'])"
+
 echo
 echo "Verifying imports:"
 "$PY" -c "import sounddevice; print('  sounddevice + PortAudio OK')"
 "$PY" -c "from openwakeword.model import Model; print('  openWakeWord OK (onnx)')"
+# Fail loudly at install time if the backbone is still missing, rather than at
+# first wake on the device.
+"$PY" - <<'EOF'
+import os, openwakeword
+res = os.path.join(os.path.dirname(openwakeword.__file__), "resources", "models")
+missing = [f for f in ("melspectrogram.onnx", "embedding_model.onnx") if not os.path.exists(os.path.join(res, f))]
+if missing:
+    raise SystemExit(f"ERROR: openWakeWord backbone missing after download: {missing} (in {res})")
+print("  openWakeWord backbone OK (melspectrogram + embedding)")
+EOF
 echo "Done."
