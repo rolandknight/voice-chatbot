@@ -1,7 +1,12 @@
-.PHONY: help install-server install-server-os run run-webrtc-smoke run-webrtc-smoke-lan run-server run-server-lan run-server-local run-server-lan-local run-webrtc-client run-rpi-client-local run-jabra run-wake-test run-wake-client
+.PHONY: help install-server install-server-os install-client install-client-os run run-webrtc-smoke run-webrtc-smoke-lan run-server run-server-lan run-server-local run-server-lan-local run-webrtc-client run-rpi-client-local run-jabra run-wake-test run-wake-client
 
 # Homebrew packages the server needs (macOS). Keep in sync with install_mac.sh.
 BREW_PKGS := portaudio ffmpeg mpv librespot git cmake pkg-config ollama corelocationcli
+
+# apt packages the on-device (RPi 5) wake client needs. sounddevice binds to
+# the system PortAudio library, which is not a pip dep. Keep in sync with the
+# precheck in devices/rpi5/install_rpi.sh.
+APT_PKGS := libportaudio2 portaudio19-dev
 
 OFFER_URL ?= http://localhost:8080/api/offer
 
@@ -13,6 +18,8 @@ help:
 	@echo "Targets:"
 	@echo "  install-server-os         - install the server's OS packages (Homebrew)"
 	@echo "  install-server            - install the server's Python packages (pip -> Hermit env)"
+	@echo "  install-client-os         - install the RPi 5 client's OS packages (apt: PortAudio)"
+	@echo "  install-client            - install the RPi 5 client's Python packages (devices/rpi5/install_rpi.sh)"
 	@echo "  run                       - legacy local-audio backend (./run.sh)"
 	@echo "  run-server                - WebRTC backend on http://localhost:8080"
 	@echo "  run-server-lan            - WebRTC backend on HTTPS, reachable from LAN"
@@ -33,6 +40,17 @@ install-server-os:
 # pip targets the Hermit toolchain.
 install-server:
 	python -m pip install -r requirements.txt
+
+# On-device (RPi 5) wake client. install-client-os installs the system
+# PortAudio that sounddevice binds to; install-client installs the Python
+# packages (delegating to install_rpi.sh, which also handles openWakeWord's
+# --no-deps quirk). Run `. bin/activate-hermit` first so pip targets the
+# Hermit toolchain, same as install-server.
+install-client-os:
+	sudo apt install -y $(APT_PKGS)
+
+install-client:
+	./devices/rpi5/install_rpi.sh
 
 run:
 	./run.sh

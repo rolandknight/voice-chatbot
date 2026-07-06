@@ -789,10 +789,10 @@ def parse_args() -> argparse.Namespace:
         os.path.dirname(os.path.abspath(__file__)), "..", "..", "models", "wakeword"
     )
     wake.add_argument("--wake-model-dir", default=os.path.normpath(_wake_model_dir))
-    wake.add_argument("--wake-models", default=os.environ.get("WAKE_MODELS", "hey_babel,hey_marvin"))
+    wake.add_argument("--wake-models", default=os.environ.get("WAKE_MODELS", "hey_babel,hey_marvin,hey_one_one"))
     wake.add_argument(
         "--wake-persona-map",
-        default=os.environ.get("WAKE_PERSONA_MAP", "hey_babel=babel,hey_marvin=marvin"),
+        default=os.environ.get("WAKE_PERSONA_MAP", "hey_babel=babel,hey_marvin=marvin,hey_one_one=one_one"),
         help="Comma-separated model=persona pairs applied when a model fires.",
     )
     wake.add_argument(

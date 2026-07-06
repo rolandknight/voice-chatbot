@@ -1,4 +1,7 @@
 aiortc>=1.9
+# HTTP client for the WebRTC signaling POST (offer -> answer). Directly
+# imported by rpi_webrtc_voice.py; aiortc does not pull it in transitively.
+aiohttp>=3.9
 fastapi>=0.110
 uvicorn[standard]>=0.27
 

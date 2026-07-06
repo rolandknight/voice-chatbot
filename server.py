@@ -626,15 +626,27 @@ class SpotifyMediaInjector(FrameProcessor):
             self._ducked = False
             self._cancel_safety()
         elif isinstance(frame, (EndFrame, CancelFrame)):
-            # Session tearing down: unhook from the shared player and stop the
-            # librespot process if we were the active consumer.
+            # Session tearing down: stop the pump, unhook from the shared player
+            # and stop the librespot process if we were the active consumer.
             self._cancel_safety()
+            await self._cancel_pump()
             if self._player is not None and self._player.clear_pcm_sink(self.feed):
                 self._player.stop_audio_sink()
             if self._active and self._on_media is not None:
                 self._on_media(False)
             self._active = False
         await self.push_frame(frame, direction)
+
+    async def _cancel_pump(self) -> None:
+        """Stop the PCM pump task cleanly so it isn't orphaned across shutdown
+        (an unawaited task raising would log 'Task exception was never
+        retrieved')."""
+        pump, self._pump = self._pump, None
+        if pump is None or pump.done():
+            return
+        pump.cancel()
+        with suppress(asyncio.CancelledError):
+            await pump
 
     def _arm_safety(self) -> None:
         self._cancel_safety()
@@ -674,9 +686,14 @@ class SpotifyMediaInjector(FrameProcessor):
             if self._ducked:
                 continue  # duck: drop music this turn (keeps sync with Spotify)
 
-            stereo = np.frombuffer(data, dtype=np.int16)
-            if stereo.size % 2:
-                stereo = stereo[:-1]
+            # librespot's stdout can hand us a truncated final chunk on
+            # shutdown (odd byte count / a dangling stereo sample). Trim to a
+            # whole number of s16 stereo frames *before* interpreting the
+            # bytes — np.frombuffer(dtype=int16) rejects an odd byte count.
+            usable = len(data) - (len(data) % 4)
+            if usable <= 0:
+                continue
+            stereo = np.frombuffer(data, dtype=np.int16, count=usable // 2)
             mono = stereo.reshape(-1, 2).mean(axis=1).astype(np.int16).tobytes()
             await self.push_frame(
                 OutputAudioRawFrame(
