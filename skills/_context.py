@@ -8,7 +8,7 @@ required attribute is missing/empty on the SkillContext instance built by app.py
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from persona_router import PersonaConfig, PersonaState
@@ -22,10 +22,6 @@ if TYPE_CHECKING:
 class SkillContext:
     radio_player: Optional["RadioPlayer"] = None
     spotify_player: Optional["SpotifyPlayer"] = None
-    # Per-connection SpotifyMediaInjector (server.py). When set, Spotify audio
-    # is routed into this session's pipeline output (WebRTC peer / local Jabra)
-    # instead of a local speaker. None for pipelines without one.
-    spotify_injector: Optional[Any] = None
     sfx_tracker: Optional["BotSpeakingTracker"] = None
     sfx_backends: dict[str, str] = field(default_factory=dict)
     sfx_backend_override: Optional[str] = None

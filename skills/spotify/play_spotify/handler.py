@@ -17,13 +17,8 @@ async def handle(params: FunctionCallParams, ctx: SkillContext) -> None:
             await asyncio.to_thread(ctx.radio_player.stop)
         except Exception as e:
             logger.debug(f"cross-stop radio failed: {e}")
-    # Route this session's Spotify audio into its pipeline output (WebRTC peer /
-    # local Jabra) rather than a local speaker. `start()` must run on the event
-    # loop; `set_pcm_sink` is thread-safe. ensure_audio_sink (inside
-    # search_and_play) then starts librespot + the reader feeding this injector.
-    if ctx.spotify_injector is not None:
-        ctx.spotify_injector.start()
-        ctx.spotify_player.set_pcm_sink(ctx.spotify_injector.feed)
+    # Playback happens natively on the client's librespot "Babel" endpoint; we
+    # only issue a Web API command targeting it (see scripts/spotify.py).
     try:
         _ok, spoken = await asyncio.to_thread(
             ctx.spotify_player.search_and_play, query, kind

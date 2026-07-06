@@ -235,17 +235,22 @@ same CoreAudio device would garble the output.
    python scripts/spotify.py --bootstrap
    ```
 
-4. **Bind "Babel" from a Spotify client.** Start the sink (blocks):
+4. **Run librespot on the machine with the speaker.** Playback is native —
+   the bot only sends Web API control commands, it never streams audio
+   through the voice pipeline. Run a librespot "Babel" endpoint wherever you
+   want the music to come out:
 
-   ```bash
-   python scripts/spotify.py --start-sink
-   ```
+   - **Raspberry Pi client:** see [`devices/rpi5/README.md`](devices/rpi5/README.md)
+     for the systemd librespot service (ALSA → Jabra).
+   - **Mac (server `--local-audio`):** `brew install librespot`, then run
+     `librespot --name Babel --bitrate 320` (leave it running; it plays out
+     the default CoreAudio output).
 
-   Then, on your phone or any Spotify client, open the Now Playing bar
-   → Connect to a device → pick **Babel**. The device id gets cached to
-   `~/.config/babel/spotify_device.txt` so subsequent runs find it
-   without needing to re-bind, as long as the device name stays stable.
-   Ctrl+C the sink once binding is confirmed.
+   Then, on your phone or any Spotify client, open the Now Playing bar →
+   Connect to a device → pick **Babel** once. The device id gets cached to
+   `~/.config/babel/spotify_device.txt` so subsequent runs find it without
+   re-binding, as long as the device name stays stable. Confirm it's visible
+   with `python scripts/spotify.py --list-devices`.
 
 5. Run `./run.sh`. Spotify tools register only when both
    `skills.spotify.enabled: true` and `SPOTIPY_CLIENT_ID` are set, so the
@@ -253,19 +258,17 @@ same CoreAudio device would garble the output.
 
 ### Troubleshooting
 
-- *"Spotify can't see the Babel device yet."* — librespot is running but
-  no Spotify client has selected it. Open Spotify on your phone, pick
-  Connect, choose Babel. The bot retries device discovery on every play
-  command.
+- *"Spotify can't see the Babel device yet."* — librespot isn't running on
+  the client, or no Spotify client has selected it. Start librespot on the
+  speaker machine, then open Spotify on your phone, pick Connect, choose
+  Babel. `python scripts/spotify.py --list-devices` shows what's visible.
+  The bot retries device discovery on every play command.
 - *"Spotify isn't authorised yet."* — token cache is missing or revoked.
   Re-run `python scripts/spotify.py --bootstrap`.
-- *librespot crashed mid-playback* — the next play command respawns the
-  sink. If it keeps crashing, run `python scripts/spotify.py --start-sink`
-  by hand and read its stderr.
-- *Playback ignores `--audio-device` and uses the system default* — the
-  Jabra wasn't found via `mpv --audio-device=help`. Plug the Jabra in
-  before launching, or set it as the macOS default output so `mpv`
-  falls back to the right device.
+- *Playback is choppy or staticky* — this was the symptom of the old
+  pipe-into-WebRTC path and shouldn't happen with native librespot playback.
+  Make sure librespot is running on the client itself, not piped through the
+  bot.
 
 ## Latency optimization knobs
 

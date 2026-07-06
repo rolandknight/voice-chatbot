@@ -112,6 +112,67 @@ export AUDIO_CHANNELS=1
 export DEVICE_ID=rpi5-jabra
 ```
 
+## Spotify (librespot on the Pi)
+
+Spotify plays **natively on the Pi** — the server only sends Web API control
+commands to a librespot "Babel" Connect endpoint running here. (Music does not
+go through WebRTC; that path was choppy/staticky because it forced 44.1 kHz
+stereo through a 24 kHz-mono voice channel.)
+
+Install and configure librespot (installs raspotify — librespot + a systemd
+service):
+
+```bash
+# From the repo root on the Pi:
+./devices/rpi5/install_librespot.sh
+# Or target the Jabra card directly (see the dmix note below first):
+LIBRESPOT_DEVICE=plughw:CARD=Speaker,DEV=0 ./devices/rpi5/install_librespot.sh
+```
+
+Then bind it once: open Spotify on your phone → **Connect** → pick **Babel**.
+From the server, confirm it's visible:
+
+```bash
+python scripts/spotify.py --list-devices
+```
+
+Server-side prerequisites: `skills.spotify.enabled: true`, `SPOTIPY_CLIENT_ID`
+set, and the one-time OAuth done (`python scripts/spotify.py --bootstrap`). See
+the repo README's Spotify section.
+
+### Sharing the Jabra between the bot voice and Spotify
+
+There's no ducking: while the bot speaks, Spotify keeps playing, so **both** the
+voice client and librespot drive the Jabra at once. A raw ALSA `hw:`/`plughw:`
+device is single-owner — one process locks the card and the other gets silence
+or an error. To let them mix, install a shared `default` (dmix for playback,
+dsnoop for capture, plug-wrapped so the 16 kHz wake stream, the bot's TTS, and
+44.1 kHz librespot all mix):
+
+```bash
+# From the repo root on the Pi. Auto-detects the Jabra card from `aplay -l`.
+./devices/rpi5/setup_alsa_sharing.sh
+# Force the card / params if auto-detect is wrong:
+CARD=Speaker RATE=48000 CHANNELS=2 ./devices/rpi5/setup_alsa_sharing.sh
+```
+
+Test the mixer, then point **both** sides at `default`:
+
+```bash
+speaker-test -D default -c 2 -t sine -f 440 -l 1        # should play a tone
+
+# librespot already defaults to LIBRESPOT_DEVICE=default:
+./devices/rpi5/install_librespot.sh
+
+# point the client at the shared default (both directions):
+INPUT_DEVICE=default OUTPUT_DEVICE=default ./devices/rpi5/install_service.sh
+# ...or set ALSA_INPUT_DEVICE=default / ALSA_OUTPUT_DEVICE=default in /etc/rpi-voice.env
+```
+
+If you never need simultaneous playback, skip all this and point librespot
+straight at `plughw:...` — but the bot voice and Spotify will then contend for
+the card.
+
 Then run:
 
 ```bash

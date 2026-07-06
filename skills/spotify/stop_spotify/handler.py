@@ -15,8 +15,6 @@ async def handle(params: FunctionCallParams, ctx: SkillContext) -> None:
         ctx.radio_player is not None and ctx.radio_player.is_playing()
     )
     if spotify_was_playing:
-        if ctx.spotify_injector is not None:
-            ctx.spotify_player.clear_pcm_sink(ctx.spotify_injector.feed)
         try:
             await asyncio.to_thread(ctx.spotify_player.stop)
         except Exception as e:
