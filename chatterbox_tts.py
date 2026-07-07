@@ -19,6 +19,7 @@ keeping every other piece of OpenAITTSService behaviour intact.
 
 from __future__ import annotations
 
+import re
 from typing import AsyncGenerator
 
 from loguru import logger
@@ -35,6 +36,15 @@ from pipecat.utils.tracing.service_decorators import traced_tts
 # overkill but cheap — Chatterbox's first audio chunk is much larger
 # than that anyway, so it never delays the first frame.
 _MAX_HEADER_SCAN = 4096
+_CLOCK_RE = re.compile(
+    r"\b(0?[1-9]|1[0-2]):([0-5]\d)\s*([AaPp])\.?\s*([Mm])\.?\b"
+)
+_ONES = [
+    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight",
+    "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen",
+    "sixteen", "seventeen", "eighteen", "nineteen",
+]
+_TENS = ["", "", "twenty", "thirty", "forty", "fifty"]
 
 
 def _strip_wav_header(buf: bytes) -> tuple[bytes, bool]:
@@ -53,6 +63,31 @@ def _strip_wav_header(buf: bytes) -> tuple[bytes, bool]:
     return buf[payload_start:], True
 
 
+def _two_digit_words(n: int) -> str:
+    if n < 20:
+        return _ONES[n]
+    if n % 10 == 0:
+        return _TENS[n // 10]
+    return f"{_TENS[n // 10]} {_ONES[n % 10]}"
+
+
+def _normalize_clock_times(text: str) -> str:
+    def repl(match: re.Match[str]) -> str:
+        hour = int(match.group(1))
+        minute = int(match.group(2))
+        meridiem = "A M" if match.group(3).lower() == "a" else "P M"
+        hour_words = _ONES[hour]
+        if minute == 0:
+            clock = f"{hour_words} o'clock"
+        elif minute < 10:
+            clock = f"{hour_words} oh {_ONES[minute]}"
+        else:
+            clock = f"{hour_words} {_two_digit_words(minute)}"
+        return f"{clock} {meridiem}"
+
+    return _CLOCK_RE.sub(repl, text)
+
+
 class ChatterboxTTSService(OpenAITTSService):
     """OpenAI-compatible TTS pointed at a local Chatterbox-TTS-Server.
 
@@ -64,6 +99,7 @@ class ChatterboxTTSService(OpenAITTSService):
 
     @traced_tts
     async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame, None]:
+        text = _normalize_clock_times(text)
         logger.debug(f"{self}: Generating TTS [{text}]")
         voice = self._settings.voice
         if not voice:

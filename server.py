@@ -1594,22 +1594,38 @@ async def _prewarm_persona_tts(persona_tts: dict[str, FrameProcessor]) -> None:
             logger.debug(f"TTS warmup skipped for {pid!r}: {e}")
 
 
+def _ollama_keep_alive_value(keep_alive: str | int) -> str | int:
+    if isinstance(keep_alive, str):
+        value = keep_alive.strip()
+        if value.lstrip("-").isdigit():
+            return int(value)
+        return value
+    return keep_alive
+
+
 async def _prewarm_ollama(model: str, base_url: str, keep_alive: str | int) -> str:
     import httpx
     host = base_url.rsplit("/v1", 1)[0]
+    keep_alive_value = _ollama_keep_alive_value(keep_alive)
     logger.info(f"Pre-warming Ollama LLM ({model})...")
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
-            await client.post(
+            warmup = await client.post(
                 f"{host}/api/chat",
                 json={
                     "model": model,
                     "messages": [{"role": "user", "content": "hi"}],
                     "stream": False,
-                    "keep_alive": keep_alive,
+                    "keep_alive": keep_alive_value,
                     "options": {"num_predict": 1},
                 },
             )
+            if warmup.is_error:
+                logger.error(
+                    f"Ollama pre-warm failed for {model!r}: "
+                    f"HTTP {warmup.status_code} {warmup.text}"
+                )
+                return host
             try:
                 ps = await client.get(f"{host}/api/ps")
                 ps.raise_for_status()
@@ -1641,13 +1657,14 @@ async def _prewarm_ollama(model: str, base_url: str, keep_alive: str | int) -> s
 
 async def _ollama_keepalive(host: str, model: str, keep_alive: str | int) -> None:
     import httpx
+    keep_alive_value = _ollama_keep_alive_value(keep_alive)
     async with httpx.AsyncClient(timeout=10.0) as client:
         while True:
             try:
                 await asyncio.sleep(240)
                 r = await client.post(
                     f"{host}/api/generate",
-                    json={"model": model, "keep_alive": keep_alive},
+                    json={"model": model, "keep_alive": keep_alive_value},
                 )
                 r.raise_for_status()
                 logger.info(f"Ollama keepalive: {model} pinned")
