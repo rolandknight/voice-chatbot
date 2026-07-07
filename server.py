@@ -870,6 +870,7 @@ def build_pipeline_task(
             temperature=0.2,
             max_tokens=512,
             system_instruction=runtime["ollama_system_prompt"],
+            extra={"extra_body": {"keep_alive": runtime["ollama_keep_alive"]}},
         ),
     )
 
@@ -1148,6 +1149,7 @@ def build_local_pipeline_task(
             temperature=0.2,
             max_tokens=512,
             system_instruction=runtime["ollama_system_prompt"],
+            extra={"extra_body": {"keep_alive": runtime["ollama_keep_alive"]}},
         ),
     )
     claude_llm: FrameProcessor | None = None
@@ -1497,6 +1499,7 @@ async def _load_runtime(cfg) -> dict[str, Any]:
         "ttfs_p99_latency": cfg.stt.ttfs_p99_latency_secs,
         "ollama_model": cfg.llm.ollama_model,
         "ollama_base_url": cfg.llm.ollama_base_url,
+        "ollama_keep_alive": cfg.llm.ollama_keep_alive,
         "ollama_system_prompt": _ollama_system_prompt(),
         "vad_min_volume": cfg.wake.vad_min_volume,
         "vad_stop_secs": cfg.wake.vad_stop_secs,
@@ -1591,7 +1594,7 @@ async def _prewarm_persona_tts(persona_tts: dict[str, FrameProcessor]) -> None:
             logger.debug(f"TTS warmup skipped for {pid!r}: {e}")
 
 
-async def _prewarm_ollama(model: str, base_url: str) -> str:
+async def _prewarm_ollama(model: str, base_url: str, keep_alive: str | int) -> str:
     import httpx
     host = base_url.rsplit("/v1", 1)[0]
     logger.info(f"Pre-warming Ollama LLM ({model})...")
@@ -1603,7 +1606,7 @@ async def _prewarm_ollama(model: str, base_url: str) -> str:
                     "model": model,
                     "messages": [{"role": "user", "content": "hi"}],
                     "stream": False,
-                    "keep_alive": -1,
+                    "keep_alive": keep_alive,
                     "options": {"num_predict": 1},
                 },
             )
@@ -1636,7 +1639,7 @@ async def _prewarm_ollama(model: str, base_url: str) -> str:
     return host
 
 
-async def _ollama_keepalive(host: str, model: str) -> None:
+async def _ollama_keepalive(host: str, model: str, keep_alive: str | int) -> None:
     import httpx
     async with httpx.AsyncClient(timeout=10.0) as client:
         while True:
@@ -1644,7 +1647,7 @@ async def _ollama_keepalive(host: str, model: str) -> None:
                 await asyncio.sleep(240)
                 r = await client.post(
                     f"{host}/api/generate",
-                    json={"model": model, "keep_alive": -1},
+                    json={"model": model, "keep_alive": keep_alive},
                 )
                 r.raise_for_status()
                 logger.info(f"Ollama keepalive: {model} pinned")
@@ -1718,10 +1721,12 @@ async def lifespan(app: FastAPI):
 
     await _prewarm_whisper(rc["whisper_model"], rc["language"], rc["in_sr"])
     await _prewarm_persona_tts(rc["persona_tts"])
-    host = await _prewarm_ollama(rc["ollama_model"], rc["ollama_base_url"])
+    host = await _prewarm_ollama(
+        rc["ollama_model"], rc["ollama_base_url"], rc["ollama_keep_alive"]
+    )
 
     heartbeat = asyncio.create_task(
-        _ollama_keepalive(host, rc["ollama_model"]),
+        _ollama_keepalive(host, rc["ollama_model"], rc["ollama_keep_alive"]),
         name="ollama-keepalive",
     )
 

@@ -621,11 +621,24 @@ if __name__ == "__main__":
         help="List visible Spotify Connect devices (check the client's "
         f"'{_LIBRESPOT_DEVICE_NAME}' librespot endpoint is reachable).",
     )
+    parser.add_argument(
+        "--play", metavar="QUERY",
+        help="Search + play on the Babel device, bypassing the voice stack. "
+        "Use this to test the playback chain independent of STT/LLM.",
+    )
+    parser.add_argument(
+        "--kind", default="any", choices=["any", "track", "album", "artist"],
+        help="With --play: what to search for (default: any).",
+    )
     args = parser.parse_args()
 
     if args.bootstrap:
         sys.exit(_bootstrap(headless=args.headless))
     if args.list_devices:
         sys.exit(_list_devices())
+    if args.play:
+        ok, msg = SpotifyPlayer().search_and_play(args.play, args.kind)
+        print(msg)
+        sys.exit(0 if ok else 1)
     parser.print_help()
     sys.exit(0)
