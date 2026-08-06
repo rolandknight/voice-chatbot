@@ -88,6 +88,43 @@ def has_speech(pcm: bytes, rate: int, threshold: float = SPEECH_RMS_THRESHOLD) -
     return first_audio_ts(pcm, rate, threshold) is not None
 
 
+def median_f0(
+    pcm: bytes,
+    rate: int,
+    fmin: float = 60.0,
+    fmax: float = 400.0,
+    frame_ms: int = 40,
+    hop_ms: int = 20,
+    rms_threshold: float = SPEECH_RMS_THRESHOLD,
+    min_corr: float = 0.5,
+) -> Optional[float]:
+    """Median fundamental frequency (Hz) over voiced frames, via autocorrelation.
+
+    Coarse by design — used to tell speakers apart (e.g. cloned male voice
+    vs Kokoro af_heart), not for pitch tracking.
+    """
+    x = np.frombuffer(pcm, dtype=np.int16).astype(np.float64)
+    n = int(rate * frame_ms / 1000)
+    hop = int(rate * hop_ms / 1000)
+    lag_min = max(1, int(rate / fmax))
+    lag_max = min(int(rate / fmin), n - 1)
+    f0s = []
+    for start in range(0, len(x) - n, hop):
+        frame = x[start : start + n]
+        if np.sqrt((frame**2).mean()) < rms_threshold:
+            continue  # not voiced enough
+        frame = frame - frame.mean()
+        ac = np.correlate(frame, frame, mode="full")[n - 1 :]
+        if ac[0] <= 0:
+            continue
+        ac = ac / ac[0]
+        lag = lag_min + int(np.argmax(ac[lag_min:lag_max]))
+        if ac[lag] < min_corr:
+            continue
+        f0s.append(rate / lag)
+    return float(np.median(f0s)) if f0s else None
+
+
 async def collect_speech(
     read: Callable[[float], Awaitable[Optional[bytes]]],
     rate: int = 16000,

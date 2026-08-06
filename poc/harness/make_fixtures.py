@@ -29,6 +29,7 @@ FIXTURES: dict[str, str] = {
     "t8_recall.wav": "What did I just ask you about?",
     "t9_weather.wav": "What's the weather like?",
     "t10_date.wav": "What's the date today?",
+    "t13_wake.wav": "Hey babel, what time is it?",
 }
 
 LEAD_MS = 300

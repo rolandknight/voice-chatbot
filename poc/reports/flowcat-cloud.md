@@ -152,3 +152,34 @@ Alternating `t1_time`/`t2_timer`, single session, ~6 min of continuous turns.
 4. RSS +104 MB over a 30-turn session (see T12).
 5. base.en mishears "What's the date today?" ~1-in-10 ("That the date
    today"); consider small.en for Phase 2 content-accuracy runs.
+
+## Phase 1a/1b (run by coordinator after the harness agent hit its session limit)
+
+### T13 — server-side wake, Listen mode: **PASS** (66 s)
+
+Stack: `POC_WAKE_MODEL=models/wakeword/hey_babel.onnx` (WakeGate between VAD
+and SpeechGate; vendored oww_rs detector, threshold 0.5).
+- (a) `t1_time.wav` without wake word: swallowed — no bot speech, no tool
+  calls for 15 s. ✓
+- (b) `t13_wake.wav` ("Hey babel, what time is it?"): turn fired,
+  `get_current_time` called, reply "it's 4.16pm." spoken. Probes:
+  wake-onset→first-audio **7.59 s**, speech-end→first-audio **6.09 s**
+  (CPU whisper + cloud LLM; same latency profile as T10).
+- (c) after the 15 s session window expired, wake-less speech was again
+  swallowed (gate re-armed). ✓
+
+### T14 — cloned-voice TTS (Chatterbox, CUDA): **PASS** (30 s)
+
+Stack: `POC_TTS_BACKEND=chatterbox`; Chatterbox-TTS-Server on :8004 cloning
+from the real production Marvin reference clip (voices/ "look at this
+door…", converted to 24 kHz WAV). T1 turn completed through the cloned
+voice; pitch discrimination decisive: reply median F0 **82 Hz** vs Kokoro
+af_heart **200 Hz** re-synthesis of the same text (ratio 0.41, budget
+< 0.8). Segments: tool→first-audio 2.21 s, e2e 5.93 s — Chatterbox adds
+~0.3–1 s vs Kokoro, acceptable. One flaky first run failed the F0 assert
+(short garbled-STT reply); two consecutive reruns green.
+
+Notes: the agent's earlier Chatterbox 422 was a probe payload missing the
+required `model` field — not a server issue. STT oddity logged: "4:16 PM"
+transcribed back as "4000 atm" by harness tiny.en in one run (assertion
+regex tolerant by design).
