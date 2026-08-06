@@ -7,6 +7,7 @@ fixtures only connect to already-running services.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import time
 from pathlib import Path
@@ -76,11 +77,14 @@ class TurnRunner:
         push_ts = time.monotonic()
         await self.adapter.send_audio(pcm)
         lead_s = audio.first_audio_ts(pcm, rate) or 0.0
+        dur_s = audio.duration_s(pcm, rate)
+        speech_end_s = audio.last_audio_ts(pcm, rate) or dur_s
         return {
             "push_ts": push_ts,
             "backlog_s": backlog_s,
             "speech_onset_ts": push_ts + backlog_s + lead_s,
-            "end_ts": push_ts + backlog_s + audio.duration_s(pcm, rate),
+            "speech_end_ts": push_ts + backlog_s + speech_end_s,
+            "end_ts": push_ts + backlog_s + dur_s,
         }
 
     async def await_bot_speech(self, timeout: float = 30.0) -> bytes:
@@ -112,12 +116,29 @@ class TurnRunner:
 
 
 @pytest.fixture
-async def session(adapter_factory: Callable[[], FlowCatAdapter], stubs: StubsClient) -> Any:
+async def session_factory(
+    adapter_factory: Callable[[], FlowCatAdapter], stubs: StubsClient
+) -> Any:
+    """Async factory for connected sessions (greeting consumed); closes all at teardown."""
+    runners: list[TurnRunner] = []
+
+    async def make() -> TurnRunner:
+        adapter = adapter_factory()
+        await adapter.connect()
+        runner = TurnRunner(adapter, stubs)
+        runner.greeting_pcm = await runner.await_bot_speech(timeout=GREETING_TIMEOUT_S)
+        runners.append(runner)
+        return runner
+
+    yield make
+    for runner in runners:
+        with contextlib.suppress(Exception):
+            await runner.adapter.close(graceful=True)
+
+
+@pytest.fixture
+async def session(session_factory: Any, stubs: StubsClient) -> Any:
     """Connected FlowCat session with the connect greeting already consumed."""
-    adapter = adapter_factory()
-    await adapter.connect()
-    runner = TurnRunner(adapter, stubs)
-    runner.greeting_pcm = await runner.await_bot_speech(timeout=GREETING_TIMEOUT_S)
+    runner = await session_factory()
     stubs.clear()  # greeting shouldn't touch tools, but start each test clean
-    yield runner
-    await adapter.close(graceful=True)
+    return runner

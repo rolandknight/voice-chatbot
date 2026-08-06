@@ -265,6 +265,13 @@ class FlowCatAdapter:
     def events(self) -> AsyncIterator[Event]:
         return self._drain(self._event_q)
 
+    def drain_events(self) -> list[Event]:
+        """Non-blocking: all normalized events received so far."""
+        out: list[Event] = []
+        while not self._event_q.empty():
+            out.append(self._event_q.get_nowait())
+        return out
+
     @staticmethod
     async def _drain(q: asyncio.Queue) -> AsyncIterator:
         while True:
@@ -273,10 +280,21 @@ class FlowCatAdapter:
     async def close(self, graceful: bool = True) -> None:
         for t in self._tasks:
             t.cancel()
-        if self._ws is not None:
-            with contextlib.suppress(Exception):
-                await self._ws.close()
-        if graceful and self._pc is not None:
-            with contextlib.suppress(Exception):
-                await self._pc.close()
-        # abrupt: leave the peer un-closed (no bye) — T7-style teardown probe
+        if graceful:
+            if self._ws is not None:
+                with contextlib.suppress(Exception):
+                    await self._ws.close()
+            if self._pc is not None:
+                with contextlib.suppress(Exception):
+                    await self._pc.close()
+            return
+        # Abrupt kill (T7 teardown probe): drop the ICE/UDP transport
+        # mid-flow — no SDP bye, no DTLS close_notify, no WS close frame.
+        self._track.stop()
+        if self._pc is not None:
+            for tr in self._pc.getTransceivers():
+                ice = getattr(tr.receiver.transport, "transport", None)
+                conn = getattr(ice, "_connection", None)
+                if conn is not None:
+                    with contextlib.suppress(Exception):
+                        await conn.close()
