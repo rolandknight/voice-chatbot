@@ -1,0 +1,7 @@
+/home/rolandknight/github.com/rolandknight/voice-chatbot/poc/vendor/oww_rs/crates/oww/target/debug/deps/memmap2-2a97e183631e32b2.d: /home/rolandknight/github.com/rolandknight/voice-chatbot/.hermit/rust/registry/src/index.crates.io-1949cf8c6b5b557f/memmap2-0.9.11/src/lib.rs /home/rolandknight/github.com/rolandknight/voice-chatbot/.hermit/rust/registry/src/index.crates.io-1949cf8c6b5b557f/memmap2-0.9.11/src/unix.rs /home/rolandknight/github.com/rolandknight/voice-chatbot/.hermit/rust/registry/src/index.crates.io-1949cf8c6b5b557f/memmap2-0.9.11/src/advice.rs
+
+/home/rolandknight/github.com/rolandknight/voice-chatbot/poc/vendor/oww_rs/crates/oww/target/debug/deps/libmemmap2-2a97e183631e32b2.rmeta: /home/rolandknight/github.com/rolandknight/voice-chatbot/.hermit/rust/registry/src/index.crates.io-1949cf8c6b5b557f/memmap2-0.9.11/src/lib.rs /home/rolandknight/github.com/rolandknight/voice-chatbot/.hermit/rust/registry/src/index.crates.io-1949cf8c6b5b557f/memmap2-0.9.11/src/unix.rs /home/rolandknight/github.com/rolandknight/voice-chatbot/.hermit/rust/registry/src/index.crates.io-1949cf8c6b5b557f/memmap2-0.9.11/src/advice.rs
+
+/home/rolandknight/github.com/rolandknight/voice-chatbot/.hermit/rust/registry/src/index.crates.io-1949cf8c6b5b557f/memmap2-0.9.11/src/lib.rs:
+/home/rolandknight/github.com/rolandknight/voice-chatbot/.hermit/rust/registry/src/index.crates.io-1949cf8c6b5b557f/memmap2-0.9.11/src/unix.rs:
+/home/rolandknight/github.com/rolandknight/voice-chatbot/.hermit/rust/registry/src/index.crates.io-1949cf8c6b5b557f/memmap2-0.9.11/src/advice.rs:

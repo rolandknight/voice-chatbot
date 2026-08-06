@@ -1569,6 +1569,9 @@ where
 pub async fn build_cascaded_call_duplex<Tr, St, L, Ts, B, Se, V>(
     transport: Tr,
     vad: crate::audio::VadProcessor<V>,
+    // Extra processors inserted between the VAD and the SpeechGate (e.g. a
+    // wake-word gate for Listen-mode surfaces). Empty for push-mode.
+    input_processors: Vec<Box<dyn FrameProcessor>>,
     stt: St,
     llm: L,
     tts: Ts,
@@ -1659,9 +1662,12 @@ where
         .summarizer
         .unwrap_or_else(|| Arc::new(NoopSummarizer) as Arc<dyn ContextSummarizer>);
 
-    let processors: Vec<Box<dyn FrameProcessor>> = vec![
+    let mut processors: Vec<Box<dyn FrameProcessor>> = vec![
         Box::new(TransportInput::new()),
         Box::new(vad),
+    ];
+    processors.extend(input_processors);
+    let tail: Vec<Box<dyn FrameProcessor>> = vec![
         Box::new(SpeechGate::new()),
         Box::new(SttProcessor::new(stt)),
         Box::new(
@@ -1696,6 +1702,7 @@ where
         Box::new(TranscriptProcessor::new(state.clone())),
         Box::new(FinalizeProcessor::new(session, run_id, token, state.clone())),
     ];
+    processors.extend(tail);
     let pipeline = Pipeline::new(processors);
 
     let params = PipelineTaskParams {

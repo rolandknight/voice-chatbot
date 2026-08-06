@@ -11,6 +11,7 @@ mod brain;
 mod call;
 mod session;
 mod stt;
+mod wake;
 
 use std::sync::atomic::AtomicI64;
 use std::sync::Arc;
@@ -34,6 +35,10 @@ pub struct PocConfig {
     pub kokoro_voice: String,
     pub system_prompt: String,
     pub vad_model: String,
+    /// Listen mode (Phase 1a): path to a wake-word head model (e.g.
+    /// models/wakeword/hey_babel.onnx). Empty → push mode (no server wake).
+    pub wake_model: String,
+    pub wake_threshold: f32,
 }
 
 pub struct PocState {
@@ -80,6 +85,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "POC_VAD_MODEL",
             &poc_dir.join("models/silero_vad.onnx").to_string_lossy(),
         ),
+        wake_model: env_or("POC_WAKE_MODEL", ""),
+        wake_threshold: env_or("POC_WAKE_THRESHOLD", "0.5").parse().unwrap_or(0.5),
     };
     if !std::path::Path::new(&cfg.whisper_model).exists() {
         return Err(format!("whisper model missing: {}", cfg.whisper_model).into());

@@ -1,0 +1,1 @@
+cargo:rustc-env=MIME_TYPES_GENERATED_PATH=/home/rolandknight/github.com/rolandknight/voice-chatbot/poc/vendor/oww_rs/crates/oww/target/debug/build/mime_guess-366a53246e3347b5/out/mime_types_generated.rs

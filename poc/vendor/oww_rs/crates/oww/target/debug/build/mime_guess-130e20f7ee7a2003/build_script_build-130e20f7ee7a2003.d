@@ -1,0 +1,6 @@
+/home/rolandknight/github.com/rolandknight/voice-chatbot/poc/vendor/oww_rs/crates/oww/target/debug/build/mime_guess-130e20f7ee7a2003/build_script_build-130e20f7ee7a2003.d: /home/rolandknight/github.com/rolandknight/voice-chatbot/.hermit/rust/registry/src/index.crates.io-1949cf8c6b5b557f/mime_guess-2.0.5/build.rs /home/rolandknight/github.com/rolandknight/voice-chatbot/.hermit/rust/registry/src/index.crates.io-1949cf8c6b5b557f/mime_guess-2.0.5/src/mime_types.rs
+
+/home/rolandknight/github.com/rolandknight/voice-chatbot/poc/vendor/oww_rs/crates/oww/target/debug/build/mime_guess-130e20f7ee7a2003/build_script_build-130e20f7ee7a2003: /home/rolandknight/github.com/rolandknight/voice-chatbot/.hermit/rust/registry/src/index.crates.io-1949cf8c6b5b557f/mime_guess-2.0.5/build.rs /home/rolandknight/github.com/rolandknight/voice-chatbot/.hermit/rust/registry/src/index.crates.io-1949cf8c6b5b557f/mime_guess-2.0.5/src/mime_types.rs
+
+/home/rolandknight/github.com/rolandknight/voice-chatbot/.hermit/rust/registry/src/index.crates.io-1949cf8c6b5b557f/mime_guess-2.0.5/build.rs:
+/home/rolandknight/github.com/rolandknight/voice-chatbot/.hermit/rust/registry/src/index.crates.io-1949cf8c6b5b557f/mime_guess-2.0.5/src/mime_types.rs:
