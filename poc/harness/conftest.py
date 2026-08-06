@@ -71,18 +71,30 @@ class TurnRunner:
 
     async def await_bot_speech(self, timeout: float = 30.0) -> bytes:
         """Capture one bot utterance (turn boundary = trailing silence)."""
-        return await audio.collect_speech(self.adapter.audio_out(), rate=16000, timeout=timeout)
+        return await audio.collect_speech(self.adapter.read_bot_audio, rate=16000, timeout=timeout)
 
-    async def wait_for_tool(self, name: str, timeout: float = 60.0) -> dict[str, Any]:
-        """Poll the stub call log until `name` appears; return its latest call."""
+    async def wait_for_tool(
+        self,
+        name: str,
+        timeout: float = 60.0,
+        match: Callable[[dict[str, Any]], bool] | None = None,
+    ) -> dict[str, Any]:
+        """Poll the stub call log until a call to `name` appears; return it.
+
+        `match(args)` filters calls: whisper.cpp's ~4 s batch windows can
+        split an utterance and fire a turn on a partial transcript, so the
+        first call to the right tool may carry mangled args while the full
+        window's call lands seconds later (CONTRACT.md known-fact 3).
+        """
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             calls = self.stubs.calls_for(name)
-            if calls:
-                return calls[-1]
+            hits = [c for c in calls if match is None or match(c["args"])]
+            if hits:
+                return hits[-1]
             await asyncio.sleep(0.5)
-        seen = [c["tool"] for c in self.stubs.get_calls()]
-        raise TimeoutError(f"tool {name!r} not called within {timeout}s (saw: {seen})")
+        seen = [(c["tool"], c["args"]) for c in self.stubs.get_calls()]
+        raise TimeoutError(f"no matching {name!r} call within {timeout}s (saw: {seen})")
 
 
 @pytest.fixture

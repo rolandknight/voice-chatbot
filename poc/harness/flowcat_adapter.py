@@ -119,11 +119,17 @@ class FlowCatAdapter:
         self.session: Optional[Session] = None
         self._pc: Optional[RTCPeerConnection] = None
         self._track = _OutboundPcmTrack()
-        self._audio_q: asyncio.Queue[bytes] = asyncio.Queue()
         self._event_q: asyncio.Queue[Event] = asyncio.Queue()
         self._tasks: list[asyncio.Task] = []
         self._ws = None
-        self._audio_gen: Optional[AsyncIterator[bytes]] = None
+        # Bot audio: continuously drained into a persistent buffer by
+        # _pump_audio; readers advance a shared cursor. This makes
+        # audio_out()/read_bot_audio repeatable — the stream only "ends"
+        # when the track/connection truly ends.
+        self._audio_buf = bytearray()
+        self._audio_pos = 0
+        self._audio_cond = asyncio.Condition()
+        self._audio_ended = False
 
     async def connect(self) -> Session:
         pc = RTCPeerConnection()
@@ -165,7 +171,7 @@ class FlowCatAdapter:
 
     async def _pump_audio(self, track: MediaStreamTrack) -> None:
         resampler = AudioResampler(format="s16", layout="mono", rate=16000)
-        with contextlib.suppress(MediaStreamError, asyncio.CancelledError):
+        try:
             while True:
                 frame = await track.recv()
                 for out in resampler.resample(frame):
@@ -175,7 +181,16 @@ class FlowCatAdapter:
                         pcm, 16000, SPEECH_RMS_THRESHOLD
                     ):
                         self.probes["first_bot_speech"] = time.monotonic()
-                    self._audio_q.put_nowait(pcm)
+                    async with self._audio_cond:
+                        self._audio_buf.extend(pcm)
+                        self._audio_cond.notify_all()
+        except (MediaStreamError, asyncio.CancelledError):
+            pass
+        finally:
+            self._audio_ended = True  # readers also poll, so a lost notify is safe
+            with contextlib.suppress(BaseException):
+                async with self._audio_cond:
+                    self._audio_cond.notify_all()
 
     async def _pump_events(self, pc_id: str) -> None:
         ws_base = self.base_url.replace("http://", "ws://").replace("https://", "wss://")
@@ -204,10 +219,38 @@ class FlowCatAdapter:
         self._track.push(resample(pcm, 16000, self._track.RATE))
         self.probes["last_audio_sent"] = time.monotonic()
 
-    def audio_out(self) -> AsyncIterator[bytes]:
-        if self._audio_gen is None:
-            self._audio_gen = self._drain(self._audio_q)
-        return self._audio_gen
+    async def read_bot_audio(self, timeout: float) -> Optional[bytes]:
+        """New bot PCM past the shared cursor.
+
+        Returns bytes when data is available, None on timeout, and b"" once
+        the track/connection has truly ended and the buffer is drained.
+        Repeatable: sequential readers share one cursor, so nothing is lost
+        or duplicated between reads (e.g. greeting vs reply).
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            async with self._audio_cond:
+                if self._audio_pos < len(self._audio_buf):
+                    chunk = bytes(self._audio_buf[self._audio_pos :])
+                    self._audio_pos = len(self._audio_buf)
+                    return chunk
+                if self._audio_ended:
+                    return b""
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                with contextlib.suppress(asyncio.TimeoutError):
+                    # Short slices double as a poll in case a notify is lost.
+                    await asyncio.wait_for(self._audio_cond.wait(), min(remaining, 0.25))
+
+    async def audio_out(self) -> AsyncIterator[bytes]:
+        """Fresh iterator per call over the shared cursor (SutAdapter surface)."""
+        while True:
+            chunk = await self.read_bot_audio(timeout=3600.0)
+            if chunk == b"":
+                return
+            if chunk:
+                yield chunk
 
     def events(self) -> AsyncIterator[Event]:
         return self._drain(self._event_q)
