@@ -30,3 +30,4 @@ poc/.deps/
 .certs/
 webrtc_smoke/.certs/
 poc/vendor/flowcat-core/target/
+poc/vendor/oww_rs/**/target/

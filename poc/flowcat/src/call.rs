@@ -94,6 +94,25 @@ pub async fn offer(
                 .into_response()
         }
     };
+    // Listen mode (Phase 1a): wake gate between VAD and SpeechGate when a
+    // wake head model is configured; push mode (empty) otherwise.
+    let mut input_processors: Vec<Box<dyn flowcat_core::processor::FrameProcessor>> = Vec::new();
+    if !cfg.wake_model.is_empty() {
+        let detector = match crate::wake::OpenWakeWord::load(
+            &cfg.wake_model,
+            cfg.wake_threshold,
+        ) {
+            Ok(d) => d,
+            Err(e) => {
+                return (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("load wake model: {e}"),
+                )
+                    .into_response()
+            }
+        };
+        input_processors.push(Box::new(crate::wake::WakeGate::new(detector, 15.0)));
+    }
     // Whole-utterance STT paired with the SpeechGate (one VAD turn → one final
     // transcription), replacing WhisperLocalStt's fixed 4 s windows which fire
     // turns on partials and hallucinate on silence in duplex mode.
@@ -111,6 +130,7 @@ pub async fn offer(
         let built = build_cascaded_call_duplex(
             transport,
             vad,
+            input_processors,
             stt,
             llm,
             tts,

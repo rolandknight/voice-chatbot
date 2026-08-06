@@ -16,6 +16,8 @@ flowcat-services = { git = "https://github.com/AreevAI/flowcat.git", rev = "37b0
 # Whole-utterance STT (src/stt.rs) uses whisper-rs directly; same version as
 # the (now unused) upstream stt-whisper-local feature.
 whisper-rs = "0.16"
+# Wake detection (src/wake.rs): vendored oww_rs (tract-based openWakeWord).
+oww_rs = { package = "oww-rs", path = "../vendor/oww_rs/crates/oww" }
 flowcat-transports = { git = "https://github.com/AreevAI/flowcat.git", rev = "37b09bafd6a50cb65936411b40b09e77386e83e3", default-features = false, features = [
     "webrtc-str0m",
 ] }
