@@ -131,6 +131,17 @@ dep — the diff IS the candidate upstream PR) plus ~160 lines in the embedder:
    class as our production Jabra issue). Fixed with explicit `VadParams`
    (min_volume 0.2, stop_secs 0.5).
 
+**Upstreamed (2026-08-06):** issue
+[AreevAI/flowcat#60](https://github.com/AreevAI/flowcat/issues/60)
+(Interruption never delivered to `process_frame`; VAD gate never armed;
+frame-path stall measurements; plus the factory base_url/require_key and
+loopback-bind EINVAL items noted inline) and PR
+[AreevAI/flowcat#61](https://github.com/AreevAI/flowcat/pull/61) (the full
+duplex patch from `poc/vendor/flowcat-core`, branch
+`rolandknight/flowcat:cascaded-full-duplex`, rebased clean on upstream HEAD
+= our pinned rev; 302 upstream tests + clippy -D warnings green).
+Maintainer responsiveness to these is itself an ADR-0002 data point.
+
 **Verdict for ADR-0002:** the essential full-duplex requirement does NOT
 disqualify FlowCat. The engine's primitives held up; every gap was closable
 with bounded, additive, upstreamable changes, and the resulting barge-in
