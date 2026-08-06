@@ -11,6 +11,7 @@ mod brain;
 mod call;
 mod session;
 mod stt;
+mod tts_chatterbox;
 mod wake;
 
 use std::sync::atomic::AtomicI64;
@@ -39,6 +40,10 @@ pub struct PocConfig {
     /// models/wakeword/hey_babel.onnx). Empty → push mode (no server wake).
     pub wake_model: String,
     pub wake_threshold: f32,
+    /// TTS backend: "kokoro" (default) or "chatterbox" (Phase 1b cloned voice).
+    pub tts_backend: String,
+    pub chatterbox_url: String,
+    pub chatterbox_voice: String,
 }
 
 pub struct PocState {
@@ -87,6 +92,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
         wake_model: env_or("POC_WAKE_MODEL", ""),
         wake_threshold: env_or("POC_WAKE_THRESHOLD", "0.5").parse().unwrap_or(0.5),
+        tts_backend: env_or("POC_TTS_BACKEND", "kokoro"),
+        chatterbox_url: env_or("POC_CHATTERBOX_URL", "http://127.0.0.1:8004"),
+        chatterbox_voice: env_or("POC_CHATTERBOX_VOICE", "marvin.wav"),
     };
     if !std::path::Path::new(&cfg.whisper_model).exists() {
         return Err(format!("whisper model missing: {}", cfg.whisper_model).into());

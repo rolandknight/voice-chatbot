@@ -24,6 +24,47 @@ use crate::PocState;
 /// str0m carrier rate — matches flowcat-server's webrtc playground.
 const CARRIER_RATE: u32 = 16_000;
 
+/// Static TTS backend selection (the duplex builder is generic over the
+/// concrete `TtsService`; this avoids duplicating the whole build call).
+enum PocTts {
+    Kokoro(KokoroTts),
+    Chatterbox(crate::tts_chatterbox::ChatterboxTts),
+}
+
+#[async_trait::async_trait]
+impl flowcat_core::service::TtsService for PocTts {
+    fn name(&self) -> &str {
+        match self {
+            PocTts::Kokoro(t) => t.name(),
+            PocTts::Chatterbox(t) => t.name(),
+        }
+    }
+    fn sample_rate(&self) -> u32 {
+        match self {
+            PocTts::Kokoro(t) => t.sample_rate(),
+            PocTts::Chatterbox(t) => t.sample_rate(),
+        }
+    }
+    async fn start(
+        &mut self,
+        params: &flowcat_core::processor::frame::StartParams,
+    ) -> flowcat_core::Result<()> {
+        match self {
+            PocTts::Kokoro(t) => t.start(params).await,
+            PocTts::Chatterbox(t) => t.start(params).await,
+        }
+    }
+    async fn run_tts(
+        &mut self,
+        text: &str,
+    ) -> flowcat_core::Result<Vec<flowcat_core::processor::frame::Frame>> {
+        match self {
+            PocTts::Kokoro(t) => t.run_tts(text).await,
+            PocTts::Chatterbox(t) => t.run_tts(text).await,
+        }
+    }
+}
+
 #[derive(Deserialize)]
 pub struct OfferRequest {
     pub sdp: String,
@@ -118,7 +159,15 @@ pub async fn offer(
     // turns on partials and hallucinate on silence in duplex mode.
     let stt = crate::stt::BabelStt::new(cfg.whisper_model.clone());
     let llm = OpenRouterLlm::with_model(cfg.openrouter_key.clone(), cfg.llm_model.clone());
-    let tts = KokoroTts::new("", cfg.kokoro_voice.clone()).with_base_url(cfg.kokoro_url.clone());
+    let tts = match cfg.tts_backend.as_str() {
+        "chatterbox" => PocTts::Chatterbox(crate::tts_chatterbox::ChatterboxTts::new(
+            cfg.chatterbox_url.clone(),
+            cfg.chatterbox_voice.clone(),
+        )),
+        _ => PocTts::Kokoro(
+            KokoroTts::new("", cfg.kokoro_voice.clone()).with_base_url(cfg.kokoro_url.clone()),
+        ),
+    };
     let brain = crate::brain::BabelBrain::new(cfg.system_prompt.clone());
     let session = state.session.clone();
 
