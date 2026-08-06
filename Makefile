@@ -1,4 +1,4 @@
-.PHONY: help install-server install-server-os install-client install-client-os run run-webrtc-smoke run-webrtc-smoke-lan run-server run-server-lan run-server-local run-server-lan-local run-webrtc-client run-rpi-client-local run-jabra run-wake-test run-wake-client
+.PHONY: help install-server install-server-os install-client install-client-os install-service run run-webrtc-smoke run-webrtc-smoke-lan run-server run-server-lan run-server-local run-server-lan-local run-webrtc-client run-rpi-client-local run-jabra run-wake-test run-wake-client
 
 # Homebrew packages the server needs (macOS). Keep in sync with install_mac.sh.
 BREW_PKGS := portaudio ffmpeg mpv librespot git cmake pkg-config ollama corelocationcli
@@ -10,6 +10,11 @@ APT_PKGS := libportaudio2 portaudio19-dev
 
 OFFER_URL ?= http://localhost:8080/api/offer
 
+# install-service defaults: the RPi 5 voice-server IP, and whether to install a
+# PipeWire user service (1) or a bare-ALSA system service (0).
+SERVER_IP ?= 192.168.0.245
+USER_SERVICE ?= 1
+
 CERT_DIR := .certs
 CERT := $(CERT_DIR)/cert.pem
 KEY := $(CERT_DIR)/key.pem
@@ -20,6 +25,7 @@ help:
 	@echo "  install-server            - install the server's Python packages (pip -> Hermit env)"
 	@echo "  install-client-os         - install the RPi 5 client's OS packages (apt: PortAudio)"
 	@echo "  install-client            - install the RPi 5 client's Python packages (devices/rpi5/install_rpi.sh)"
+	@echo "  install-service           - install the RPi 5 client as an auto-start service (SERVER_IP=$(SERVER_IP), USER_SERVICE=$(USER_SERVICE))"
 	@echo "  run                       - legacy local-audio backend (./run.sh)"
 	@echo "  run-server                - WebRTC backend on http://localhost:8080"
 	@echo "  run-server-lan            - WebRTC backend on HTTPS, reachable from LAN"
@@ -51,6 +57,19 @@ install-client-os:
 
 install-client:
 	./devices/rpi5/install_rpi.sh
+
+# Install the RPi 5 voice client as an auto-start systemd service (delegates to
+# devices/rpi5/install_service.sh). Defaults to a PipeWire user service
+# (USER_SERVICE=1) pointed at SERVER_IP=192.168.0.245. Override the server with
+# `make install-service SERVER_IP=10.0.0.5`, force a bare-ALSA system service
+# with USER_SERVICE=0, or pass INPUT_DEVICE=/OUTPUT_DEVICE=/AUTH_TOKEN=. Run on
+# the Pi as your normal user (not sudo).
+install-service:
+	SERVER_IP=$(SERVER_IP) USER_SERVICE=$(USER_SERVICE) \
+	  $(if $(INPUT_DEVICE),INPUT_DEVICE=$(INPUT_DEVICE),) \
+	  $(if $(OUTPUT_DEVICE),OUTPUT_DEVICE=$(OUTPUT_DEVICE),) \
+	  $(if $(AUTH_TOKEN),AUTH_TOKEN=$(AUTH_TOKEN),) \
+	  ./devices/rpi5/install_service.sh
 
 run:
 	./run.sh

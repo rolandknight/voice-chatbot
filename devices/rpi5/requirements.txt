@@ -21,3 +21,13 @@ tqdm
 scipy
 scikit-learn
 requests
+
+# Spotify control helper (scripts/spotify.py --list-devices / --bootstrap).
+# The Pi doesn't play Spotify through Python — librespot does — but running the
+# device-visibility check and the one-time OAuth on the Pi needs the control
+# client (spotipy + loguru) and the shared `config` package (pydantic + dotenv).
+loguru
+spotipy
+pydantic>=2
+pydantic-settings>=2
+python-dotenv

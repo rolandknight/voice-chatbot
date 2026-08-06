@@ -27,12 +27,16 @@ stt:
 llm:
   ollama_base_url: http://localhost:11434/v1
   # Warm TTFB on M4 Max with babel system prompt + tool schemas:
-  #   gemma4:26b     (~17 GB) DEFAULT — best tool-call reliability (~85% tau2-bench)
+  #   gemma4:12b-mlx (~7.7 GB) DEFAULT — Apple Silicon MLX + MTP latency path
+  #   gemma4:26b     (~17 GB) — best tool-call reliability (~85% tau2-bench)
   #   gemma4:latest  (~9.6 GB) — smaller, can spike on indirect phrasings
   #   qwen2.5:3b     (~2 GB)  — smallest fallback
-  ollama_model: gemma4:26b
+  ollama_model: gemma4:12b-mlx
   # "-1" pins the model resident; default Ollama TTL is 5 minutes.
   ollama_keep_alive: "-1"
+  # Keep the chat path hot. MLX models can show slow first-token latency after
+  # idle even while resident, so this is much shorter than the residency TTL.
+  ollama_keepalive_interval_secs: 60.0
 
 wake:
   # openwakeword models loaded into a single Model instance. Each entry

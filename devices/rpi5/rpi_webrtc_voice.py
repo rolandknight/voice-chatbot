@@ -321,8 +321,7 @@ async def run(args: argparse.Namespace) -> None:
 #
 # In --local-wake mode the device runs openWakeWord itself and stays
 # *disconnected* until a wake word fires. One continuous PortAudio capture feeds
-# both the detector and (once awake) the outbound WebRTC track, so a ~500 ms
-# pre-roll can be replayed and the first phoneme isn't clipped. The server sees
+# both the detector and (once awake) the outbound WebRTC track. The server sees
 # a normal push-mode client — no server-side wake. See docs/web-rtc.md.
 
 
@@ -380,11 +379,15 @@ class WakeClient:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._stop = asyncio.Event()
         # Pre-roll ring buffer of recent 16 kHz chunks (list of np arrays).
-        preroll_chunks = max(1, round(args.preroll_ms / 80.0))
+        preroll_chunks = max(0, round(args.preroll_ms / 80.0))
         self._preroll: deque = deque(maxlen=preroll_chunks)
         # Active session state (None when idle/listening for wake).
         self._session: dict[str, Any] | None = None
         self._last_activity = 0.0
+        # Drop the wake tail after a model fires. openWakeWord usually fires on
+        # or just after the final syllable, so streaming immediately can leak
+        # "one." from "hey one one" into STT as the first user turn.
+        self._wake_tail_chunks_remaining = 0
         # Server-reported bot speech state — keeps the session alive across a
         # whole reply even if the reply is longer than the silence timeout.
         self._bot_speaking = False
@@ -504,6 +507,9 @@ class WakeClient:
                 log.info("WAKE %r score=%.3f persona=%r", ev.model_key, ev.score, ev.persona)
                 await self._start_session(ev)
         else:
+            if self._wake_tail_chunks_remaining > 0:
+                self._wake_tail_chunks_remaining -= 1
+                return
             # In session: stream mic to the server. Session lifetime is driven by
             # the server's VAD/state messages (see _on_msg), so the bot's own
             # audio / echo can't hold it open.
@@ -595,11 +601,20 @@ class WakeClient:
         pc.addTrack(track)
         # Register the session BEFORE streaming so capture chunks flow in.
         self._session = {"pc": pc, "track": track, "dc": dc, "pump": None}
+        self._wake_tail_chunks_remaining = max(0, round(args.wake_tail_suppress_ms / 80.0))
         self._bot_speaking = False
         self._last_activity = time.monotonic()
-        # Replay pre-roll so the first phoneme after wake isn't clipped.
-        for chunk in list(self._preroll):
-            track.push(chunk)
+        # By default we do not replay pre-roll: it almost always contains the
+        # wake phrase tail and becomes a bogus first transcript ("one."). Keep a
+        # manual override for labs where clipping the first post-wake phoneme is
+        # worse than leaking wake audio.
+        if args.preroll_ms > 0:
+            log.warning(
+                "replaying %d ms wake pre-roll; this can leak wake phrase audio to STT",
+                args.preroll_ms,
+            )
+            for chunk in list(self._preroll):
+                track.push(chunk)
 
         try:
             offer = await pc.createOffer()
@@ -619,6 +634,7 @@ class WakeClient:
             # Tear down this attempt's peer without the full _end_session path
             # (no bye/rearm) so the retry loop stays in control.
             self._session = None
+            self._wake_tail_chunks_remaining = 0
             with suppress(Exception):
                 await pc.close()
             return False
@@ -667,6 +683,7 @@ class WakeClient:
         if session is None:
             return
         self._session = None  # stop capture pushes immediately
+        self._wake_tail_chunks_remaining = 0
         self._bot_speaking = False
         self._rearm_at = time.monotonic() + self.args.rearm_delay
         log.info("closing session (%s)", reason)
@@ -807,7 +824,18 @@ def parse_args() -> argparse.Namespace:
         "--session-timeout", type=float, default=8.0,
         help="End the session after this many seconds without local speech.",
     )
-    wake.add_argument("--preroll-ms", type=int, default=500, help="Audio replayed before the wake instant.")
+    wake.add_argument(
+        "--preroll-ms",
+        type=int,
+        default=int(os.environ.get("PREROLL_MS", "0")),
+        help="Audio replayed before the wake instant. Default 0 suppresses wake phrase leakage.",
+    )
+    wake.add_argument(
+        "--wake-tail-suppress-ms",
+        type=int,
+        default=int(os.environ.get("WAKE_TAIL_SUPPRESS_MS", "320")),
+        help="Audio dropped after wake fires so the wake phrase tail is not transcribed.",
+    )
     wake.add_argument(
         "--rearm-delay", type=float, default=1.5,
         help="Ignore wake fires for this long after a session closes (settling/echo).",
