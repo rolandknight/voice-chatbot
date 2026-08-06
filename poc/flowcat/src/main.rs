@@ -10,6 +10,7 @@
 mod brain;
 mod call;
 mod session;
+mod stt;
 
 use std::sync::atomic::AtomicI64;
 use std::sync::Arc;
@@ -32,6 +33,7 @@ pub struct PocConfig {
     pub kokoro_url: String,
     pub kokoro_voice: String,
     pub system_prompt: String,
+    pub vad_model: String,
 }
 
 pub struct PocState {
@@ -74,9 +76,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         system_prompt: std::fs::read_to_string(
             env_or("POC_PROMPT", &poc_dir.join("flowcat/prompt.txt").to_string_lossy()),
         )?,
+        vad_model: env_or(
+            "POC_VAD_MODEL",
+            &poc_dir.join("models/silero_vad.onnx").to_string_lossy(),
+        ),
     };
     if !std::path::Path::new(&cfg.whisper_model).exists() {
         return Err(format!("whisper model missing: {}", cfg.whisper_model).into());
+    }
+    if !std::path::Path::new(&cfg.vad_model).exists() {
+        return Err(format!("silero vad model missing: {}", cfg.vad_model).into());
     }
 
     let skills_path = env_or("POC_SKILLS", &poc_dir.join("stubs/skills.json").to_string_lossy());

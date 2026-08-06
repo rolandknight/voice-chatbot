@@ -8,12 +8,14 @@ edition = "2021"
 publish = false
 
 [dependencies]
-flowcat-core = { git = "https://github.com/AreevAI/flowcat.git", rev = "37b09bafd6a50cb65936411b40b09e77386e83e3" }
+flowcat-core = { git = "https://github.com/AreevAI/flowcat.git", rev = "37b09bafd6a50cb65936411b40b09e77386e83e3", features = ["vad-ort"] }
 flowcat-services = { git = "https://github.com/AreevAI/flowcat.git", rev = "37b09bafd6a50cb65936411b40b09e77386e83e3", default-features = false, features = [
     "llm-openrouter",
-    "stt-whisper-local",
     "tts-kokoro",
 ] }
+# Whole-utterance STT (src/stt.rs) uses whisper-rs directly; same version as
+# the (now unused) upstream stt-whisper-local feature.
+whisper-rs = "0.16"
 flowcat-transports = { git = "https://github.com/AreevAI/flowcat.git", rev = "37b09bafd6a50cb65936411b40b09e77386e83e3", default-features = false, features = [
     "webrtc-str0m",
 ] }
@@ -35,3 +37,10 @@ dotenvy = "0.15"
 # Phase 1 GPU STT (optional): unify CUDA into the whisper-rs flowcat links.
 # Requires the CUDA toolkit (nvcc); leave off for CPU smoke runs.
 # whisper-rs = { version = "0.16", features = ["cuda"] }
+
+# Phase 1c: full-duplex spike. flowcat-core is patched to the vendored copy in
+# poc/vendor/flowcat-core (pinned rev + our duplex additions: on_interruption
+# trait hook, VAD interrupt flag, LLM cooperative cancel, duplex builder).
+# The diff vs upstream is the candidate PR.
+[patch."https://github.com/AreevAI/flowcat.git"]
+flowcat-core = { path = "../vendor/flowcat-core" }

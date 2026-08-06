@@ -11,11 +11,11 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use flowcat_core::audio::{SileroVad, VadProcessor};
 use flowcat_core::observer::{FrameObserver, RtviObserver, RtviSink};
-use flowcat_core::pipeline::{build_cascaded_call_with_observers, CascadedConfig};
+use flowcat_core::pipeline::{build_cascaded_call_duplex, CascadedConfig};
 use flowcat_server::events::RtfSink;
 use flowcat_services::llm::OpenRouterLlm;
-use flowcat_services::stt::WhisperLocalStt;
 use flowcat_services::tts::KokoroTts;
 use flowcat_transports::webrtc::WebRtcTransport;
 
@@ -72,7 +72,32 @@ pub async fn offer(
         };
 
     let cfg = &state.cfg;
-    let stt = WhisperLocalStt::new(cfg.whisper_model.clone()).language("en");
+    // Phase 1c: full duplex. Silero VAD (512-sample windows @16 kHz) ahead of
+    // STT; its barge-in broadcast + interrupt flag drive the duplex builder.
+    // min_volume: the default 0.6 (pipecat parity) gates out moderate-volume
+    // speech — observed live: only the loudest tail of an utterance passed
+    // (the same failure class as the production Jabra min_volume issue).
+    // stop_secs 0.5 keeps comma-pauses from splitting utterances.
+    let vad_params = flowcat_core::VadParams {
+        confidence: 0.7,
+        start_secs: 0.2,
+        stop_secs: 0.5,
+        min_volume: 0.2,
+    };
+    let vad = match SileroVad::with_params(&cfg.vad_model, CARRIER_RATE, vad_params) {
+        Ok(v) => VadProcessor::new(v, 512),
+        Err(e) => {
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("load silero vad: {e}"),
+            )
+                .into_response()
+        }
+    };
+    // Whole-utterance STT paired with the SpeechGate (one VAD turn → one final
+    // transcription), replacing WhisperLocalStt's fixed 4 s windows which fire
+    // turns on partials and hallucinate on silence in duplex mode.
+    let stt = crate::stt::BabelStt::new(cfg.whisper_model.clone());
     let llm = OpenRouterLlm::with_model(cfg.openrouter_key.clone(), cfg.llm_model.clone());
     let tts = KokoroTts::new("", cfg.kokoro_voice.clone()).with_base_url(cfg.kokoro_url.clone());
     let brain = crate::brain::BabelBrain::new(cfg.system_prompt.clone());
@@ -83,8 +108,9 @@ pub async fn offer(
 
     tokio::spawn(async move {
         let _guard = guard; // deregister the event stream when the call ends
-        let built = build_cascaded_call_with_observers(
+        let built = build_cascaded_call_duplex(
             transport,
+            vad,
             stt,
             llm,
             tts,
