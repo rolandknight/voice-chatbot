@@ -1,4 +1,4 @@
-.PHONY: help install-server install-server-os install-client install-client-os run run-webrtc-smoke run-webrtc-smoke-lan run-server run-server-lan run-server-local run-server-lan-local run-webrtc-client run-rpi-client-local run-jabra run-wake-test run-wake-client
+.PHONY: poc-setup poc-build poc-up poc-down poc-test poc-test-all help install-server install-server-os install-client install-client-os run run-webrtc-smoke run-webrtc-smoke-lan run-server run-server-lan run-server-local run-server-lan-local run-webrtc-client run-rpi-client-local run-jabra run-wake-test run-wake-client
 
 # Homebrew packages the server needs (macOS). Keep in sync with install_mac.sh.
 BREW_PKGS := portaudio ffmpeg mpv librespot git cmake pkg-config ollama corelocationcli
@@ -169,3 +169,51 @@ $(CERT):
 	  -keyout $(KEY) -out $(CERT) \
 	  -subj "/CN=voice-chatbot-dev" \
 	  -addext "subjectAltName=$$SAN" >/dev/null 2>&1
+
+# ---- FlowCat PoC (docs/poc/flowcat-poc-plan.md; branch poc-python-harness) ----
+# Mac quickstart:  brew install cmake pkg-config opus
+#                  echo 'OPENROUTER_API_KEY=sk-or-...' > poc/.env
+#                  make poc-setup poc-build poc-test
+POC_PY := poc/.venv/bin/python
+POC_MARKER ?= smoke
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+POC_CARGO_FLAGS := --features metal
+else
+POC_CARGO_FLAGS :=
+endif
+
+.PHONY: poc-setup poc-build poc-up poc-down poc-test poc-test-all
+
+poc-setup:  ## PoC: python venv, deps, fixtures, models (idempotent)
+	@test -f poc/.env || { echo "ERROR: poc/.env missing — needs OPENROUTER_API_KEY (see poc/.env.example)"; exit 1; }
+	@mkdir -p poc/models poc/logs
+	@test -f poc/models/silero_vad.onnx || curl -sL -o poc/models/silero_vad.onnx https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx
+	@test -f poc/models/ggml-base.en.bin || curl -sL -o poc/models/ggml-base.en.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
+	@test -d poc/.venv || python3 -m venv poc/.venv
+	@$(POC_PY) -m pip install -q -r poc/requirements.txt
+	@cd poc && .venv/bin/python -m harness.make_fixtures
+	@echo "poc-setup done"
+
+poc-build:  ## PoC: build the FlowCat embedder (Metal STT on macOS)
+	cd poc/flowcat && cargo build $(POC_CARGO_FLAGS)
+
+poc-up:     ## PoC: start stubs + kokoro shim + flowcat server
+	cd poc && ./run_poc.sh up
+
+poc-down:   ## PoC: stop the stack
+	cd poc && ./run_poc.sh down
+
+poc-test:   ## PoC: bring the stack up, run one marker (POC_MARKER=smoke|tools|duplex|wake|voice|latency|soak), tear down
+	cd poc && ./run_poc.sh down >/dev/null 2>&1 || true
+	cd poc && ./run_poc.sh up
+	cd poc && .venv/bin/python -m pytest harness -m $(POC_MARKER) -q || { ./run_poc.sh down; exit 1; }
+	cd poc && ./run_poc.sh down
+
+poc-test-all:  ## PoC: full T1-T12 suite (wake/voice need their own env, see plan)
+	cd poc && ./run_poc.sh down >/dev/null 2>&1 || true
+	cd poc && ./run_poc.sh up
+	cd poc && .venv/bin/python -m pytest harness -q -m "not wake and not voice" || { ./run_poc.sh down; exit 1; }
+	cd poc && ./run_poc.sh down
+	@echo "NOTE: wake test:  POC_WAKE_MODEL=\$$PWD/models/wakeword/hey_babel.onnx make poc-up && cd poc && .venv/bin/python -m pytest harness -m wake"
+	@echo "NOTE: voice test: needs Chatterbox on :8004 and POC_TTS_BACKEND=chatterbox (docs/poc/flowcat-poc-plan.md Phase 1b)"
