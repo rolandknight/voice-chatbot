@@ -97,6 +97,48 @@ str0m WebRTC, tools relayed to stubs. Full suite wall time 163 s.
 Working config is pinned in `poc/.env` (`POC_LLM_MODEL`,
 `POC_WHISPER_MODEL`); `:free` remains default-off due to defect 2.
 
+## Phase 1c — full-duplex spike (2026-08-06): **PASS**
+
+Full duplex is achievable on FlowCat, and now works: **T5 (barge-in) passes
+3/3 consecutive runs; full suite 7/7** (T1–T5) against the duplex server.
+Built as a vendored `flowcat-core` patch (cargo `[patch]` over the pinned git
+dep — the diff IS the candidate upstream PR) plus ~160 lines in the embedder:
+
+1. **`on_interruption()` trait hook** (new): the runtime *never* delivers
+   `Frame::Interruption` to `process_frame` (it drains queues and forwards) —
+   the pre-existing `Interruption` arms in FlowCat's own sinks are unreachable
+   dead code, meaning frame-level barge-in had likely never run live (the
+   proven Gemini path does barge-in model-side). The hook gives processors a
+   real delivery path; the sink flushes (`send_clear`) and the assistant
+   aggregator repairs context (partial reply retained, open span dropped).
+2. **Cooperative LLM cancel**: the runtime cannot preempt a busy
+   `process_frame`, so the LLM adapter polls a barge-in generation counter
+   (bumped synchronously by the VAD) between streamed chunks.
+3. **`SpeechGate` + whole-utterance STT**: with `TurnMute` gone, whisper's
+   fixed 4 s windows produced 6–7 bogus "user turns" per 30 s call (silence
+   hallucination + utterance splitting). The gate forwards audio only between
+   VAD edges (300 ms pre-roll, flush marker at falling edge); the embedder's
+   `BabelStt` transcribes one whole utterance per VAD turn. Turn chaos gone.
+4. **Out-of-band interrupt reactor**: the frame-path `Interruption` stalls
+   behind any mid-`await` hop — measured sink delivery 14 ms to **2.1 s**
+   depending on TTS activity (the priority channel only helps between
+   `process_frame` calls; this is FlowCat's analogue of Pipecat's frame-race
+   bug class, in serialized form). A `Notify`-woken reactor flushes the
+   carrier **~110 µs** after VAD detection, with a stale-audio latch so a
+   late-finishing TTS can't resurrect the interrupted reply.
+5. **VAD `min_volume` default (0.6, pipecat parity) gated out moderate-volume
+   speech** — only the loudest tail of utterances passed (the same failure
+   class as our production Jabra issue). Fixed with explicit `VadParams`
+   (min_volume 0.2, stop_secs 0.5).
+
+**Verdict for ADR-0002:** the essential full-duplex requirement does NOT
+disqualify FlowCat. The engine's primitives held up; every gap was closable
+with bounded, additive, upstreamable changes, and the resulting barge-in
+stop latency (µs-scale flush after detection) is excellent. The honest
+counterweight: we had to *build* what Pipecat ships as one flag, the
+interruption layer had clearly never been exercised on the cascaded path,
+and endpointing needed a custom gate + STT service.
+
 ## Positive result (major)
 
 **The "wire-ready but unproven" cascaded tool-calling path WORKS.** First
