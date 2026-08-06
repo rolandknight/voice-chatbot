@@ -150,6 +150,39 @@ counterweight: we had to *build* what Pipecat ships as one flag, the
 interruption layer had clearly never been exercised on the cascaded path,
 and endpointing needed a custom gate + STT service.
 
+## Phase 1 full matrix (2026-08-06): T6–T12 run vs the duplex server
+
+Detail in `poc/reports/flowcat-cloud.md`. Verdicts: **T6 concurrency PASS**
+(two sessions, zero cross-talk), **T7 teardown PASS** (abrupt kill →
+reconnect 0.16 s, no log spin — a class Pipecat failed publicly), **T8
+XFAIL as designed** (no idle context wipe: the cascaded builder
+hard-disables idle timeout; Babel CONV-5 must be implemented in a
+migration), **T9 in-flight PASS** (12 s tool survives), **T10 recorded**
+(e2e p50 5.55 s / p95 7.04 s — dominated by CPU whisper + cloud LLM TTFB +
+the 0.5 s VAD stop floor; Phase 2 on the Mac judges this for real), **T11
+PASS** (tool 500 → graceful spoken degradation, not a dead turn), **T12
+soak PASS** (30/30; watch item: RSS +104 MB over 30 turns, likely rolling
+context — CONV-5 wipe would bound it). New oddities: the events WS emits no
+mappable transcript events mid-session (needs a Rust-side look), and
+`ort` INFO logging is noisy (~140 lines/s during sessions).
+
+## Phase 1a/1b implementation notes (E2E pending)
+
+- **Wake (1a):** hand-rolled openWakeWord DSP chain hit a subtle
+  mel-alignment mismatch (p=0.0008 vs reference 0.84 — same model, same
+  audio); replaced with the vendored `oww_rs` crate (tract-based) which
+  matches reference exactly (0.8501). Lesson recorded: reuse validated DSP.
+  oww_rs needed light surgery (mic/cpal strip, custom-model-path
+  constructor — upstream-PR candidate to that repo). The detector core is
+  framework-free and reusable for a future single-binary Rust satellite
+  client, which is now an explicit interest.
+- **Custom voice (1b):** Chatterbox-TTS-Server runs CUDA on the 6 GB card
+  (3.3 GB used) cloning from a synthesized reference clip. FlowCat's
+  KokoroTts client can't drive it (422 on `response_format=pcm`; voice =
+  reference-WAV filename) — a ~120-line custom `TtsService` was needed,
+  vs Pipecat's 139-line subclass for the same backend: **workaround parity,
+  neither framework covers this natively.**
+
 ## Positive result (major)
 
 **The "wire-ready but unproven" cascaded tool-calling path WORKS.** First
