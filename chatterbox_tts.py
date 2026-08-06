@@ -39,6 +39,14 @@ _MAX_HEADER_SCAN = 4096
 _CLOCK_RE = re.compile(
     r"\b(0?[1-9]|1[0-2]):([0-5]\d)\s*([AaPp])\.?\s*([Mm])\.?\b"
 )
+_WORD_CLOCK_ZERO_RE = re.compile(
+    r"\b("
+    r"one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve"
+    r")\s+zero\s+("
+    r"one|two|three|four|five|six|seven|eight|nine"
+    r")\s+([AaPp])\.?\s*([Mm])\.?\b",
+    re.IGNORECASE,
+)
 _ONES = [
     "zero", "one", "two", "three", "four", "five", "six", "seven", "eight",
     "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen",
@@ -72,7 +80,7 @@ def _two_digit_words(n: int) -> str:
 
 
 def _normalize_clock_times(text: str) -> str:
-    def repl(match: re.Match[str]) -> str:
+    def numeric_repl(match: re.Match[str]) -> str:
         hour = int(match.group(1))
         minute = int(match.group(2))
         meridiem = "A M" if match.group(3).lower() == "a" else "P M"
@@ -85,7 +93,12 @@ def _normalize_clock_times(text: str) -> str:
             clock = f"{hour_words} {_two_digit_words(minute)}"
         return f"{clock} {meridiem}"
 
-    return _CLOCK_RE.sub(repl, text)
+    def word_zero_repl(match: re.Match[str]) -> str:
+        meridiem = "A M" if match.group(3).lower() == "a" else "P M"
+        return f"{match.group(1).lower()} oh {match.group(2).lower()} {meridiem}"
+
+    text = _CLOCK_RE.sub(numeric_repl, text)
+    return _WORD_CLOCK_ZERO_RE.sub(word_zero_repl, text)
 
 
 class ChatterboxTTSService(OpenAITTSService):

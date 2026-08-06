@@ -34,6 +34,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import shutil
 import socket
 import time
@@ -66,6 +67,7 @@ from pipecat.frames.frames import (
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
     LLMTextFrame,
+    TextFrame,
     TranscriptionFrame,
     TTSSpeakFrame,
     UserStartedSpeakingFrame,
@@ -236,6 +238,68 @@ class ClaudeCueEmitter(FrameProcessor):
         await super().process_frame(frame, direction)
         if isinstance(frame, LLMContextFrame) and direction == FrameDirection.DOWNSTREAM:
             await self.push_frame(TTSSpeakFrame(text=self._cue_text), direction)
+        await self.push_frame(frame, direction)
+
+
+_CLOCK_RE = re.compile(
+    r"\b(0?[1-9]|1[0-2]):([0-5]\d)\s*([AaPp])\.?\s*([Mm])\.?\b"
+)
+_WORD_CLOCK_ZERO_RE = re.compile(
+    r"\b("
+    r"one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve"
+    r")\s+zero\s+("
+    r"one|two|three|four|five|six|seven|eight|nine"
+    r")\s+([AaPp])\.?\s*([Mm])\.?\b",
+    re.IGNORECASE,
+)
+_ONES = [
+    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight",
+    "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen",
+    "sixteen", "seventeen", "eighteen", "nineteen",
+]
+_TENS = ["", "", "twenty", "thirty", "forty", "fifty"]
+
+
+def _two_digit_words(n: int) -> str:
+    if n < 20:
+        return _ONES[n]
+    if n % 10 == 0:
+        return _TENS[n // 10]
+    return f"{_TENS[n // 10]} {_ONES[n % 10]}"
+
+
+def _normalize_clock_times(text: str) -> str:
+    def numeric_repl(match: re.Match[str]) -> str:
+        hour = int(match.group(1))
+        minute = int(match.group(2))
+        meridiem = "A M" if match.group(3).lower() == "a" else "P M"
+        hour_words = _ONES[hour]
+        if minute == 0:
+            clock = f"{hour_words} o'clock"
+        elif minute < 10:
+            clock = f"{hour_words} oh {_ONES[minute]}"
+        else:
+            clock = f"{hour_words} {_two_digit_words(minute)}"
+        return f"{clock} {meridiem}"
+
+    def word_zero_repl(match: re.Match[str]) -> str:
+        meridiem = "A M" if match.group(3).lower() == "a" else "P M"
+        return f"{match.group(1).lower()} oh {match.group(2).lower()} {meridiem}"
+
+    text = _CLOCK_RE.sub(numeric_repl, text)
+    return _WORD_CLOCK_ZERO_RE.sub(word_zero_repl, text)
+
+
+class TTSClockNormalizer(FrameProcessor):
+    """Normalize clock text before any TTS backend sees it."""
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
+        await super().process_frame(frame, direction)
+        if direction == FrameDirection.DOWNSTREAM:
+            if isinstance(frame, TextFrame) and not isinstance(frame, TranscriptionFrame):
+                frame.text = _normalize_clock_times(frame.text)
+            elif isinstance(frame, TTSSpeakFrame):
+                frame.text = _normalize_clock_times(frame.text)
         await self.push_frame(frame, direction)
 
 
@@ -1016,6 +1080,7 @@ def build_pipeline_task(
         llm_dispatch,
         in_flight,
         PersonaTagRouter(runtime["persona_config"], persona_state),
+        TTSClockNormalizer(),
         tts_dispatch,
         transport.output(),
     ]
@@ -1270,6 +1335,7 @@ def build_local_pipeline_task(
         llm_dispatch,
         in_flight,
         PersonaTagRouter(runtime["persona_config"], persona_state),
+        TTSClockNormalizer(),
         tts_dispatch,
         transport.output(),
     ]
@@ -1500,6 +1566,7 @@ async def _load_runtime(cfg) -> dict[str, Any]:
         "ollama_model": cfg.llm.ollama_model,
         "ollama_base_url": cfg.llm.ollama_base_url,
         "ollama_keep_alive": cfg.llm.ollama_keep_alive,
+        "ollama_keepalive_interval_secs": cfg.llm.ollama_keepalive_interval_secs,
         "ollama_system_prompt": _ollama_system_prompt(),
         "vad_min_volume": cfg.wake.vad_min_volume,
         "vad_stop_secs": cfg.wake.vad_stop_secs,
@@ -1655,19 +1722,34 @@ async def _prewarm_ollama(model: str, base_url: str, keep_alive: str | int) -> s
     return host
 
 
-async def _ollama_keepalive(host: str, model: str, keep_alive: str | int) -> None:
+async def _ollama_keepalive(
+    host: str,
+    model: str,
+    keep_alive: str | int,
+    interval_secs: float,
+) -> None:
     import httpx
     keep_alive_value = _ollama_keep_alive_value(keep_alive)
     async with httpx.AsyncClient(timeout=10.0) as client:
         while True:
             try:
-                await asyncio.sleep(240)
+                await asyncio.sleep(interval_secs)
+                t0 = time.perf_counter()
                 r = await client.post(
-                    f"{host}/api/generate",
-                    json={"model": model, "keep_alive": keep_alive_value},
+                    f"{host}/api/chat",
+                    json={
+                        "model": model,
+                        "messages": [{"role": "user", "content": "hi"}],
+                        "stream": False,
+                        "keep_alive": keep_alive_value,
+                        "options": {"num_predict": 1},
+                    },
                 )
                 r.raise_for_status()
-                logger.info(f"Ollama keepalive: {model} pinned")
+                elapsed = time.perf_counter() - t0
+                logger.info(
+                    f"Ollama keepalive: {model} chat warmed in {elapsed:.3f}s"
+                )
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -1743,7 +1825,12 @@ async def lifespan(app: FastAPI):
     )
 
     heartbeat = asyncio.create_task(
-        _ollama_keepalive(host, rc["ollama_model"], rc["ollama_keep_alive"]),
+        _ollama_keepalive(
+            host,
+            rc["ollama_model"],
+            rc["ollama_keep_alive"],
+            rc["ollama_keepalive_interval_secs"],
+        ),
         name="ollama-keepalive",
     )
 

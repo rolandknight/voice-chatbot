@@ -43,8 +43,9 @@ class STTConfig(BaseModel):
 
 class LLMConfig(BaseModel):
     ollama_base_url: str = "http://localhost:11434/v1"
-    ollama_model: str = "gemma4:26b"
+    ollama_model: str = "gemma4:12b-mlx"
     ollama_keep_alive: str = "-1"
+    ollama_keepalive_interval_secs: float = 60.0
 
 
 class WakewordModelConfig(BaseModel):
