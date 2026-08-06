@@ -5,11 +5,10 @@ All PCM is little-endian s16 mono bytes unless stated otherwise.
 
 from __future__ import annotations
 
-import asyncio
 import time
 import wave
 from pathlib import Path
-from typing import AsyncIterator, Optional
+from typing import Awaitable, Callable, Optional
 
 import numpy as np
 from scipy.signal import resample_poly
@@ -81,23 +80,26 @@ def has_speech(pcm: bytes, rate: int, threshold: float = SPEECH_RMS_THRESHOLD) -
 
 
 async def collect_speech(
-    chunks: AsyncIterator[bytes],
+    read: Callable[[float], Awaitable[Optional[bytes]]],
     rate: int = 16000,
     timeout: float = 30.0,
     trailing_silence_s: float = 1.5,
     threshold: float = SPEECH_RMS_THRESHOLD,
 ) -> bytes:
-    """Drain an audio stream until one utterance has been captured.
+    """Capture one utterance from a bot-audio read function.
 
-    Waits up to `timeout` for speech to start (RMS over threshold), then
-    returns once `trailing_silence_s` elapses with no further speech (either
-    silent frames or no frames at all). Returns everything captured.
+    `read(timeout)` must return new PCM bytes when available, None on
+    timeout, and b"" once the stream has truly ended (connection closed) —
+    see FlowCatAdapter.read_bot_audio. Waits up to `timeout` for speech to
+    start (RMS over threshold), then returns once `trailing_silence_s`
+    elapses with no further speech (silent frames or no frames at all).
+    Repeatable: breaking out here never tears down the underlying stream,
+    so sequential utterances (greeting, then reply) segment cleanly.
     """
     buf = bytearray()
     deadline = time.monotonic() + timeout
     speech_seen = False
     last_speech = 0.0
-    it = chunks.__aiter__()
     while True:
         now = time.monotonic()
         if speech_seen and now - last_speech > trailing_silence_s:
@@ -107,11 +109,10 @@ async def collect_speech(
             if not speech_seen:
                 raise TimeoutError(f"no bot speech within {timeout}s")
             break
-        try:
-            chunk = await asyncio.wait_for(it.__anext__(), timeout=wait)
-        except asyncio.TimeoutError:
-            continue  # loop re-checks the deadlines
-        except StopAsyncIteration:
+        chunk = await read(min(wait, 0.25))
+        if chunk is None:
+            continue  # read timed out; loop re-checks the deadlines
+        if chunk == b"":
             if not speech_seen:
                 raise TimeoutError("audio stream ended before bot speech")
             break

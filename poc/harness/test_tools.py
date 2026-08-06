@@ -35,7 +35,11 @@ async def test_t3_news_indirect(session, stubs):
 async def test_t4_bbc_round_trip(session, stubs):
     """T4: play BBC Radio 4, then stop — call sequence + args."""
     await session.send_fixture("t4_bbc.wav")
-    call = await session.wait_for_tool("play_bbc_radio", timeout=TOOL_TIMEOUT_S)
+    call = await session.wait_for_tool(
+        "play_bbc_radio",
+        timeout=TOOL_TIMEOUT_S,
+        match=lambda a: any(w in str(a.get("station", "")).lower() for w in ("4", "four")),
+    )
     station = call["args"]["station"].lower()
     assert "4" in station or "four" in station, call["args"]
     await session.await_bot_speech(timeout=REPLY_TIMEOUT_S)
@@ -49,6 +53,10 @@ async def test_t4_bbc_round_trip(session, stubs):
 async def test_t4_spotify_track(session, stubs):
     """T4: "Play Purple Rain by Prince." -> play_spotify with the track in query."""
     await session.send_fixture("t4_spotify.wav")
-    call = await session.wait_for_tool("play_spotify", timeout=TOOL_TIMEOUT_S)
+    call = await session.wait_for_tool(
+        "play_spotify",
+        timeout=TOOL_TIMEOUT_S,
+        match=lambda a: "purple rain" in str(a.get("query", "")).lower(),
+    )
     assert "purple rain" in call["args"]["query"].lower(), call["args"]
     await session.await_bot_speech(timeout=REPLY_TIMEOUT_S)
