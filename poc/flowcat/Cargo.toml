@@ -40,6 +40,13 @@ dotenvy = "0.15"
 # Requires the CUDA toolkit (nvcc); leave off for CPU smoke runs.
 # whisper-rs = { version = "0.16", features = ["cuda"] }
 
+[features]
+# GPU STT via whisper-rs feature unification (pick per host):
+#   make poc-build on macOS → --features metal (Phase 2, Mac Studio)
+#   --features cuda needs the CUDA toolkit (nvcc)
+metal = ["whisper-rs/metal"]
+cuda = ["whisper-rs/cuda"]
+
 # Phase 1c: full-duplex spike. flowcat-core is patched to the vendored copy in
 # poc/vendor/flowcat-core (pinned rev + our duplex additions: on_interruption
 # trait hook, VAD interrupt flag, LLM cooperative cancel, duplex builder).
