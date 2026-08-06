@@ -5,15 +5,26 @@ report. FlowCat pinned at `37b09bafd6a50cb65936411b40b09e77386e83e3`.
 
 ## Framework findings (pre-first-run)
 
-1. **The cascaded path is half-duplex by design.** `TurnMute` in
-   `flowcat-core/src/pipeline/cascaded.rs` mutes STT from turn start until the
-   reply finishes playing ("No barge-in" is verbatim in the source; a 12 s
-   safety unmute covers tool-only turns). Barge-in exists only as frame
-   plumbing (`Frame::Interruption` → queue drain + `send_clear`) driven by
-   `VadProcessor` — which the cascaded builder does **not** include. T5
-   (barge-in) will fail by design in Phase 1. Contrast: Pipecat gives cascaded
-   barge-in for free (`allow_interruptions=True`). **This is currently the
-   single biggest gap vs Pipecat for Babel's use case.**
+1. **The *stock* cascaded builder is half-duplex — but this is an assembly
+   choice, not an engine limit.** (Corrected 2026-08-06 after a targeted
+   re-read; the original version of this finding overstated it.)
+   `TurnMute` in `build_cascaded_call_with_observers` mutes STT until the
+   reply plays out ("No barge-in" verbatim in source), so T5 fails by design
+   against the stock builder. However: `VadProcessor` is public with barge-in
+   built in (rising edge while bot speaks → broadcast `Frame::Interruption`),
+   the runtime drains queues on interruption (race-regression-tested), the
+   cascaded sink already handles `Interruption` → `send_clear`, the public
+   turn-strategy module includes Smart-Turn stop, and the s2s outer
+   processors (`TransportInput`, `BrainProcessor`) are exported — a custom
+   full-duplex cascaded assembly is buildable from outside the crate.
+   **The genuine gaps:** the LLM/TTS service adapters have no interruption
+   handling (an in-flight LLM stream isn't cancelled; the assistant
+   aggregator would speak the full reply post-barge-in), and there is no
+   context repair (truncate-to-spoken). Bounded work — two adapters + one
+   aggregator — and the priority-channel runtime is a good substrate for it,
+   but it must be proven: see **Phase 1c** in the plan. Pipecat comparison
+   stands only as "free vs. build-it": `allow_interruptions=True` vs. a
+   custom assembly + adapter interruption work (candidate upstream PR).
 2. **No VAD in the cascaded chain at all.** Turn boundaries come from
    whisper.cpp's fixed ~4 s batch segmentation, not speech detection. Silero
    (`vad-ort`) exists in flowcat-core but is unused by
