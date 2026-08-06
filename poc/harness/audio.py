@@ -75,6 +75,15 @@ def first_audio_ts(
     return float(hits[0] * frame_ms / 1000) if len(hits) else None
 
 
+def last_audio_ts(
+    pcm: bytes, rate: int, threshold: float = SPEECH_RMS_THRESHOLD, frame_ms: int = 20
+) -> Optional[float]:
+    """Offset (seconds) of the end of the last frame whose RMS exceeds threshold."""
+    rms = frame_rms(pcm, rate, frame_ms)
+    hits = np.nonzero(rms > threshold)[0]
+    return float((hits[-1] + 1) * frame_ms / 1000) if len(hits) else None
+
+
 def has_speech(pcm: bytes, rate: int, threshold: float = SPEECH_RMS_THRESHOLD) -> bool:
     return first_audio_ts(pcm, rate, threshold) is not None
 
