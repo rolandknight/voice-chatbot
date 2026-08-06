@@ -24,6 +24,8 @@ FIXTURES: dict[str, str] = {
     "t4_bbc.wav": "Play BBC Radio 4.",
     "t4_stop.wav": "Stop the radio.",
     "t4_spotify.wav": "Play Purple Rain by Prince.",
+    "t5_long.wav": "Please count slowly from one to thirty, one number at a time.",
+    "t5_interrupt.wav": "Stop. What time is it?",
     "t8_recall.wav": "What did I just ask you about?",
 }
 

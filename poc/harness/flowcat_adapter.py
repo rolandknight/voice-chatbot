@@ -215,9 +215,19 @@ class FlowCatAdapter:
                         self._event_q.put_nowait(ev)
 
     async def send_audio(self, pcm: bytes) -> None:
-        """16 kHz mono s16 in; resampled to 48 kHz for the Opus track."""
+        """16 kHz mono s16 in; resampled to 48 kHz for the Opus track.
+
+        Full-duplex on the client side: the track paces silence whenever its
+        buffer is empty and accepts pushes at any time, so audio can be sent
+        mid-reply (barge-in) without special handling.
+        """
         self._track.push(resample(pcm, 16000, self._track.RATE))
         self.probes["last_audio_sent"] = time.monotonic()
+
+    @property
+    def outbound_backlog_s(self) -> float:
+        """Seconds of queued outbound audio not yet paced onto the wire."""
+        return len(self._track._buf) / 2 / self._track.RATE
 
     async def read_bot_audio(self, timeout: float) -> Optional[bytes]:
         """New bot PCM past the shared cursor.
