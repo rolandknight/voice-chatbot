@@ -64,10 +64,24 @@ class TurnRunner:
         self.stubs = stubs
         self.greeting_pcm: bytes = b""
 
-    async def send_fixture(self, name: str) -> None:
+    async def send_fixture(self, name: str) -> dict[str, float]:
+        """Push a fixture; return wire-time estimates for latency probes.
+
+        The outbound track paces itself, so the fixture's first non-silent
+        sample hits the wire at push time + queued backlog + lead silence.
+        """
         pcm, rate = audio.load_wav(FIXTURES_DIR / name)
         assert rate == 16000, f"{name}: expected 16 kHz fixture, got {rate}"
-        await self.adapter.send_audio(pcm)  # outbound track paces itself
+        backlog_s = self.adapter.outbound_backlog_s
+        push_ts = time.monotonic()
+        await self.adapter.send_audio(pcm)
+        lead_s = audio.first_audio_ts(pcm, rate) or 0.0
+        return {
+            "push_ts": push_ts,
+            "backlog_s": backlog_s,
+            "speech_onset_ts": push_ts + backlog_s + lead_s,
+            "end_ts": push_ts + backlog_s + audio.duration_s(pcm, rate),
+        }
 
     async def await_bot_speech(self, timeout: float = 30.0) -> bytes:
         """Capture one bot utterance (turn boundary = trailing silence)."""
