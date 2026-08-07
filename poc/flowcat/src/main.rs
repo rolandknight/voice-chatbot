@@ -79,7 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         llm_model: env_or("POC_LLM_MODEL", "google/gemma-4-26b-a4b-it:free"),
         whisper_model: env_or(
             "POC_WHISPER_MODEL",
-            &poc_dir.join("models/ggml-tiny.en.bin").to_string_lossy(),
+            &poc_dir.join("models/ggml-base.en.bin").to_string_lossy(),
         ),
         kokoro_url: env_or("POC_KOKORO_URL", "http://127.0.0.1:8880"),
         kokoro_voice: env_or("POC_KOKORO_VOICE", "af_heart"),
