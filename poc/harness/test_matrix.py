@@ -15,7 +15,7 @@ from typing import Any, Optional
 import numpy as np
 import pytest
 
-from . import audio, stt
+from . import audio, stt, results
 from .conftest import TurnRunner
 from .test_duplex import _drain, _wait_speech_start
 from .test_smoke import TIMEISH
@@ -211,6 +211,11 @@ async def test_t10_latency_bench(session, stubs):
                        ("tool_to_audio", "tool-call->first-audio")):
         vals = [t[key] for t in turns]
         print(f"  {label:24s} p50={_pct(vals, 50):5.2f}s p95={_pct(vals, 95):5.2f}s")
+    results.record("t10_latency_bench", {
+        "turns_ok": len(turns), "flaked": len(flaked),
+        **{f"{k}_{p}": _pct([t[k] for t in turns], p)
+           for k in ("e2e", "stt_llm", "tool_to_audio") for p in (50, 95)},
+    })
 
 
 @pytest.mark.failures
@@ -260,6 +265,10 @@ async def test_t12_soak_30_turns(session, stubs):
     rss_note = (f"rss {rss_before:.0f}->{rss_after:.0f}MB"
                 if rss_before and rss_after else "rss unavailable")
     print(f"T12: p95 first10={p95_first:.2f}s last10={p95_last:.2f}s {rss_note}")
+    results.record("t12_soak", {
+        "turns": len(e2es), "e2e_p50": _pct(e2es, 50), "p95_first10": p95_first,
+        "p95_last10": p95_last, "rss_before_mb": rss_before, "rss_after_mb": rss_after,
+    })
     assert p95_last <= p95_first * 1.5, (
         f"latency degraded over soak: p95 {p95_first:.2f}s -> {p95_last:.2f}s"
     )

@@ -15,7 +15,7 @@ from typing import Any, Callable
 
 import pytest
 
-from . import audio
+from . import audio, results
 from .flowcat_adapter import FlowCatAdapter
 from .stubs_client import StubsClient
 
@@ -117,8 +117,7 @@ class TurnRunner:
 
 @pytest.fixture
 async def session_factory(
-    adapter_factory: Callable[[], FlowCatAdapter], stubs: StubsClient
-) -> Any:
+    adapter_factory: Callable[[], FlowCatAdapter], stubs: StubsClient, request: Any) -> Any:
     """Async factory for connected sessions (greeting consumed); closes all at teardown."""
     runners: list[TurnRunner] = []
 
@@ -131,6 +130,13 @@ async def session_factory(
         return runner
 
     yield make
+    for runner in runners:
+        probes = getattr(runner.adapter, "probes", None) or {}
+        # Keep durations (seconds/ms), drop raw monotonic timestamps.
+        durations = {k: v for k, v in probes.items()
+                     if isinstance(v, (int, float)) and abs(v) < 3600}
+        if durations:
+            results.record(request.node.name if request else "unknown", durations)
     for runner in runners:
         with contextlib.suppress(Exception):
             await runner.adapter.close(graceful=True)
