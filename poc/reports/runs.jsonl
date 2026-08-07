@@ -1,0 +1,1 @@
+{"ts": "2026-08-07T07:13:04", "host": "pop-os", "os": "Linux", "machine": "x86_64", "test": "test_t5_barge_in", "llm_model": "google/gemma-4-26b-a4b-it", "whisper": "ggml-base.en.bin", "tts_backend": "kokoro", "wake": false, "results": {"reply_start_latency": 4.964, "bargein_stop_ms": 288.56, "second_reply_latency": 6.919}}

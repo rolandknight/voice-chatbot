@@ -1,4 +1,4 @@
-.PHONY: poc-setup poc-build poc-up poc-down poc-test poc-test-all help install-server install-server-os install-client install-client-os install-service run run-webrtc-smoke run-webrtc-smoke-lan run-server run-server-lan run-server-local run-server-lan-local run-webrtc-client run-rpi-client-local run-jabra run-wake-test run-wake-client
+.PHONY: poc-setup poc-build poc-up poc-down poc-test poc-test-all poc-results help install-server install-server-os install-client install-client-os install-service run run-webrtc-smoke run-webrtc-smoke-lan run-server run-server-lan run-server-local run-server-lan-local run-webrtc-client run-rpi-client-local run-jabra run-wake-test run-wake-client
 
 # Homebrew packages the server needs (macOS). Keep in sync with install_mac.sh.
 BREW_PKGS := portaudio ffmpeg mpv librespot git cmake pkg-config ollama corelocationcli
@@ -202,7 +202,7 @@ else
 POC_CARGO_FLAGS :=
 endif
 
-.PHONY: poc-setup poc-build poc-up poc-down poc-test poc-test-all
+.PHONY: poc-setup poc-build poc-up poc-down poc-test poc-test-all poc-results
 
 poc-setup:  ## PoC: python venv, deps, fixtures, models (idempotent)
 	@test -f poc/.env || { echo "ERROR: poc/.env missing — needs OPENROUTER_API_KEY (see poc/.env.example)"; exit 1; }
@@ -236,3 +236,9 @@ poc-test-all:  ## PoC: full T1-T12 suite (wake/voice need their own env, see pla
 	cd poc && ./run_poc.sh down
 	@echo "NOTE: wake test:  POC_WAKE_MODEL=\$$PWD/models/wakeword/hey_babel.onnx make poc-up && cd poc && .venv/bin/python -m pytest harness -m wake"
 	@echo "NOTE: voice test: needs Chatterbox on :8004 and POC_TTS_BACKEND=chatterbox (docs/poc/flowcat-poc-plan.md Phase 1b)"
+
+poc-results:  ## PoC: show recorded performance results (poc/reports/runs.jsonl)
+	@test -f poc/reports/runs.jsonl || { echo "no results yet — run make poc-test first"; exit 0; }
+	@poc/.venv/bin/python -c "import json,sys; \
+	rows=[json.loads(l) for l in open('poc/reports/runs.jsonl')]; \
+	[print(f\"{r['ts']}  {r['host']:12.12s} {r['os']:6.6s} {r['test']:28.28s} llm={r['llm_model'].split('/')[-1]:24.24s} stt={r['whisper']:16.16s} tts={r['tts_backend']:10.10s} \" + ' '.join(f'{k}={v}' for k,v in r['results'].items())) for r in rows]"
