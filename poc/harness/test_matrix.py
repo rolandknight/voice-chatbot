@@ -119,8 +119,14 @@ async def test_t7_abrupt_teardown(session_factory, stubs):
     await _wait_speech_start(victim.adapter.read_bot_audio, TURN_TIMEOUT_S)
     await _drain(victim.adapter.read_bot_audio, 1.0)  # well inside the reply
     lines_before = _count_lines(log)
-    kill_ts = time.monotonic()
+    close_started = time.monotonic()
     await victim.adapter.close(graceful=False)  # no bye: ICE/UDP dropped mid-flow
+    close_latency = time.monotonic() - close_started
+    victim.adapter.probes["abrupt_close_latency"] = close_latency
+    # aioice can spend several seconds releasing its local mDNS protocol. That
+    # is client cleanup, not server recovery, so start the reconnect budget
+    # when the abrupt transport close has actually completed.
+    kill_ts = time.monotonic()
     fresh = await session_factory()  # probes["connected"] set before greeting wait
     connect_latency = fresh.adapter.probes["connected"] - kill_ts
     assert connect_latency <= 2.0, f"reconnect after abrupt kill took {connect_latency:.2f}s"
@@ -130,8 +136,9 @@ async def test_t7_abrupt_teardown(session_factory, stubs):
     assert rate < 200, f"flowcat.log growing at {rate:.0f} lines/s after abrupt kill"
     r = await timed_turn(fresh, "t1_time.wav", "get_current_time")
     assert TIMEISH.search(stt.transcribe(r["pcm"]))
-    print(f"\nT7: reconnect={connect_latency:.2f}s log_rate={rate:.1f} lines/s "
-          f"({window:.1f}s window), post-kill T1 e2e={r['e2e']:.2f}s")
+    print(f"\nT7: client-close={close_latency:.2f}s reconnect={connect_latency:.2f}s "
+          f"log_rate={rate:.1f} lines/s ({window:.1f}s window), "
+          f"post-kill T1 e2e={r['e2e']:.2f}s")
 
 
 @pytest.mark.lifecycle
@@ -200,22 +207,31 @@ async def test_t10_latency_bench(session, stubs):
             flaked.append((i + 1, tool, str(e)))
             print(f"turn {i + 1:2d} {tool:17s} FLAKED: {e}")
             await _drain_stray_reply(session)
+            remaining = 20 - (i + 1)
+            if len(turns) + remaining < 15:
+                print(
+                    "T10 stopping early: the 15/20 success gate is no longer reachable"
+                )
+                break
             continue
         turns.append(r)
         print(f"turn {i + 1:2d} {tool:17s} e2e={r['e2e']:5.2f}s stt+llm={r['stt_llm']:5.2f}s "
               f"tool->audio={r['tool_to_audio']:5.2f}s")
         await asyncio.sleep(0.5)
-    assert len(turns) >= 15, f"only {len(turns)}/20 turns completed: {flaked}"
     print(f"T10 summary ({len(turns)}/20 turns ok, {len(flaked)} flaked):")
+    summary: dict[str, float | int] = {
+        "turns_ok": len(turns),
+        "flaked": len(flaked),
+    }
     for key, label in (("e2e", "speech-end->first-audio"), ("stt_llm", "speech-end->tool-call"),
                        ("tool_to_audio", "tool-call->first-audio")):
         vals = [t[key] for t in turns]
-        print(f"  {label:24s} p50={_pct(vals, 50):5.2f}s p95={_pct(vals, 95):5.2f}s")
-    results.record("t10_latency_bench", {
-        "turns_ok": len(turns), "flaked": len(flaked),
-        **{f"{k}_{p}": _pct([t[k] for t in turns], p)
-           for k in ("e2e", "stt_llm", "tool_to_audio") for p in (50, 95)},
-    })
+        if vals:
+            print(f"  {label:24s} p50={_pct(vals, 50):5.2f}s p95={_pct(vals, 95):5.2f}s")
+            summary[f"{key}_50"] = _pct(vals, 50)
+            summary[f"{key}_95"] = _pct(vals, 95)
+    results.record("t10_latency_bench", summary)
+    assert len(turns) >= 15, f"only {len(turns)}/20 turns completed: {flaked}"
 
 
 @pytest.mark.failures
@@ -258,6 +274,8 @@ async def test_t12_soak_30_turns(session, stubs):
             failures.append((i + 1, str(e)))
             print(f"soak {i + 1:2d}/30 {tool} FAILED: {e}")
             await _drain_stray_reply(session)
+            print("T12 stopping early: its zero-failure gate is no longer reachable")
+            break
         await asyncio.sleep(0.5)
     rss_after = _flowcat_rss_mb()
     assert not failures, f"{len(failures)}/30 turns failed: {failures}"

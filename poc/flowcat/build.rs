@@ -1,0 +1,67 @@
+use std::env;
+use std::path::{Path, PathBuf};
+
+fn main() {
+    println!("cargo:rerun-if-env-changed=MOONSHINE_LIB_DIR");
+
+    // Keep the existing Whisper-only build independent of Moonshine's native
+    // artifacts. Cargo exposes enabled features to build scripts this way.
+    if env::var_os("CARGO_FEATURE_MOONSHINE").is_none() {
+        return;
+    }
+
+    let manifest_dir = PathBuf::from(
+        env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set by Cargo"),
+    );
+    let lib_dir = env::var_os("MOONSHINE_LIB_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| manifest_dir.join("../.deps/moonshine/v0.1.3/lib"));
+    let lib_dir = lib_dir.canonicalize().unwrap_or_else(|error| {
+        panic!(
+            "Moonshine feature enabled but native library directory {} is unavailable: {error}. \
+             Run the PoC setup or set MOONSHINE_LIB_DIR.",
+            lib_dir.display()
+        )
+    });
+
+    let target_os = env::var("CARGO_CFG_TARGET_OS").expect("target OS set by Cargo");
+    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").expect("target arch set by Cargo");
+    if !matches!(target_arch.as_str(), "x86_64" | "aarch64") {
+        panic!("Moonshine v0.1.3 has no supported native artifact for {target_os}/{target_arch}");
+    }
+
+    println!("cargo:rustc-link-search=native={}", lib_dir.display());
+
+    match target_os.as_str() {
+        "linux" => {
+            require_file(&lib_dir, "libmoonshine.so");
+            // libmoonshine.so has a $ORIGIN runpath for this co-located SONAME.
+            require_file(&lib_dir, "libonnxruntime.so.1");
+            println!("cargo:rustc-link-lib=dylib=moonshine");
+            // Use an absolute development rpath so `make poc-up` can launch the
+            // Cargo output directly. Packaged binaries should copy both shared
+            // libraries beside the executable and use an $ORIGIN rpath instead.
+            println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib_dir.display());
+        }
+        "macos" => {
+            require_file(&lib_dir, "libmoonshine.a");
+            println!("cargo:rustc-link-lib=static=moonshine");
+            println!("cargo:rustc-link-lib=dylib=c++");
+            println!("cargo:rustc-link-lib=framework=CoreFoundation");
+            println!("cargo:rustc-link-lib=framework=Foundation");
+        }
+        _ => panic!("Moonshine PoC integration supports Linux and macOS, not {target_os}"),
+    }
+}
+
+fn require_file(dir: &Path, name: &str) {
+    let path = dir.join(name);
+    if !path.is_file() {
+        panic!(
+            "Moonshine feature enabled but {} is missing. Run the PoC setup or set \
+             MOONSHINE_LIB_DIR to the extracted v0.1.3 release lib directory.",
+            path.display()
+        );
+    }
+    println!("cargo:rerun-if-changed={}", path.display());
+}

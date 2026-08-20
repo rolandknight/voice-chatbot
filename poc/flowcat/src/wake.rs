@@ -43,7 +43,8 @@ impl OpenWakeWord {
         head_path: &str,
         threshold: f32,
     ) -> std::result::Result<Self, Box<dyn std::error::Error>> {
-        let model = oww_rs::oww::OwwModel::new_from_path(std::path::Path::new(head_path), threshold)?;
+        let model =
+            oww_rs::oww::OwwModel::new_from_path(std::path::Path::new(head_path), threshold)?;
         Ok(Self {
             model,
             pcm: Vec::new(),
@@ -189,9 +190,15 @@ mod tests {
             Ok(p) => p,
             Err(_) => return,
         };
-        let poc = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let poc = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap();
         let model = std::env::var("POC_WAKE_TEST_MODEL").unwrap_or_else(|_| {
-            poc.parent().unwrap().join("models/wakeword/hey_babel.onnx").to_string_lossy().into_owned()
+            poc.parent()
+                .unwrap()
+                .join("models/wakeword/hey_babel.onnx")
+                .to_string_lossy()
+                .into_owned()
         });
         let mut det = OpenWakeWord::load(&model, 0.3).expect("load model");
         let bytes = std::fs::read(&wav).expect("read wav");
@@ -202,7 +209,9 @@ mod tests {
         let mut max_p = 0.0f32;
         for chunk in pcm.chunks(1280) {
             if let Some(p) = det.feed(chunk) {
-                if p > max_p { max_p = p; }
+                if p > max_p {
+                    max_p = p;
+                }
             }
         }
         println!("max wake probability: {max_p:.4}");

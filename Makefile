@@ -1,4 +1,4 @@
-.PHONY: poc-setup poc-build poc-up poc-down poc-test poc-test-all poc-results help install-server install-server-os install-client install-client-os install-service run run-webrtc-smoke run-webrtc-smoke-lan run-server run-server-lan run-server-local run-server-lan-local run-webrtc-client run-rpi-client-local run-jabra run-wake-test run-wake-client
+.PHONY: poc-doctor poc-setup poc-moonshine-setup poc-nemotron-setup poc-build poc-chatterbox poc-up poc-down poc-test poc-test-all poc-results help install-server install-server-os install-client install-client-os install-service run run-webrtc-smoke run-webrtc-smoke-lan run-server run-server-lan run-server-local run-server-lan-local run-webrtc-client run-rpi-client-local run-jabra run-wake-test run-wake-client
 
 # Homebrew packages the server needs (macOS). Keep in sync with install_mac.sh.
 BREW_PKGS := portaudio ffmpeg mpv librespot git cmake pkg-config ollama corelocationcli
@@ -38,6 +38,13 @@ help:
 	@echo "  run-jabra                 - macOS dev loop, mic+speaker on the Jabra, server-side wake"
 	@echo "  run-wake-test             - on-device openWakeWord test (mic only, no server)"
 	@echo "  run-wake-client           - full on-device-wake loop HERE (connects only after wake)"
+	@echo "  poc-doctor                - show detected PoC platform, STT backend, Opus, and Chatterbox"
+	@echo "  poc-setup                 - create PoC venv and download test models"
+	@echo "  poc-moonshine-setup       - install pinned native Moonshine + streaming model"
+	@echo "  poc-nemotron-setup        - install pinned NVIDIA Nemotron streaming runtime + model"
+	@echo "  poc-build                 - build FlowCat for selected local STT backend"
+	@echo "  poc-chatterbox            - run cloned-voice server (macOS/Linux auto-detected)"
+	@echo "  poc-test                  - run one PoC marker (POC_MARKER=smoke by default)"
 
 install-server-os:
 	brew install $(BREW_PKGS)
@@ -195,14 +202,14 @@ $(CERT):
 #                  make poc-setup poc-build poc-test
 POC_PY := poc/.venv/bin/python
 POC_MARKER ?= smoke
-UNAME_S := $(shell uname -s)
-ifeq ($(UNAME_S),Darwin)
-POC_CARGO_FLAGS := --features metal
-else
-POC_CARGO_FLAGS :=
-endif
 
-.PHONY: poc-setup poc-build poc-up poc-down poc-test poc-test-all poc-results
+.PHONY: poc-doctor poc-setup poc-moonshine-setup poc-nemotron-setup poc-build poc-chatterbox poc-up poc-down poc-test poc-test-all poc-results
+
+poc-doctor:  ## PoC: verify platform-specific build/runtime prerequisites
+	@./poc/platform.sh doctor
+	@if grep -Eq '^POC_TTS_BACKEND=chatterbox$$' poc/.env 2>/dev/null; then \
+	  ./scripts/start_chatterbox.sh --doctor; \
+	fi
 
 poc-setup:  ## PoC: python venv, deps, fixtures, models (idempotent)
 	@test -f poc/.env || { echo "ERROR: poc/.env missing — needs OPENROUTER_API_KEY (see poc/.env.example)"; exit 1; }
@@ -211,13 +218,24 @@ poc-setup:  ## PoC: python venv, deps, fixtures, models (idempotent)
 	@test -f poc/models/ggml-base.en.bin || curl -sL -o poc/models/ggml-base.en.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
 	@test -d poc/.venv || python3 -m venv poc/.venv
 	@$(POC_PY) -m pip install -q -r poc/requirements.txt
+	@if grep -Eq '^POC_STT_BACKEND=moonshine$$' poc/.env 2>/dev/null; then ./scripts/setup_moonshine.sh; fi
+	@if grep -Eq '^POC_STT_BACKEND=(nemotron|nvidia)$$' poc/.env 2>/dev/null; then ./scripts/setup_nemotron.sh; fi
 	@cd poc && .venv/bin/python -m harness.make_fixtures
 	@echo "poc-setup done"
 
-poc-build:  ## PoC: build the FlowCat embedder (Metal STT on macOS)
-	cd poc/flowcat && cargo build $(POC_CARGO_FLAGS)
+poc-moonshine-setup:  ## PoC: install pinned Moonshine native runtime + streaming model
+	@./scripts/setup_moonshine.sh
 
-poc-up:     ## PoC: start stubs + kokoro shim + flowcat server
+poc-nemotron-setup:  ## PoC: install pinned NVIDIA Nemotron runtime + English streaming model
+	@./scripts/setup_nemotron.sh
+
+poc-build:  ## PoC: build FlowCat with OS-aware STT acceleration
+	@./poc/platform.sh build
+
+poc-chatterbox:  ## PoC: run OS-aware cloned-voice TTS sidecar in the foreground
+	@./scripts/start_chatterbox.sh
+
+poc-up:     ## PoC: start selected local STT/TTS sidecars + stubs + FlowCat
 	cd poc && ./run_poc.sh up
 
 poc-down:   ## PoC: stop the stack
@@ -241,4 +259,4 @@ poc-results:  ## PoC: show recorded performance results (poc/reports/runs.jsonl)
 	@test -f poc/reports/runs.jsonl || { echo "no results yet — run make poc-test first"; exit 0; }
 	@poc/.venv/bin/python -c "import json,sys; \
 	rows=[json.loads(l) for l in open('poc/reports/runs.jsonl')]; \
-	[print(f\"{r['ts']}  {r['host']:12.12s} {r['os']:6.6s} {r['test']:28.28s} llm={r['llm_model'].split('/')[-1]:24.24s} stt={r['whisper']:16.16s} tts={r['tts_backend']:10.10s} \" + ' '.join(f'{k}={v}' for k,v in r['results'].items())) for r in rows]"
+	[print(f\"{r['ts']}  {r['host']:12.12s} {r['os']:6.6s} {r['test']:28.28s} llm={r['llm_model'].split('/')[-1]:24.24s} stt={r.get('stt_backend','whisper'):9.9s}:{r.get('stt_model',r.get('whisper','?')):16.16s}/{r.get('stt_accelerator','?'):5.5s} tts={r['tts_backend']:10.10s}/{r.get('chatterbox_device','-'):5.5s} \" + ' '.join(f'{k}={v}' for k,v in r['results'].items())) for r in rows]"

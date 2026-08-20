@@ -11,10 +11,18 @@ Rust (FlowCat embedder) sides can be built independently. See
 | `flowcat-poc` server (Rust embedder) | **6210** | `poc/flowcat/` |
 | Stub skill services | **8790** | `poc/stubs/stub_server.py` |
 | Kokoro TTS shim (OpenAI-speech protocol) | **8880** | `poc/stubs/kokoro_shim.py` |
+| Chatterbox cloned-voice TTS (selected profile) | **8004** | external `vendor/*Chatterbox-TTS-Server/` sidecar |
+| NeMo-Speech.cpp / Nemotron STT (optional profile) | **8178** | local NVIDIA sidecar |
 
-Secrets/config: `poc/.env` (`OPENROUTER_API_KEY`, `OPENROUTER_BASE_URL`).
-Smoke model: `google/gemma-4-26b-a4b-it:free`. Real-test model:
-`google/gemma-4-26b-a4b-it-20260403` + BF16/throughput provider routing.
+Secrets/config: `poc/.env` (`OPENROUTER_API_KEY`, `POC_LLM_MODEL`, the selected
+TTS backend settings, `POC_STT_BACKEND=whisper|moonshine|nemotron`, and
+backend-specific STT tuning such as `POC_WHISPER_THREADS`,
+`POC_MOONSHINE_UPDATE_INTERVAL_MS`, or `POC_NEMOTRON_RIGHT_CONTEXT`).
+`POC_VAD_STOP_SECS` defaults to `0.2`, exactly matching the Python chatbot's
+`wake.vad_stop_secs`. The cross-platform laptop/Mac validation
+profile uses `anthropic/claude-haiku-4.5` through OpenRouter and local
+Chatterbox TTS. This is a cloud-LLM framework validation run, not evidence for
+the separate all-local model phase.
 
 ## Stub server API (`:8790`)
 
@@ -88,20 +96,26 @@ Kokoro `af_heart`. Regenerate with `python -m harness.make_fixtures`.
 
 ## Run orchestration
 
-`poc/run_poc.sh up|down|test` — brings up stubs + shim + flowcat-poc
+`poc/run_poc.sh up|down|test` — brings up stubs + the selected local TTS
+dependency + flowcat-poc
 (reads `poc/.env`), waits on the three `/health` endpoints (flowcat:
-`GET /healthz` if present, else TCP), runs `pytest poc/harness -m smoke`.
+`GET /healthz`), runs `pytest poc/harness -m smoke`. Chatterbox is launched
+separately with `make poc-chatterbox`; `up` verifies it with a real synthesis
+and `down` deliberately leaves it warm.
 Every process logs to `poc/logs/<name>.log`.
 
 ## Known FlowCat facts the harness must respect (from source reading)
 
-1. **Cascaded path is half-duplex** (`TurnMute` in `cascaded.rs`): STT is
-   muted from turn start until the reply finishes playing + no barge-in.
-   T5 will therefore FAIL by design against FlowCat Phase 1 — record as a
-   finding, don't fight it. Turn-taking = wait for bot audio to finish.
+1. **The original cascaded path was half-duplex.** FlowCat PR #61 added the
+   duplex builder and batch-STT `flush()` seam; this integration is pinned to
+   its merge commit `4ff03f3`. T5 is now a required barge-in regression test.
 2. **Greeting on connect** (`CascadedKickoffProcessor`): the bot speaks
    first on `ClientConnected`. The harness must consume/await the greeting
-   before sending the first fixture. System prompt instructs a one-word
-   greeting ("Ready.") to keep it short.
-3. Turn boundary = STT final segment (whisper.cpp batch ~4 s windows);
-   allow generous first-transcript timeouts in smoke tests.
+   before sending the first fixture. The PoC emits the prompt-mandated
+   `Ready.` locally (without an OpenRouter request) and, for Chatterbox, replays
+   the validated health-check WAV rather than synthesizing it again.
+3. Turn boundary = Silero falling edge after the configured silence interval.
+   Whisper then performs one whole-utterance decode. Moonshine and Nemotron can
+   publish display-only interim hypotheses while the person speaks, but their
+   internal boundaries never reach the LLM; the same external edge flushes
+   exactly one authoritative final transcript to Haiku/tools.

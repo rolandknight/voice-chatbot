@@ -6,7 +6,7 @@
 | **Date** | 2026-08-06 |
 | **Goal** | Evaluate FlowCat (Rust, Pipecat-compatible) against Babel's core requirements via a **fully automated, implementation-agnostic test harness**, using cloud-hosted Gemma 4 26B-A4B first and local Gemma 4 on the Mac Studio second. |
 | **Related** | ADR-0002 (framework decision; FlowCat is its watch item and this PoC informs re-evaluation trigger #3), ADR-0001 (model), PRD §4.1/§4.2/§4.5, `docs/web-rtc.md` (control protocol) |
-| **FlowCat pin** | `AreevAI/flowcat` @ commit `37b09ba` (2026-07-26, v0.1.0 era). Pre-1.0 — pin the commit, not a tag. |
+| **FlowCat pin** | Original evaluation: `37b09ba` (2026-07-26). Current integration: `4ff03f3` (PR #61 merge, 2026-08-17). Pre-1.0 — pin exact commits, not a moving branch or tag. |
 
 ---
 
@@ -169,7 +169,7 @@ Kill criteria (stop early, write it up): FlowCat cannot complete a streamed tool
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| Cascaded path is unproven upstream; issue history shows first-use connector bugs | M1 overruns | Pin commit `37b09ba`; time-box; file issues (July activity suggests responsive-but-small team); failures are *findings*, not wasted time |
+| Cascaded path is unproven upstream; issue history shows first-use connector bugs | M1 overruns | Pin exact commits (`37b09ba` for the original run, `4ff03f3` after PR #61 merged); time-box; file issues; failures are *findings*, not wasted time |
 | **Local mic/speaker transport is a stub** in FlowCat | None for the PoC (all testing is over WebRTC — same as satellite clients); blocks the Jabra path in any real migration | Record as migration cost; upstream explicitly invites a cpal backend contribution |
 | No WebRTC data channels — our control protocol (`docs/web-rtc.md`) assumes one | Client changes in a real migration (events on a side WebSocket) | Adapter normalizes it for the PoC; count protocol-port cost in M4 report |
 | whisper.cpp batch STT (~4 s segments, no streaming partials, CPU-default) | Could dominate T10 and mask framework latency | CUDA (dev box) / Metal (Mac) via feature unification; speaches sidecar fallback; report STT segment separately |
@@ -192,6 +192,6 @@ Everything under `poc/` is isolated from the production tree; the harness and st
 
 ## 10. Key sources
 
-- FlowCat: [repo](https://github.com/AreevAI/flowcat) (commit `37b09ba`), [FEATURES.md](https://github.com/AreevAI/flowcat/blob/main/FEATURES.md), [PROCESSOR-DESIGN.md](https://github.com/AreevAI/flowcat/blob/main/PROCESSOR-DESIGN.md), [bench/RESULTS.md](https://github.com/AreevAI/flowcat/blob/main/bench/RESULTS.md); maintainer claim: only Gemini Live + Plivo live-verified.
+- FlowCat: [repo](https://github.com/AreevAI/flowcat) (original evaluation `37b09ba`; current integration `4ff03f3`), [FEATURES.md](https://github.com/AreevAI/flowcat/blob/main/FEATURES.md), [PROCESSOR-DESIGN.md](https://github.com/AreevAI/flowcat/blob/main/PROCESSOR-DESIGN.md), [bench/RESULTS.md](https://github.com/AreevAI/flowcat/blob/main/bench/RESULTS.md); maintainer claim: only Gemini Live + Plivo live-verified.
 - Cloud providers: [OpenRouter endpoints for gemma-4-26b-a4b-it](https://openrouter.ai/google/gemma-4-26b-a4b-it) (per-provider quant/tools/uptime), [artificialanalysis.ai provider table](https://artificialanalysis.ai/models/gemma-4-26b-a4b/providers), [DeepInfra benchmarks](https://deepinfra.com/blog/gemma-4-26b-a4b-api-benchmarks), [Novita model page](https://novita.ai/models/model-detail/google-gemma-4-26b-a4b-it), [Cloudflare Workers AI model](https://developers.cloudflare.com/workers-ai/models/gemma-4-26b-a4b-it/).
 - Local runtimes: [llama.cpp Gemma 4 tokenizer fix PR #21343](https://github.com/ggml-org/llama.cpp/pull/21343), [tool-calling-on-Mac walkthrough](https://gist.github.com/daniel-farina/87dc1c394b94e45bb700d27e9ea03193), [Rapid-MLX](https://github.com/raullenchai/Rapid-MLX), [mlx-lm Gemma 4 tool-parser bug #1125](https://github.com/ml-explore/mlx-lm/issues/1125), [Ollama /v1 options issue #2963](https://github.com/ollama/ollama/issues/2963), [vllm-metal](https://github.com/vllm-project/vllm-metal).

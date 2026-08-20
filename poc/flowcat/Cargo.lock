@@ -1282,7 +1282,7 @@ checksum = "8ce81f49ae8a0482e4c55ea62ebbd7e5a686af544c00b9d090bba3ff9be97b3d"
 [[package]]
 name = "flowcat-agent"
 version = "0.1.0"
-source = "git+https://github.com/AreevAI/flowcat.git?rev=37b09bafd6a50cb65936411b40b09e77386e83e3#37b09bafd6a50cb65936411b40b09e77386e83e3"
+source = "git+https://github.com/AreevAI/flowcat.git?rev=4ff03f3ef8e179d988a20c6f46498dfb9419c1c1#4ff03f3ef8e179d988a20c6f46498dfb9419c1c1"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -1329,12 +1329,14 @@ dependencies = [
  "flowcat-server",
  "flowcat-services",
  "flowcat-transports",
+ "futures",
  "oww-rs",
  "reqwest",
  "rustls",
  "serde",
  "serde_json",
  "tokio",
+ "tokio-tungstenite 0.30.0",
  "tracing",
  "tracing-subscriber",
  "whisper-rs",
@@ -1343,7 +1345,7 @@ dependencies = [
 [[package]]
 name = "flowcat-server"
 version = "0.1.0"
-source = "git+https://github.com/AreevAI/flowcat.git?rev=37b09bafd6a50cb65936411b40b09e77386e83e3#37b09bafd6a50cb65936411b40b09e77386e83e3"
+source = "git+https://github.com/AreevAI/flowcat.git?rev=4ff03f3ef8e179d988a20c6f46498dfb9419c1c1#4ff03f3ef8e179d988a20c6f46498dfb9419c1c1"
 dependencies = [
  "async-trait",
  "axum",
@@ -1366,7 +1368,7 @@ dependencies = [
 [[package]]
 name = "flowcat-services"
 version = "0.1.0"
-source = "git+https://github.com/AreevAI/flowcat.git?rev=37b09bafd6a50cb65936411b40b09e77386e83e3#37b09bafd6a50cb65936411b40b09e77386e83e3"
+source = "git+https://github.com/AreevAI/flowcat.git?rev=4ff03f3ef8e179d988a20c6f46498dfb9419c1c1#4ff03f3ef8e179d988a20c6f46498dfb9419c1c1"
 dependencies = [
  "async-trait",
  "flowcat-core",
@@ -1382,7 +1384,7 @@ dependencies = [
 [[package]]
 name = "flowcat-telephony"
 version = "0.1.0"
-source = "git+https://github.com/AreevAI/flowcat.git?rev=37b09bafd6a50cb65936411b40b09e77386e83e3#37b09bafd6a50cb65936411b40b09e77386e83e3"
+source = "git+https://github.com/AreevAI/flowcat.git?rev=4ff03f3ef8e179d988a20c6f46498dfb9419c1c1#4ff03f3ef8e179d988a20c6f46498dfb9419c1c1"
 dependencies = [
  "base64",
  "flowcat-core",
@@ -1395,7 +1397,7 @@ dependencies = [
 [[package]]
 name = "flowcat-transports"
 version = "0.1.0"
-source = "git+https://github.com/AreevAI/flowcat.git?rev=37b09bafd6a50cb65936411b40b09e77386e83e3#37b09bafd6a50cb65936411b40b09e77386e83e3"
+source = "git+https://github.com/AreevAI/flowcat.git?rev=4ff03f3ef8e179d988a20c6f46498dfb9419c1c1#4ff03f3ef8e179d988a20c6f46498dfb9419c1c1"
 dependencies = [
  "async-trait",
  "audiopus",

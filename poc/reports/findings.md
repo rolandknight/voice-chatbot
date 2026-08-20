@@ -3,6 +3,14 @@
 Facts discovered while implementing Phase 1, accumulated for the M4 verdict
 report. FlowCat pinned at `37b09bafd6a50cb65936411b40b09e77386e83e3`.
 
+> **Integration update (2026-08-17):** PR #61 merged as `4ff03f3`. The working
+> crate now pins that merge and the vendored core retains only Babel's wake-gate
+> insertion seam. The maintainer follow-up also replaced the synthetic STT
+> flush marker described below with `SttService::flush()`. Recorded results in
+> this ledger remain historical results from the original pin plus local patch.
+> Targeted post-merge reruns passed T5 barge-in and T13 wake gating (see
+> `runs.jsonl`); the full T1–T12 matrix has not been re-benchmarked yet.
+
 ## Framework findings (pre-first-run)
 
 1. **The *stock* cascaded builder is half-duplex — but this is an assembly
@@ -131,15 +139,15 @@ dep — the diff IS the candidate upstream PR) plus ~160 lines in the embedder:
    class as our production Jabra issue). Fixed with explicit `VadParams`
    (min_volume 0.2, stop_secs 0.5).
 
-**Upstreamed (2026-08-06):** issue
+**Upstreamed (filed 2026-08-06; merged 2026-08-17):** issue
 [AreevAI/flowcat#60](https://github.com/AreevAI/flowcat/issues/60)
 (Interruption never delivered to `process_frame`; VAD gate never armed;
 frame-path stall measurements; plus the factory base_url/require_key and
 loopback-bind EINVAL items noted inline) and PR
 [AreevAI/flowcat#61](https://github.com/AreevAI/flowcat/pull/61) (the full
-duplex patch from `poc/vendor/flowcat-core`, branch
-`rolandknight/flowcat:cascaded-full-duplex`, rebased clean on upstream HEAD
-= our pinned rev; 302 upstream tests + clippy -D warnings green).
+duplex patch from `poc/vendor/flowcat-core`, merged as `4ff03f3` after a
+maintainer follow-up fixed interruption-hook coverage, STT endpointing, and a
+stale-audio latch race; both upstream CI suites green).
 Maintainer responsiveness to these is itself an ADR-0002 data point.
 
 **Verdict for ADR-0002:** the essential full-duplex requirement does NOT

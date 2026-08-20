@@ -30,7 +30,11 @@ pub struct StubSession {
 }
 
 impl StubSession {
-    pub fn new(skills_json: &str, stubs_url: String, artifact_dir: PathBuf) -> Result<Self, String> {
+    pub fn new(
+        skills_json: &str,
+        stubs_url: String,
+        artifact_dir: PathBuf,
+    ) -> Result<Self, String> {
         let defs: Vec<SkillDef> =
             serde_json::from_str(skills_json).map_err(|e| format!("parse skills.json: {e}"))?;
         let skills = defs
@@ -94,9 +98,9 @@ impl SessionSource for StubSession {
         bytes: Vec<u8>,
         _content_type: &str,
     ) -> Result<(), FlowcatError> {
-        let path = url
-            .strip_prefix("file://")
-            .ok_or_else(|| FlowcatError::Session(format!("expected file:// target, got {url:?}")))?;
+        let path = url.strip_prefix("file://").ok_or_else(|| {
+            FlowcatError::Session(format!("expected file:// target, got {url:?}"))
+        })?;
         std::fs::write(path, bytes)
             .map_err(|e| FlowcatError::Session(format!("write artifact {path}: {e}")))
     }
@@ -133,7 +137,9 @@ impl SessionSource for StubSession {
             }
             Err(e) => {
                 tracing::warn!(tool = tool_name, error = %e, "stub tool unreachable");
-                Ok(format!("The {tool_name} service is temporarily unavailable."))
+                Ok(format!(
+                    "The {tool_name} service is temporarily unavailable."
+                ))
             }
         }
     }

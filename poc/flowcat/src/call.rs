@@ -19,7 +19,7 @@ use flowcat_services::llm::OpenRouterLlm;
 use flowcat_services::tts::KokoroTts;
 use flowcat_transports::webrtc::WebRtcTransport;
 
-use crate::PocState;
+use crate::{LoadedStt, PocState};
 
 /// str0m carrier rate — matches flowcat-server's webrtc playground.
 const CARRIER_RATE: u32 = 16_000;
@@ -76,10 +76,8 @@ pub struct OfferResponse {
     pub pc_id: String,
 }
 
-pub async fn offer(
-    State(state): State<Arc<PocState>>,
-    Json(body): Json<OfferRequest>,
-) -> Response {
+pub async fn offer(State(state): State<Arc<PocState>>, Json(body): Json<OfferRequest>) -> Response {
+    let offer_started = std::time::Instant::now();
     let run_id = state.next_run.fetch_add(1, Ordering::Relaxed);
     let pc_id = format!("pc-{run_id}");
 
@@ -118,11 +116,13 @@ pub async fn offer(
     // min_volume: the default 0.6 (pipecat parity) gates out moderate-volume
     // speech — observed live: only the loudest tail of an utterance passed
     // (the same failure class as the production Jabra min_volume issue).
-    // stop_secs 0.5 keeps comma-pauses from splitting utterances.
+    // The 0.2 s default matches the Python chatbot's wake.vad_stop_secs.
+    // Silero evaluates 512-sample windows, so this becomes about 192 ms at
+    // 16 kHz instead of the former ~512 ms endpointing delay.
     let vad_params = flowcat_core::VadParams {
         confidence: 0.7,
         start_secs: 0.2,
-        stop_secs: 0.5,
+        stop_secs: cfg.vad_stop_secs,
         min_volume: 0.2,
     };
     let vad = match SileroVad::with_params(&cfg.vad_model, CARRIER_RATE, vad_params) {
@@ -139,10 +139,7 @@ pub async fn offer(
     // wake head model is configured; push mode (empty) otherwise.
     let mut input_processors: Vec<Box<dyn flowcat_core::processor::FrameProcessor>> = Vec::new();
     if !cfg.wake_model.is_empty() {
-        let detector = match crate::wake::OpenWakeWord::load(
-            &cfg.wake_model,
-            cfg.wake_threshold,
-        ) {
+        let detector = match crate::wake::OpenWakeWord::load(&cfg.wake_model, cfg.wake_threshold) {
             Ok(d) => d,
             Err(e) => {
                 return (
@@ -154,19 +151,41 @@ pub async fn offer(
         };
         input_processors.push(Box::new(crate::wake::WakeGate::new(detector, 15.0)));
     }
-    // Whole-utterance STT paired with the SpeechGate (one VAD turn → one final
-    // transcription), replacing WhisperLocalStt's fixed 4 s windows which fire
-    // turns on partials and hallucinate on silence in duplex mode.
-    let stt = crate::stt::BabelStt::new(cfg.whisper_model.clone());
-    let llm = OpenRouterLlm::with_model(cfg.openrouter_key.clone(), cfg.llm_model.clone());
-    let tts = match cfg.tts_backend.as_str() {
-        "chatterbox" => PocTts::Chatterbox(crate::tts_chatterbox::ChatterboxTts::new(
-            cfg.chatterbox_url.clone(),
-            cfg.chatterbox_voice.clone(),
+    // The selected local recognizer is loaded once per process (in PocState or
+    // the local Nemotron sidecar). Each call gets isolated mutable state.
+    // Streaming backends publish display-only interims; every backend publishes
+    // exactly one authoritative final at the SpeechGate's external VAD
+    // boundary, so Haiku/tools never run on a partial hypothesis.
+    let stt: Box<dyn flowcat_core::service::SttService> = match &state.stt {
+        LoadedStt::Whisper(context) => Box::new(
+            crate::stt::BabelStt::from_context(context.clone()).with_threads(cfg.whisper_threads),
+        ),
+        #[cfg(feature = "moonshine")]
+        LoadedStt::Moonshine(engine) => Box::new(
+            crate::moonshine::MoonshineStt::from_engine(engine.clone())
+                .with_update_interval_ms(cfg.moonshine_update_interval_ms),
+        ),
+        LoadedStt::Nemotron => Box::new(crate::nemotron::NemotronStt::new(
+            cfg.nemotron_url.clone(),
+            cfg.nemotron_speech_contexts.clone(),
         )),
-        _ => PocTts::Kokoro(
+    };
+    let llm = crate::llm::StaticGreetingLlm::new(
+        OpenRouterLlm::with_model(cfg.openrouter_key.clone(), cfg.llm_model.clone()),
+        "Ready.",
+    );
+    let tts = match cfg.tts_backend.as_str() {
+        "chatterbox" => PocTts::Chatterbox(
+            crate::tts_chatterbox::ChatterboxTts::new(
+                cfg.chatterbox_url.clone(),
+                cfg.chatterbox_voice.clone(),
+            )
+            .with_ready_pcm(state.ready_pcm.clone()),
+        ),
+        "kokoro" => PocTts::Kokoro(
             KokoroTts::new("", cfg.kokoro_voice.clone()).with_base_url(cfg.kokoro_url.clone()),
         ),
+        _ => unreachable!("validated at startup"),
     };
     let brain = crate::brain::BabelBrain::new(cfg.system_prompt.clone());
     let session = state.session.clone();
@@ -202,6 +221,12 @@ pub async fn offer(
             Err(e) => tracing::error!(run_id, error = %e, "failed to build call"),
         }
     });
+
+    tracing::info!(
+        run_id,
+        elapsed_ms = offer_started.elapsed().as_millis(),
+        "webrtc offer accepted"
+    );
 
     Json(json!(OfferResponse { sdp: answer, pc_id })).into_response()
 }

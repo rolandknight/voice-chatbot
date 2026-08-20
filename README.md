@@ -58,9 +58,10 @@ Voices and routing live in `personas.yaml`. The default install ships
 with one persona, `babel`, using Kokoro `af_heart` — identical to the
 original single-voice setup. To add cloned voices on a Mac Studio:
 
-1. **One-time**: `./scripts/setup_chatterbox.sh` (clones the
-   Chatterbox-TTS-Server, builds its venv, downloads the model on
-   first launch).
+1. **One-time**: `./scripts/setup_chatterbox.sh` clones the
+   Chatterbox-TTS-Server. The first `start_chatterbox.sh` launch builds its
+   environment and downloads the model. Fresh upstream installs require
+   Python 3.10 (`uv python install 3.10` is supported).
 2. Drop a 5–15s mono WAV per voice into `voices/` (see
    `voices/README.md`).
 3. Add a persona entry in `personas.yaml`:
@@ -74,8 +75,10 @@ original single-voice setup. To add cloned voices on a Mac Studio:
    ```
 4. Run `./scripts/start_chatterbox.sh` (leave it running in another
    terminal). The server speaks the OpenAI `/v1/audio/speech` protocol
-   on `http://127.0.0.1:8004` and Chatterbox-Turbo uses MPS / Metal
-   acceleration on Apple Silicon.
+   on `http://127.0.0.1:8004`. The launcher auto-detects macOS versus Linux,
+   reuses either `venv/` or legacy `.venv/`, selects NVIDIA CUDA on Linux,
+   and uses the reliable CPU path on macOS by default. Set
+   `CHATTERBOX_DEVICE=mps` to explicitly test Apple MPS.
 5. Run `./run.sh` and either set `tts.default_persona: marvin` in
    `config.yaml` for boot or say *"switch to marvin"* mid-session.
 

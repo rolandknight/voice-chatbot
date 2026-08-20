@@ -1,9 +1,7 @@
-"""T5 barge-in test (plan §6) — requires a full-duplex server build.
+"""T5 barge-in regression (plan §6) for FlowCat's merged duplex builder.
 
-The stock FlowCat cascaded path is half-duplex (TurnMute, CONTRACT.md
-known-fact 1): against it this test fails plainly at the barge-in
-assertion. Run with: pytest harness -m duplex (only when the duplex
-server is up).
+The original cascaded path was half-duplex. The PoC is now pinned to the
+PR #61 merge and this test protects its interruption behavior.
 """
 
 from __future__ import annotations

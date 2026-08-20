@@ -50,7 +50,15 @@ def normalize_event(raw: Any, ts: Optional[float] = None) -> Optional[Event]:
     if not isinstance(raw, dict):
         return None
     etype = str(raw.get("type") or raw.get("event") or raw.get("kind") or "").lower()
-    data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
+    # RTF messages from flowcat-server use `payload`; older RTVI-shaped fixtures
+    # used `data`. Accept both so transcript receipt timestamps are measurable.
+    data = (
+        raw["payload"]
+        if isinstance(raw.get("payload"), dict)
+        else raw["data"]
+        if isinstance(raw.get("data"), dict)
+        else {}
+    )
     text = next(
         (src[k] for src in (raw, data) for k in _TEXT_KEYS if isinstance(src.get(k), str)),
         None,
