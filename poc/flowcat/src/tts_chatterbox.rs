@@ -56,7 +56,7 @@ impl ChatterboxTts {
         let normalized = text.trim();
         let is_ready =
             normalized.eq_ignore_ascii_case("ready") || normalized.eq_ignore_ascii_case("ready.");
-        is_ready.then(|| self.ready_pcm.as_deref()).flatten()
+        is_ready.then_some(self.ready_pcm.as_deref()).flatten()
     }
 }
 
