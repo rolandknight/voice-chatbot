@@ -349,43 +349,147 @@ impl FrameProcessor for TransportInput {
     // at the head and they pass straight through to the realtime service.
 }
 
-/// A [`MediaTransport`] shared (behind an async mutex) between the pump's `recv`
-/// loop and [`TransportOutput`]'s `send_audio`/`send_clear`. In `Call::run` the
-/// single `select!` task owns the whole transport and interleaves recv/send on it;
-/// the processor split needs both a reader and a writer task, so the one transport
-/// object is shared here. `recv` mostly awaits new media, releasing the lock so a
-/// concurrent `send_audio` is never starved.
-pub(crate) struct SharedTransport<T: MediaTransport>(Arc<tokio::sync::Mutex<T>>);
+/// Maximum number of outbound operations waiting behind the transport driver.
+/// Audio is already paced by the pipeline; bounding this queue prevents a stalled
+/// carrier from turning queued playback into unbounded memory growth.
+const SHARED_TRANSPORT_COMMAND_CAPACITY: usize = 8;
+
+enum TransportCommand {
+    SendAudio {
+        chunk: AudioChunk,
+        reply: tokio::sync::oneshot::Sender<Result<()>>,
+    },
+    SendClear {
+        reply: tokio::sync::oneshot::Sender<Result<()>>,
+    },
+}
+
+struct SharedTransportInner {
+    command_tx: tokio::sync::mpsc::Sender<TransportCommand>,
+    inbound_rx: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<MediaIn>>,
+    carrier_rate: u32,
+}
+
+/// A [`MediaTransport`] facade shared between the pump's `recv` loop and
+/// [`TransportOutput`]'s `send_audio`/`send_clear` calls.
+///
+/// A single driver task owns the concrete transport and selects between inbound
+/// media and a bounded outbound-command queue. This preserves the transport's
+/// exclusive `&mut self` contract without holding a mutex across a pending
+/// `recv()`, which would otherwise prevent bot-first audio from being sent until
+/// the caller spoke. Inbound events use an unbounded queue so the driver never
+/// blocks while handing a received event to the pump.
+///
+/// Selecting an outbound command drops the in-flight `recv()` future. The current
+/// WebSocket, WebRTC, and SIP transports await cancellation-safe stream/channel
+/// receives and only mutate their visible state after those awaits complete, so
+/// recreating `recv()` on the next driver iteration does not lose an inbound event.
+pub(crate) struct SharedTransport<T: MediaTransport> {
+    inner: Arc<SharedTransportInner>,
+    _transport: std::marker::PhantomData<fn() -> T>,
+}
 
 impl<T: MediaTransport> Clone for SharedTransport<T> {
     fn clone(&self) -> Self {
-        SharedTransport(self.0.clone())
+        Self {
+            inner: self.inner.clone(),
+            _transport: std::marker::PhantomData,
+        }
     }
 }
 
-impl<T: MediaTransport> SharedTransport<T> {
-    pub(crate) fn new(t: T) -> Self {
-        SharedTransport(Arc::new(tokio::sync::Mutex::new(t)))
+impl<T: MediaTransport + 'static> SharedTransport<T> {
+    pub(crate) fn new(transport: T) -> Self {
+        let carrier_rate = transport.carrier_rate();
+        let (command_tx, command_rx) =
+            tokio::sync::mpsc::channel(SHARED_TRANSPORT_COMMAND_CAPACITY);
+        let (inbound_tx, inbound_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        tokio::spawn(run_transport_driver(transport, command_rx, inbound_tx));
+
+        Self {
+            inner: Arc::new(SharedTransportInner {
+                command_tx,
+                inbound_rx: tokio::sync::Mutex::new(inbound_rx),
+                carrier_rate,
+            }),
+            _transport: std::marker::PhantomData,
+        }
+    }
+
+    async fn request(
+        &self,
+        build: impl FnOnce(tokio::sync::oneshot::Sender<Result<()>>) -> TransportCommand,
+    ) -> Result<()> {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        self.inner
+            .command_tx
+            .send(build(reply_tx))
+            .await
+            .map_err(|_| FlowcatError::Transport("media transport driver stopped".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| FlowcatError::Transport("media transport driver stopped".into()))?
+    }
+}
+
+async fn run_transport_driver<T: MediaTransport + 'static>(
+    mut transport: T,
+    mut command_rx: tokio::sync::mpsc::Receiver<TransportCommand>,
+    inbound_tx: tokio::sync::mpsc::UnboundedSender<MediaIn>,
+) {
+    loop {
+        tokio::select! {
+            // Playback and clear commands take priority over an always-ready
+            // inbound audio stream; this keeps bot audio latency deterministic.
+            biased;
+            command = command_rx.recv() => {
+                let Some(command) = command else {
+                    break;
+                };
+                match command {
+                    TransportCommand::SendAudio { chunk, reply } => {
+                        let _ = reply.send(transport.send_audio(chunk).await);
+                    }
+                    TransportCommand::SendClear { reply } => {
+                        let _ = reply.send(transport.send_clear().await);
+                    }
+                }
+            }
+            incoming = transport.recv() => {
+                match incoming {
+                    Some(event) => {
+                        let stopped = matches!(event, MediaIn::Stop);
+                        if inbound_tx.send(event).is_err() || stopped {
+                            break;
+                        }
+                    }
+                    None => break,
+                }
+            }
+            _ = inbound_tx.closed() => break,
+        }
     }
 }
 
 #[async_trait]
-impl<T: MediaTransport> MediaTransport for SharedTransport<T> {
+impl<T: MediaTransport + 'static> MediaTransport for SharedTransport<T> {
     async fn recv(&mut self) -> Option<MediaIn> {
-        self.0.lock().await.recv().await
+        self.inner.inbound_rx.lock().await.recv().await
     }
-    async fn send_audio(&mut self, chunk: AudioChunk) -> std::result::Result<(), FlowcatError> {
-        self.0.lock().await.send_audio(chunk).await
+
+    async fn send_audio(&mut self, chunk: AudioChunk) -> Result<()> {
+        self.request(|reply| TransportCommand::SendAudio { chunk, reply })
+            .await
     }
-    async fn send_clear(&mut self) -> std::result::Result<(), FlowcatError> {
-        self.0.lock().await.send_clear().await
+
+    async fn send_clear(&mut self) -> Result<()> {
+        self.request(|reply| TransportCommand::SendClear { reply })
+            .await
     }
+
     fn carrier_rate(&self) -> u32 {
-        // carrier_rate is a const property; read it once up front instead (the
-        // assembler captures it before sharing). This path is not on the hot loop.
-        // We cannot `.await` here, so callers must not rely on it post-share — the
-        // assembler passes the rate explicitly to each processor instead.
-        0
+        self.inner.carrier_rate
     }
 }
 
@@ -1602,6 +1706,95 @@ mod tests {
     use std::time::Duration;
 
     const TEST_MODEL: &str = "models/test-realtime";
+
+    /// A transport whose second receive never completes. The handshake makes the
+    /// test wait until that receive is actually pending rather than relying on a
+    /// scheduler delay.
+    struct PendingRecvTransport {
+        emitted_start: bool,
+        recv_pending: Option<tokio::sync::oneshot::Sender<()>>,
+        sent_audio: tokio::sync::mpsc::UnboundedSender<AudioChunk>,
+        rate: u32,
+    }
+
+    #[async_trait]
+    impl MediaTransport for PendingRecvTransport {
+        async fn recv(&mut self) -> Option<MediaIn> {
+            if !self.emitted_start {
+                self.emitted_start = true;
+                return Some(MediaIn::StreamStart {
+                    call_id: "silent-caller".into(),
+                });
+            }
+
+            if let Some(recv_pending) = self.recv_pending.take() {
+                let _ = recv_pending.send(());
+            }
+            std::future::pending().await
+        }
+
+        async fn send_audio(&mut self, chunk: AudioChunk) -> Result<()> {
+            self.sent_audio
+                .send(chunk)
+                .map_err(|_| FlowcatError::Transport("audio observer dropped".into()))
+        }
+
+        async fn send_clear(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        fn carrier_rate(&self) -> u32 {
+            self.rate
+        }
+    }
+
+    /// Bot-first playback must not wait for caller audio. Historically the shared
+    /// transport held an async mutex across `recv().await`, so this send could not
+    /// run until inbound media (or disconnect) released the mutex.
+    #[tokio::test]
+    async fn shared_transport_sends_audio_while_recv_is_pending() {
+        let (recv_pending_tx, recv_pending_rx) = tokio::sync::oneshot::channel();
+        let (sent_audio_tx, mut sent_audio_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut transport = SharedTransport::new(PendingRecvTransport {
+            emitted_start: false,
+            recv_pending: Some(recv_pending_tx),
+            sent_audio: sent_audio_tx,
+            rate: 16_000,
+        });
+
+        assert_eq!(transport.carrier_rate(), 16_000);
+        assert_eq!(
+            transport.recv().await,
+            Some(MediaIn::StreamStart {
+                call_id: "silent-caller".into(),
+            })
+        );
+
+        // Keep the public receive side pending too. Under the old mutex wrapper,
+        // this task acquired the transport lock and blocked the send below.
+        let mut reader = transport.clone();
+        let pending_reader = tokio::spawn(async move { reader.recv().await });
+        recv_pending_rx
+            .await
+            .expect("transport entered its pending recv");
+
+        let greeting = AudioChunk::new(vec![10, 20, 30, 40], 16_000);
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            transport.send_audio(greeting.clone()),
+        )
+        .await
+        .expect("send_audio was blocked by pending recv")
+        .expect("send_audio failed");
+        assert_eq!(
+            sent_audio_rx.recv().await,
+            Some(greeting),
+            "driver did not deliver greeting to the transport"
+        );
+
+        pending_reader.abort();
+        let _ = pending_reader.await;
+    }
 
     /// Teardown must abort the model-event reader. Without it the reader keeps
     /// reconnecting the realtime session after the call ends (Gemini `1008` reconnect),

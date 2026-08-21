@@ -9,7 +9,7 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::mpsc::{SyncSender, TrySendError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use audiopus::coder::{Decoder, Encoder};
@@ -29,6 +29,9 @@ const OPUS_FRAME_SAMPLES: usize = 960;
 const OPUS_MAX_PACKET_BYTES: usize = 1_275;
 const OPUS_MAX_DECODE_SAMPLES: usize = 5_760;
 const UDP_RECEIVE_BYTES: usize = 2_000;
+const MEDIA_FRAME_DURATION: Duration = Duration::from_millis(20);
+const CAPTURE_BUFFER_FRAMES: usize = 5;
+const MAX_PLAYBACK_SECONDS: usize = 10;
 
 /// An offer-side peer whose SDP answer has not yet been applied.
 ///
@@ -152,9 +155,9 @@ impl Peer {
     /// Drive WebRTC and bridge mono device PCM until `cancel` completes.
     ///
     /// `input` is expected to be a bounded Tokio channel fed by the capture
-    /// callback. `output` is a bounded standard-library synchronous channel;
-    /// decoded frames are delivered with `try_send`, so the RTC loop never
-    /// blocks behind a slow playback device.
+    /// callback. `output` is a bounded standard-library synchronous channel.
+    /// Incoming RTP bursts are paced into that channel at their decoded sample
+    /// rate, and neither direction blocks the RTC loop behind an audio device.
     pub async fn run<F>(
         mut self,
         input_rate: u32,
@@ -181,17 +184,14 @@ impl Peer {
         tokio::pin!(cancel);
 
         let session_result = 'session: loop {
-            if let Err(error) = self.process_actions(&mut runtime, &output).await {
+            if let Err(error) = self.process_actions(&mut runtime).await {
                 break 'session Err(error);
             }
             if !self.rtc.is_alive() {
                 break 'session Err(anyhow!("WebRTC peer is no longer alive"));
             }
 
-            if runtime.connected
-                && runtime.frames.has_frame()
-                && runtime.clock.next_wallclock() <= Instant::now()
-            {
+            if runtime.connected && runtime.clock.next_wallclock() <= Instant::now() {
                 // Give cancellation priority even while capture has queued many
                 // frames, otherwise a permanently-ready audio source could delay
                 // Ctrl-C indefinitely.
@@ -204,10 +204,9 @@ impl Peer {
                     break 'session Ok(());
                 }
 
-                let frame = runtime
-                    .frames
-                    .pop_frame()
-                    .expect("has_frame guaranteed one complete Opus frame");
+                let now = Instant::now();
+                runtime.clock.resync_if_late(now);
+                let frame = runtime.frames.pop_frame_or_silence();
                 let write_result =
                     runtime.encode_and_write(&mut self.rtc, self.mid, self.opus_pt, &frame);
                 // Writer::write is a mutation. Drain even if encoding/writing
@@ -224,15 +223,31 @@ impl Peer {
                 continue;
             }
 
+            if runtime.playback.is_due(Instant::now()) {
+                let cancelled = tokio::select! {
+                    biased;
+                    _ = &mut cancel => true,
+                    _ = std::future::ready(()) => false,
+                };
+                if cancelled {
+                    break 'session Ok(());
+                }
+                runtime.playback.deliver_due(&output, Instant::now())?;
+                continue;
+            }
+
             let timer = tokio::time::sleep_until(self.deadline.into());
             tokio::pin!(timer);
             let audio_timer = tokio::time::sleep_until(runtime.clock.next_wallclock().into());
             tokio::pin!(audio_timer);
+            let playback_timer = tokio::time::sleep_until(runtime.playback.deadline().into());
+            tokio::pin!(playback_timer);
 
             enum Wake {
                 Cancel,
                 Timeout,
                 AudioTick,
+                PlaybackTick,
                 Datagram(std::io::Result<(usize, SocketAddr)>),
                 Audio(Option<Vec<i16>>),
             }
@@ -241,7 +256,8 @@ impl Peer {
                 biased;
                 _ = &mut cancel => Wake::Cancel,
                 _ = &mut timer => Wake::Timeout,
-                _ = &mut audio_timer, if runtime.frames.has_frame() => Wake::AudioTick,
+                _ = &mut audio_timer, if runtime.connected => Wake::AudioTick,
+                _ = &mut playback_timer, if runtime.playback.has_pending() => Wake::PlaybackTick,
                 datagram = self.socket.recv_from(&mut udp_buffer) => Wake::Datagram(datagram),
                 audio = input.recv() => Wake::Audio(audio),
             };
@@ -249,6 +265,7 @@ impl Peer {
             match wake {
                 Wake::Cancel => break 'session Ok(()),
                 Wake::AudioTick => continue,
+                Wake::PlaybackTick => continue,
                 Wake::Audio(Some(pcm)) => {
                     // str0m drops writes before ICE/DTLS is connected. Discard
                     // pre-connect capture instead of presenting it later as
@@ -324,16 +341,12 @@ impl Peer {
         session_result
     }
 
-    async fn process_actions(
-        &mut self,
-        runtime: &mut AudioRuntime,
-        output: &SyncSender<Vec<i16>>,
-    ) -> Result<()> {
+    async fn process_actions(&mut self, runtime: &mut AudioRuntime) -> Result<()> {
         while let Some(action) = self.actions.pop_front() {
             match action {
                 DrainedAction::Transmit(transmit) => self.send_transmit(transmit).await?,
                 DrainedAction::Event(event) => {
-                    handle_event(*event, self.local_addr, runtime, output)?;
+                    handle_event(*event, self.local_addr, runtime)?;
                 }
             }
         }
@@ -412,12 +425,7 @@ fn negotiated_opus_pt(rtc: &mut Rtc, mid: Mid) -> Result<Pt> {
     pt
 }
 
-fn handle_event(
-    event: Event,
-    local_addr: SocketAddr,
-    runtime: &mut AudioRuntime,
-    output: &SyncSender<Vec<i16>>,
-) -> Result<()> {
+fn handle_event(event: Event, local_addr: SocketAddr, runtime: &mut AudioRuntime) -> Result<()> {
     match event {
         Event::Connected => {
             if !runtime.connected {
@@ -432,7 +440,7 @@ fn handle_event(
             tracing::debug!(?state, "WebRTC ICE state changed");
         }
         Event::Closed => bail!("remote WebRTC peer closed the connection"),
-        Event::MediaData(data) => runtime.decode_and_deliver(data, output)?,
+        Event::MediaData(data) => runtime.decode_and_buffer(data, Instant::now())?,
         other => tracing::trace!(?other, "WebRTC event"),
     }
     Ok(())
@@ -445,6 +453,7 @@ struct AudioRuntime {
     playback_resampler: StreamingResampler,
     frames: PcmFrames,
     clock: RtpClock,
+    playback: PlayoutQueue,
     opus_packet: Vec<u8>,
     decoded: Vec<i16>,
     connected: bool,
@@ -466,6 +475,7 @@ impl AudioRuntime {
                 .context("create playback resampler")?,
             frames: PcmFrames::default(),
             clock: RtpClock::new(Instant::now()),
+            playback: PlayoutQueue::new(output_rate),
             opus_packet: vec![0; OPUS_MAX_PACKET_BYTES],
             decoded: vec![0; OPUS_MAX_DECODE_SAMPLES],
             connected: false,
@@ -504,7 +514,7 @@ impl AudioRuntime {
         self.clock.reset(now);
     }
 
-    fn decode_and_deliver(&mut self, data: MediaData, output: &SyncSender<Vec<i16>>) -> Result<()> {
+    fn decode_and_buffer(&mut self, data: MediaData, now: Instant) -> Result<()> {
         if data.params.spec().codec != Codec::Opus {
             tracing::warn!(
                 ?data.pt,
@@ -537,16 +547,19 @@ impl AudioRuntime {
             return Ok(());
         }
 
-        match output.try_send(converted) {
-            Ok(()) => Ok(()),
-            Err(TrySendError::Full(_)) => {
-                tracing::warn!("playback queue full; dropping decoded audio frame");
-                Ok(())
-            }
-            Err(TrySendError::Disconnected(_)) => {
-                bail!("audio output channel disconnected")
-            }
+        match self.playback.push(converted, now) {
+            None => tracing::warn!(
+                max_seconds = MAX_PLAYBACK_SECONDS,
+                "decoded audio frame exceeds the playback buffer; dropping it"
+            ),
+            Some(0) => {}
+            Some(dropped_chunks) => tracing::warn!(
+                dropped_chunks,
+                max_seconds = MAX_PLAYBACK_SECONDS,
+                "playback fell behind; dropping oldest decoded audio"
+            ),
         }
+        Ok(())
     }
 }
 
@@ -558,6 +571,10 @@ struct PcmFrames {
 impl PcmFrames {
     fn push(&mut self, samples: &[i16]) {
         self.samples.extend(samples.iter().copied());
+        let max_samples = OPUS_FRAME_SAMPLES * CAPTURE_BUFFER_FRAMES;
+        if self.samples.len() > max_samples {
+            self.samples.drain(..self.samples.len() - max_samples);
+        }
     }
 
     fn has_frame(&self) -> bool {
@@ -571,8 +588,113 @@ impl PcmFrames {
         Some(self.samples.drain(..OPUS_FRAME_SAMPLES).collect::<Vec<_>>())
     }
 
+    fn pop_frame_or_silence(&mut self) -> Vec<i16> {
+        self.pop_frame()
+            .unwrap_or_else(|| vec![0; OPUS_FRAME_SAMPLES])
+    }
+
     fn clear(&mut self) {
         self.samples.clear();
+    }
+}
+
+struct PlayoutQueue {
+    chunks: VecDeque<Vec<i16>>,
+    queued_samples: usize,
+    sample_rate: u32,
+    max_samples: usize,
+    next_wallclock: Option<Instant>,
+}
+
+impl PlayoutQueue {
+    fn new(sample_rate: u32) -> Self {
+        Self::with_max_samples(sample_rate, sample_rate as usize * MAX_PLAYBACK_SECONDS)
+    }
+
+    fn with_max_samples(sample_rate: u32, max_samples: usize) -> Self {
+        Self {
+            chunks: VecDeque::new(),
+            queued_samples: 0,
+            sample_rate,
+            max_samples,
+            next_wallclock: None,
+        }
+    }
+
+    /// Queue a decoded chunk and return how many older chunks were evicted.
+    /// `None` means the new chunk itself is larger than the entire bound.
+    fn push(&mut self, chunk: Vec<i16>, now: Instant) -> Option<usize> {
+        if chunk.is_empty() {
+            return Some(0);
+        }
+        if chunk.len() > self.max_samples {
+            return None;
+        }
+
+        let mut dropped_stale_audio = 0;
+        while self.queued_samples.saturating_add(chunk.len()) > self.max_samples {
+            let Some(stale) = self.chunks.pop_front() else {
+                break;
+            };
+            self.queued_samples -= stale.len();
+            dropped_stale_audio += 1;
+        }
+        if dropped_stale_audio > 0 {
+            self.next_wallclock = Some(now);
+        } else {
+            self.next_wallclock = Some(
+                self.next_wallclock
+                    .filter(|deadline| *deadline > now)
+                    .unwrap_or(now),
+            );
+        }
+        self.queued_samples += chunk.len();
+        self.chunks.push_back(chunk);
+        Some(dropped_stale_audio)
+    }
+
+    fn has_pending(&self) -> bool {
+        !self.chunks.is_empty()
+    }
+
+    fn deadline(&self) -> Instant {
+        self.next_wallclock
+            .unwrap_or_else(|| Instant::now() + Duration::from_secs(24 * 60 * 60))
+    }
+
+    fn is_due(&self, now: Instant) -> bool {
+        self.has_pending() && self.next_wallclock.is_some_and(|deadline| deadline <= now)
+    }
+
+    fn deliver_due(&mut self, output: &SyncSender<Vec<i16>>, now: Instant) -> Result<()> {
+        if !self.is_due(now) {
+            return Ok(());
+        }
+        let chunk = self
+            .chunks
+            .pop_front()
+            .expect("pending playout always has a front chunk");
+        let samples = chunk.len();
+        match output.try_send(chunk) {
+            Ok(()) => {
+                self.queued_samples -= samples;
+                let duration = Duration::from_secs_f64(samples as f64 / self.sample_rate as f64);
+                let scheduled = self.next_wallclock.expect("queued chunk has a deadline");
+                self.next_wallclock =
+                    Some(if now.saturating_duration_since(scheduled) >= duration {
+                        now + duration
+                    } else {
+                        scheduled + duration
+                    });
+                Ok(())
+            }
+            Err(TrySendError::Full(chunk)) => {
+                self.chunks.push_front(chunk);
+                self.next_wallclock = Some(now + Duration::from_millis(1));
+                Ok(())
+            }
+            Err(TrySendError::Disconnected(_)) => bail!("audio output channel disconnected"),
+        }
     }
 }
 
@@ -598,6 +720,15 @@ impl RtpClock {
             wallclock,
             MediaTime::new(timestamp, Frequency::FORTY_EIGHT_KHZ),
         )
+    }
+
+    fn resync_if_late(&mut self, now: Instant) {
+        let next = self.next_wallclock();
+        if now.saturating_duration_since(next) >= MEDIA_FRAME_DURATION {
+            let media_offset =
+                Duration::from_secs_f64(self.next_timestamp as f64 / RTP_RATE as f64);
+            self.epoch = now.checked_sub(media_offset).unwrap_or(now);
+        }
     }
 
     fn next_wallclock(&self) -> Instant {
@@ -696,6 +827,89 @@ mod tests {
     }
 
     #[test]
+    fn pcm_framer_sends_silence_on_underflow_and_drops_stale_capture() {
+        let mut frames = PcmFrames::default();
+        assert_eq!(frames.pop_frame_or_silence(), vec![0; OPUS_FRAME_SAMPLES]);
+
+        let received_frames = CAPTURE_BUFFER_FRAMES + 2;
+        let samples = (0..OPUS_FRAME_SAMPLES * received_frames)
+            .map(|sample| sample as i16)
+            .collect::<Vec<_>>();
+        frames.push(&samples);
+
+        assert_eq!(
+            frames.samples.len(),
+            OPUS_FRAME_SAMPLES * CAPTURE_BUFFER_FRAMES
+        );
+        let newest_window_start = OPUS_FRAME_SAMPLES * 2;
+        let frame = frames.pop_frame().unwrap();
+        assert_eq!(frame[0], newest_window_start as i16);
+        assert_eq!(
+            frame[OPUS_FRAME_SAMPLES - 1],
+            (newest_window_start + OPUS_FRAME_SAMPLES - 1) as i16
+        );
+    }
+
+    #[test]
+    fn playout_is_paced_and_evicts_oldest_audio_when_bounded() {
+        let epoch = Instant::now();
+        let mut queue = PlayoutQueue::with_max_samples(RTP_RATE, OPUS_FRAME_SAMPLES * 2);
+        let first = vec![1; OPUS_FRAME_SAMPLES];
+        let second = vec![2; OPUS_FRAME_SAMPLES];
+        let third = vec![3; OPUS_FRAME_SAMPLES];
+
+        assert_eq!(queue.push(first, epoch), Some(0));
+        assert_eq!(queue.push(second.clone(), epoch), Some(0));
+        assert_eq!(queue.push(third.clone(), epoch), Some(1));
+        assert_eq!(queue.queued_samples, OPUS_FRAME_SAMPLES * 2);
+        assert_eq!(queue.push(vec![4; OPUS_FRAME_SAMPLES * 3], epoch), None);
+
+        let (output, received) = std::sync::mpsc::sync_channel(4);
+        queue.deliver_due(&output, epoch).unwrap();
+        assert_eq!(received.try_recv().unwrap(), second);
+        assert!(!queue.is_due(epoch + Duration::from_millis(19)));
+
+        queue
+            .deliver_due(&output, epoch + MEDIA_FRAME_DURATION)
+            .unwrap();
+        assert_eq!(received.try_recv().unwrap(), third);
+        assert!(!queue.has_pending());
+
+        // Even though the queue was momentarily empty, a packet arriving early
+        // retains the existing sample clock instead of playing immediately.
+        assert_eq!(
+            queue.push(
+                vec![4; OPUS_FRAME_SAMPLES],
+                epoch + Duration::from_millis(25)
+            ),
+            Some(0)
+        );
+        assert!(!queue.is_due(epoch + Duration::from_millis(39)));
+        assert!(queue.is_due(epoch + Duration::from_millis(40)));
+    }
+
+    #[test]
+    fn playout_retries_without_losing_audio_when_device_channel_is_full() {
+        let epoch = Instant::now();
+        let mut queue = PlayoutQueue::with_max_samples(RTP_RATE, OPUS_FRAME_SAMPLES);
+        let audio = vec![7; OPUS_FRAME_SAMPLES];
+        assert_eq!(queue.push(audio.clone(), epoch), Some(0));
+
+        let (output, received) = std::sync::mpsc::sync_channel(1);
+        output.try_send(vec![9]).unwrap();
+        queue.deliver_due(&output, epoch).unwrap();
+        assert!(queue.has_pending());
+        assert_eq!(queue.queued_samples, OPUS_FRAME_SAMPLES);
+        assert_eq!(received.try_recv().unwrap(), vec![9]);
+
+        queue
+            .deliver_due(&output, epoch + Duration::from_millis(1))
+            .unwrap();
+        assert_eq!(received.try_recv().unwrap(), audio);
+        assert!(!queue.has_pending());
+    }
+
+    #[test]
     fn rtp_clock_advances_by_exact_twenty_ms_frames() {
         let epoch = Instant::now();
         let mut clock = RtpClock::new(epoch);
@@ -711,5 +925,19 @@ mod tests {
         assert_eq!(time1.numer(), 960);
         assert_eq!(time2.numer(), 1_920);
         assert_eq!(time2.denom(), RTP_RATE);
+    }
+
+    #[test]
+    fn rtp_clock_skips_wallclock_catch_up_without_skipping_media_time() {
+        let epoch = Instant::now();
+        let mut clock = RtpClock::new(epoch);
+        let _ = clock.take_frame();
+        let late = epoch + Duration::from_millis(100);
+
+        clock.resync_if_late(late);
+        assert_eq!(clock.next_wallclock(), late);
+        let (wallclock, media_time) = clock.take_frame();
+        assert_eq!(wallclock, late);
+        assert_eq!(media_time.numer(), OPUS_FRAME_SAMPLES as u64);
     }
 }

@@ -55,6 +55,11 @@ cargo run --manifest-path poc/flowcat-client/Cargo.toml -- call --help
 Press Ctrl-C to close the WebRTC peer and both device streams. User
 transcriptions, assistant text, and tool activity are printed to the terminal.
 
+On Linux, ALSA may print warnings about unavailable JACK, OSS, `dsnoop`, or
+`dmix` devices while CPAL probes its plugin list. Those messages are harmless
+when the client subsequently prints the intended `input:` and `output:` lines.
+They do not mean the selected PipeWire/default device failed to open.
+
 For speakerphone use, select the same Jabra for input and output so its hardware
 echo cancellation receives the far-end playback reference. CPAL and str0m do
 not provide software acoustic echo cancellation; using separate laptop speakers
