@@ -1,4 +1,4 @@
-.PHONY: poc-doctor poc-setup poc-moonshine-setup poc-nemotron-setup poc-build poc-chatterbox poc-up poc-down poc-test poc-test-all poc-results help install-server install-server-os install-client install-client-os install-service run run-webrtc-smoke run-webrtc-smoke-lan run-server run-server-lan run-server-local run-server-lan-local run-webrtc-client run-rpi-client-local run-jabra run-wake-test run-wake-client
+.PHONY: flowcat-client-build flowcat-client-devices flowcat-client-run flowcat-client-test flowcat-client-check poc-doctor poc-setup poc-moonshine-setup poc-nemotron-setup poc-build poc-chatterbox poc-up poc-down poc-test poc-test-all poc-results help install-server install-server-os install-client install-client-os install-service run run-webrtc-smoke run-webrtc-smoke-lan run-server run-server-lan run-server-local run-server-lan-local run-webrtc-client run-rpi-client-local run-jabra run-wake-test run-wake-client
 
 # Homebrew packages the server needs (macOS). Keep in sync with install_mac.sh.
 BREW_PKGS := portaudio ffmpeg mpv librespot git cmake pkg-config ollama corelocationcli
@@ -45,6 +45,10 @@ help:
 	@echo "  poc-build                 - build FlowCat for selected local STT backend"
 	@echo "  poc-chatterbox            - run cloned-voice server (macOS/Linux auto-detected)"
 	@echo "  poc-test                  - run one PoC marker (POC_MARKER=smoke by default)"
+	@echo "  flowcat-client-build      - build the native Rust audio/WebRTC client"
+	@echo "  flowcat-client-devices    - list native input/output devices and stable IDs"
+	@echo "  flowcat-client-run        - connect selected native devices to FlowCat"
+	@echo "  flowcat-client-check      - fmt, clippy, and test the native client"
 
 install-server-os:
 	brew install $(BREW_PKGS)
@@ -202,8 +206,38 @@ $(CERT):
 #                  make poc-setup poc-build poc-test
 POC_PY := poc/.venv/bin/python
 POC_MARKER ?= smoke
+FLOWCAT_CLIENT_MANIFEST := poc/flowcat-client/Cargo.toml
+FLOWCAT_URL ?= http://127.0.0.1:6210
+LOG_LEVEL ?= info
+FLOWCAT_CLIENT_PKG_CONFIG := $(abspath poc/.deps/prefix/lib/pkgconfig)
 
-.PHONY: poc-doctor poc-setup poc-moonshine-setup poc-nemotron-setup poc-build poc-chatterbox poc-up poc-down poc-test poc-test-all poc-results
+.PHONY: flowcat-client-build flowcat-client-devices flowcat-client-run flowcat-client-test flowcat-client-check poc-doctor poc-setup poc-moonshine-setup poc-nemotron-setup poc-build poc-chatterbox poc-up poc-down poc-test poc-test-all poc-results
+
+flowcat-client-build:  ## Build the native Rust CPAL/WebRTC client
+	@PKG_CONFIG_PATH="$(FLOWCAT_CLIENT_PKG_CONFIG):$${PKG_CONFIG_PATH:-}" \
+	  cargo build --locked --manifest-path $(FLOWCAT_CLIENT_MANIFEST)
+
+flowcat-client-devices:  ## List native capture/playback devices
+	@PKG_CONFIG_PATH="$(FLOWCAT_CLIENT_PKG_CONFIG):$${PKG_CONFIG_PATH:-}" \
+	  cargo run --locked --quiet --manifest-path $(FLOWCAT_CLIENT_MANIFEST) -- devices
+
+flowcat-client-run:  ## Run native audio against the FlowCat PoC server
+	@PKG_CONFIG_PATH="$(FLOWCAT_CLIENT_PKG_CONFIG):$${PKG_CONFIG_PATH:-}" \
+	  cargo run --locked --quiet --manifest-path $(FLOWCAT_CLIENT_MANIFEST) -- call \
+	    --server-url "$(FLOWCAT_URL)" --log-level "$(LOG_LEVEL)" \
+	    $(if $(INPUT_DEVICE),--input-device "$(INPUT_DEVICE)",) \
+	    $(if $(OUTPUT_DEVICE),--output-device "$(OUTPUT_DEVICE)",)
+
+flowcat-client-test:  ## Run native-client unit tests
+	@PKG_CONFIG_PATH="$(FLOWCAT_CLIENT_PKG_CONFIG):$${PKG_CONFIG_PATH:-}" \
+	  cargo test --locked --manifest-path $(FLOWCAT_CLIENT_MANIFEST)
+
+flowcat-client-check:  ## Format, lint, and test the native client
+	@cargo fmt --manifest-path $(FLOWCAT_CLIENT_MANIFEST) -- --check
+	@PKG_CONFIG_PATH="$(FLOWCAT_CLIENT_PKG_CONFIG):$${PKG_CONFIG_PATH:-}" \
+	  cargo clippy --locked --manifest-path $(FLOWCAT_CLIENT_MANIFEST) --all-targets -- -D warnings
+	@PKG_CONFIG_PATH="$(FLOWCAT_CLIENT_PKG_CONFIG):$${PKG_CONFIG_PATH:-}" \
+	  cargo test --locked --manifest-path $(FLOWCAT_CLIENT_MANIFEST)
 
 poc-doctor:  ## PoC: verify platform-specific build/runtime prerequisites
 	@./poc/platform.sh doctor

@@ -140,6 +140,19 @@ For a live browser call, start the Rust stack in a second terminal and open
 make poc-up
 ```
 
+For a terminal-only native Rust call, no browser is needed. List the CoreAudio
+(macOS) or ALSA (Linux) devices, then connect the selected microphone and
+speaker directly to the same WebRTC endpoint:
+
+```sh
+make flowcat-client-devices
+make flowcat-client-run INPUT_DEVICE='Jabra' OUTPUT_DEVICE='Jabra'
+```
+
+Omit either selector to use the operating-system default. See
+[`flowcat-client/README.md`](flowcat-client/README.md) for stable device-ID
+selection, platform build packages, and the hardware echo-cancellation note.
+
 Use **Test microphone** before starting the call. After permission is granted,
 the page lists the browser's available input devices and meters the exact track
 that will be sent over WebRTC. Select the internal mic or Jabra explicitly and
