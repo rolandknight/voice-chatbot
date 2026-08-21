@@ -1,0 +1,23 @@
+[package]
+name = "audio_tools"
+description = "Reusable microphone capture, resampling and audio conversion tools (16 kHz mono pipeline)"
+keywords = ["audio", "microphone", "resampling", "cpal", "dsp"]
+categories = ["multimedia::audio"]
+readme = "README.md"
+version = "0.3.3"
+edition = "2024"
+rust-version = "1.85"
+
+[lib]
+crate-type = ["lib"]
+
+[dependencies]
+chrono = "0.4"
+circular-buffer = "1.2"
+hound = "3.5"
+log = "0.4"
+nnnoiseless = "0.5"
+rubato = { version = "3.0", features = ["fft_resampler"] }
+
+[dev-dependencies]
+approx = "0.5"

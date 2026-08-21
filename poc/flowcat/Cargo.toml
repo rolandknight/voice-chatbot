@@ -1,0 +1,59 @@
+# FlowCat PoC embedder (docs/poc/flowcat-poc-plan.md, Phase 1).
+# FlowCat is pinned by commit per the plan. Historical reports identify their
+# tested rev; the working integration follows the reviewed PR #61 merge.
+[package]
+name = "flowcat-poc"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+flowcat-core = { git = "https://github.com/AreevAI/flowcat.git", rev = "4ff03f3ef8e179d988a20c6f46498dfb9419c1c1", features = ["vad-ort"] }
+flowcat-services = { git = "https://github.com/AreevAI/flowcat.git", rev = "4ff03f3ef8e179d988a20c6f46498dfb9419c1c1", default-features = false, features = [
+    "llm-openrouter",
+    "tts-kokoro",
+] }
+# Whole-utterance STT (src/stt.rs) uses whisper-rs directly; same version as
+# the (now unused) upstream stt-whisper-local feature.
+whisper-rs = "0.16"
+# Wake detection (src/wake.rs): vendored oww_rs (tract-based openWakeWord).
+oww_rs = { package = "oww-rs", path = "../vendor/oww_rs/crates/oww" }
+flowcat-transports = { git = "https://github.com/AreevAI/flowcat.git", rev = "4ff03f3ef8e179d988a20c6f46498dfb9419c1c1", default-features = false, features = [
+    "webrtc-str0m",
+] }
+flowcat-server = { git = "https://github.com/AreevAI/flowcat.git", rev = "4ff03f3ef8e179d988a20c6f46498dfb9419c1c1", default-features = false, features = [
+    "webrtc-helper",
+] }
+
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
+dotenvy = "0.15"
+futures = "0.3"
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+
+# Phase 1 GPU STT (optional): unify CUDA into the whisper-rs flowcat links.
+# Requires the CUDA toolkit (nvcc); leave off for CPU smoke runs.
+# whisper-rs = { version = "0.16", features = ["cuda"] }
+
+[features]
+# Local streaming STT through the separately-downloaded Moonshine Voice v0.1.3
+# native library. Disabled by default so Whisper-only builds need no artifact.
+moonshine = []
+# GPU STT via whisper-rs feature unification (pick per host):
+#   make poc-build on macOS → --features metal (Phase 2, Mac Studio)
+#   --features cuda needs the CUDA toolkit (nvcc)
+metal = ["whisper-rs/metal"]
+cuda = ["whisper-rs/cuda"]
+
+# Full-duplex support is upstream as of FlowCat PR #61. Keep flowcat-core
+# patched to the vendored copy only for Babel's extra input-processor seam,
+# which inserts the optional wake-word gate ahead of the speech gate.
+[patch."https://github.com/AreevAI/flowcat.git"]
+flowcat-core = { path = "../vendor/flowcat-core" }

@@ -5,7 +5,9 @@ __pycache__/
 .hermit/
 
 # Chatterbox-TTS-Server clone, its venv, and any model caches it pulls.
-vendor/
+# (Anchored to the repo root: poc/vendor/ holds the committed flowcat-core
+# patch and must NOT be ignored.)
+/vendor/
 
 # Reference clips for cloned personas. Keep these out of git unless you
 # explicitly want to commit them (small files only — and check licensing).
@@ -16,6 +18,16 @@ vendor/
 scripts/microwakeword/_work/
 scripts/wakeword/_work/
 
+# PoC runtime artifacts (docs/poc/flowcat-poc-plan.md): downloaded models,
+# process logs, Rust build output. Fixtures (poc/harness/fixtures/*.wav) ARE
+# committed.
+poc/models/
+poc/logs/
+poc/flowcat/target/
+poc/.deps/
+
 # Self-signed certs for the LAN dev servers (smoke + main backend).
 .certs/
 webrtc_smoke/.certs/
+poc/vendor/flowcat-core/target/
+poc/vendor/oww_rs/**/target/

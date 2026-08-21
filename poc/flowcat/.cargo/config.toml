@@ -1,0 +1,8 @@
+# Build environment for the PoC embedder, so a bare `cargo build` works.
+# - libopus: built from source into poc/.deps/prefix (no system libopus-dev,
+#   no sudo on this box) — see docs/poc/flowcat-poc-plan.md.
+# - whisper-rs-sys: use the crate's pregenerated bindings; the bindgen path
+#   needs a shared libclang, which this box doesn't have.
+[env]
+WHISPER_DONT_GENERATE_BINDINGS = "1"
+PKG_CONFIG_PATH = { value = "../.deps/prefix/lib/pkgconfig", relative = true }
