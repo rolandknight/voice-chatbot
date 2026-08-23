@@ -1856,6 +1856,145 @@ git commit -m "feat(poc-tts): Flash tuning sweep recording RTF and VRAM"
 
 ---
 
+### Task 9: Local Makefile as the PoC entry point
+
+**Files:**
+- Create: `poc-tts/Makefile`
+- Modify: `Makefile` (repo root — the four `poc-tts-*` targets added in Task 1)
+- Modify: `poc-tts/README.md`
+
+**Interfaces:**
+- Consumes: `poc-tts/setup.sh` (Task 1), `poc_tts.server` (Task 5), `poc_tts.bench` (Task 8), `tests/` (Tasks 2-8).
+- Produces: nothing consumed by later tasks — this is the final task.
+
+`cd poc-tts && make` with no arguments must do everything needed to run the app: install the toolchain and dependencies if absent, then start the server. Repeat runs must skip the install work rather than redoing it.
+
+The root Makefile's `poc-tts-*` targets are refactored to delegate here so the PoC's lifecycle has exactly one source of truth. Task 1 wrote them as direct `$(POC_TTS_PY)` invocations; this task replaces those bodies.
+
+- [ ] **Step 1: Create the local Makefile**
+
+`poc-tts/Makefile`:
+
+```makefile
+# poc-tts — Chatterbox Flash PoC.
+# Bare `make` installs whatever is missing and starts the app on :8005.
+
+.DEFAULT_GOAL := run
+
+VENV := .venv
+PY := $(VENV)/bin/python
+STAMP := $(VENV)/.setup-stamp
+
+.PHONY: run setup bench test clean help
+
+run: setup  ## Install if needed, then serve the Flash GUI on http://127.0.0.1:8005
+	@$(PY) -m poc_tts.server
+
+setup: $(STAMP)  ## mise python 3.10, venv, deps, FlashInfer probe (idempotent)
+
+# The stamp records a completed setup. It is newer than requirements.txt and
+# mise.toml after a successful run, so repeat `make` invocations skip straight
+# to run; editing either file makes setup rerun.
+$(STAMP): requirements.txt mise.toml setup.sh
+	@./setup.sh
+	@touch $(STAMP)
+
+bench: setup  ## Sweep Flash tuning configs -> reports/runs.jsonl
+	@$(PY) -m poc_tts.bench
+
+test: setup  ## GPU-free unit tests
+	@$(PY) -m pytest tests -v
+
+clean:  ## Remove the venv and caches. Leaves reports/ and the HF model cache.
+	rm -rf $(VENV) .pytest_cache poc_tts/__pycache__ tests/__pycache__
+
+help:  ## List targets
+	@grep -hE '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
+		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-8s\033[0m %s\n", $$1, $$2}'
+```
+
+- [ ] **Step 2: Verify the default target installs and runs**
+
+Run:
+```bash
+cd poc-tts && make clean && make
+```
+Expected: `setup.sh` runs (venv rebuilt, deps installed, probe written), then the server starts and logs `Uvicorn running on http://127.0.0.1:8005`. Stop it with Ctrl-C.
+
+- [ ] **Step 3: Verify repeat runs skip the install**
+
+Run:
+```bash
+cd poc-tts && make
+```
+Expected: no pip output at all — the stamp is newer than `requirements.txt`, `mise.toml`, and `setup.sh`, so `setup` is satisfied and make goes straight to starting the server. Stop it with Ctrl-C.
+
+- [ ] **Step 4: Verify editing requirements retriggers setup**
+
+Run:
+```bash
+cd poc-tts && touch requirements.txt && make setup
+```
+Expected: `setup.sh` runs again and completes.
+
+- [ ] **Step 5: Verify the remaining targets**
+
+Run:
+```bash
+cd poc-tts && make help && make test
+```
+Expected: `help` lists run, setup, bench, test, clean; `make test` reports the full suite passing.
+
+- [ ] **Step 6: Refactor the root Makefile to delegate**
+
+Replace the four `poc-tts-*` target bodies added in Task 1 with delegating versions, so the local Makefile is the only place the lifecycle is defined. Also delete the now-unused `POC_TTS_PY` variable.
+
+```makefile
+poc-tts-setup:  ## poc-tts: mise python 3.10, venv, deps, flashinfer probe (idempotent)
+	@$(MAKE) -C poc-tts setup
+
+poc-tts:    ## poc-tts: run the Chatterbox Flash server + GUI on :8005
+	@$(MAKE) -C poc-tts run
+
+poc-tts-bench:  ## poc-tts: sweep Flash tuning configs, append poc-tts/reports/runs.jsonl
+	@$(MAKE) -C poc-tts bench
+
+poc-tts-test:  ## poc-tts: GPU-free unit tests
+	@$(MAKE) -C poc-tts test
+```
+
+Leave both `.PHONY` lines as Task 1 set them.
+
+- [ ] **Step 7: Verify delegation works from the repo root**
+
+Run:
+```bash
+cd /home/rolandknight/github.com/rolandknight/voice-chatbot && make poc-tts-test
+```
+Expected: the same full suite passes, driven through the local Makefile.
+
+- [ ] **Step 8: Update the README**
+
+In `poc-tts/README.md`, replace the command block with:
+
+```markdown
+    make              # install anything missing, then serve on :8005
+    make test         # GPU-free unit tests
+    make bench        # tuning sweep -> reports/runs.jsonl
+    make clean        # drop the venv
+
+Run from this directory. The repo-root `make poc-tts*` targets delegate here.
+```
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add poc-tts/Makefile poc-tts/README.md Makefile
+git commit -m "feat(poc-tts): local Makefile entry point, default target installs and runs"
+```
+
+---
+
 ## Self-review
 
 **Spec coverage.** Layout and mise → Task 1. Engine and dtype resolution → Tasks 2 and 4. Backend resolution → Tasks 2 and 4. Reference voices with vendor-absent tolerance → Task 3. Eleven endpoints → Tasks 5 and 6. Knob mapping and the four new controls → Tasks 6 and 7. Bench → Task 8. Testing → Tasks 2, 3, 4, 5, 6, 8. Error handling: OOM → Tasks 4 and 6; bf16 guard → Task 2; missing wav → Tasks 3 and 6; flashinfer absent → Tasks 1 and 4.
