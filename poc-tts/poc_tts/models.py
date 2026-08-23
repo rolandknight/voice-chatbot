@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class FlashTTSRequest(BaseModel):
@@ -16,8 +16,14 @@ class FlashTTSRequest(BaseModel):
     voice_mode: Literal["predefined", "clone"] = "predefined"
     predefined_voice_id: Optional[str] = None
     reference_audio_filename: Optional[str] = None
-    output_format: Literal["wav"] = Field(
-        "wav", description="PoC serves WAV only; opus/mp3 are out of scope."
+    output_format: Literal["wav", "mp3", "opus"] = Field(
+        "wav",
+        description=(
+            "The PoC only ever encodes and returns WAV. 'mp3' and 'opus' are "
+            "accepted -- ui/script.js always sends a value, and its default "
+            "select option is 'mp3' -- but coerced to 'wav' rather than "
+            "rejected with a 422."
+        ),
     )
     split_text: bool = True
     chunk_size: int = Field(120, ge=50, le=500)
@@ -32,3 +38,11 @@ class FlashTTSRequest(BaseModel):
     # Flash-specific speed/quality knobs.
     num_steps: Optional[int] = Field(None, ge=1, le=32)
     n_cfm_timesteps: Optional[int] = Field(None, ge=1, le=8)
+
+    @field_validator("output_format")
+    @classmethod
+    def _coerce_to_wav(cls, value: str) -> str:
+        """The PoC has no encoder for mp3/opus; accept the request but make
+        sure the stored value can never mislead anything downstream that
+        might start trusting it."""
+        return "wav"

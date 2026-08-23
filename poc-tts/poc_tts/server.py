@@ -38,6 +38,36 @@ def _wav_bytes(audio: np.ndarray, sample_rate: int) -> bytes:
     return buffer.getvalue()
 
 
+def _ui_shaped_config(config: dict) -> dict:
+    """Reshape config.yaml into the keys ui/script.js's initializeUI expects.
+
+    script.js:699 reads config.audio_output.format, falling back to 'mp3'
+    when the key is absent -- and config.yaml never carried an
+    audio_output section, so every page load silently selected mp3, which
+    models.FlashTTSRequest used to reject outright. The PoC only ever
+    encodes and returns WAV, so this is pinned to "wav" unconditionally,
+    regardless of whatever config.yaml may say.
+
+    script.js:689 reads config.generation_defaults, with cfg_scale renamed
+    to cfg_weight at script.js:694 -- the name FlashTTSRequest.cfg_weight
+    uses. Without this mapping the 'generation:' block in config.yaml was
+    dead for all GUI traffic; script.js found no generation_defaults and
+    fell back to its own hardcoded slider defaults.
+
+    The raw config.yaml keys (engine, generation, voices, server, ...) pass
+    through unchanged via the spread below, so nothing that already worked
+    is lost -- callers that want the PoC's own config shape still have it.
+    """
+    generation = dict(config.get("generation", {}))
+    if "cfg_scale" in generation:
+        generation["cfg_weight"] = generation.pop("cfg_scale")
+    return {
+        **config,
+        "audio_output": {**config.get("audio_output", {}), "format": "wav"},
+        "generation_defaults": generation,
+    }
+
+
 def _voice_record(name: str) -> dict:
     """Shape one reference filename the way ui/script.js expects.
 
@@ -65,6 +95,12 @@ def create_app(engine, config: dict, voice_paths: list[Path]) -> FastAPI:
     async def styles_css():
         return FileResponse(UI_DIR / "styles.css", media_type="text/css")
 
+    @app.get("/vendor/wavesurfer.min.js", include_in_schema=False)
+    async def wavesurfer_js():
+        return FileResponse(
+            UI_DIR / "vendor" / "wavesurfer.min.js", media_type="application/javascript"
+        )
+
     @app.get("/api/model-info")
     async def model_info():
         return engine.model_info()
@@ -88,7 +124,7 @@ def create_app(engine, config: dict, voice_paths: list[Path]) -> FastAPI:
                     presets = loaded
         names = discover_voices(voice_paths)
         return {
-            "config": config,
+            "config": _ui_shaped_config(config),
             "reference_files": names,
             "predefined_voices": [_voice_record(n) for n in names],
             "presets": presets,
@@ -164,6 +200,8 @@ def create_app(engine, config: dict, voice_paths: list[Path]) -> FastAPI:
 
 
 def main() -> None:
+    import sys
+
     import uvicorn
 
     from poc_tts.engine_flash import FlashEngine
@@ -176,7 +214,11 @@ def main() -> None:
         generation_cfg=config.get("generation", {}),
         voice_paths=paths,
     )
-    engine.load()
+    try:
+        engine.load()
+    except OutOfMemoryError as exc:
+        logger.error("failed to load Chatterbox Flash: %s", exc)
+        sys.exit(f"poc-tts: failed to load the model -- {exc}")
     app = create_app(engine, config, voice_paths=paths)
     uvicorn.run(
         app,

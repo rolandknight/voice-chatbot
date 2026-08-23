@@ -109,3 +109,45 @@ def test_save_and_reset_settings_round_trip(client):
     saved = client.post("/save_settings", json={"last_text": "remembered"})
     assert saved.status_code == 200
     assert client.post("/reset_settings").status_code == 200
+
+
+def test_tts_accepts_the_real_ui_payload(client):
+    """Reproduces exactly what ui/script.js:1066-1088 getTTSFormData() builds
+    on a fresh page load with the default 'predefined' voice mode -- field
+    names, field set, and output_format: 'mp3' (script.js:1080 sends
+    outputFormatSelect.value || 'mp3', and index.html:333 ships <option
+    value="mp3" selected>, so 'mp3' is what a real browser sends). Before the
+    models.FlashTTSRequest fix this 422'd because output_format was
+    Literal["wav"]. Also pins that speed_factor/seed/language -- fields the
+    UI always sends but FlashTTSRequest has no field for -- are accepted,
+    not rejected."""
+    payload = {
+        "text": "Hello there.",
+        "temperature": 0.8,
+        "exaggeration": 0.5,
+        "cfg_weight": 0.5,
+        "num_steps": 10,
+        "n_cfm_timesteps": 2,
+        "speed_factor": 1.0,
+        "seed": 0,
+        "language": "en",
+        "voice_mode": "predefined",
+        "split_text": True,
+        "chunk_size": 120,
+        "output_format": "mp3",
+        "predefined_voice_id": "marvin.wav",
+    }
+    r = client.post("/tts", json=payload)
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "audio/wav"
+
+
+def test_tts_clone_mode_missing_reference_is_a_400(client):
+    """No prior test covered voice_mode='clone' with reference_audio_filename
+    missing. It's a live path: when the clone <select> is 'none',
+    ui/script.js's getTTSFormData omits the field entirely (script.js:1084's
+    'else if' guard never fires), so the server sees voice_mode='clone' with
+    no reference_audio_filename at all."""
+    r = client.post("/tts", json={"text": "Hi.", "voice_mode": "clone"})
+    assert r.status_code == 400
+    assert "reference_audio_filename" in r.json()["detail"]

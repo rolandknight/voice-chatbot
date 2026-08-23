@@ -26,3 +26,10 @@ voices:
   paths:
     - ../voices
     - ../vendor/chatterbox-tts-server/reference_audio
+
+bench:
+  # bench.py's default (marvin.wav) lives only in the gitignored vendor
+  # clone's reference_audio/, so `make bench` would fail on a fresh
+  # checkout. one-one.mp3 is repo-tracked under voices/, and mp3 reference
+  # clips are already proven to work.
+  voice: one-one.mp3

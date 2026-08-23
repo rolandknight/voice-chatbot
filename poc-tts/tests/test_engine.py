@@ -115,6 +115,19 @@ def test_synthesize_concatenates_chunks(tmp_path):
     assert audio.shape[0] == 3000
 
 
+def test_load_cuda_oom_is_translated_with_actionable_detail(tmp_path):
+    """synthesize() already translates OOM into the good _vram_report()
+    message; load() didn't, so a load-time OOM (the likelier failure point
+    -- the PoC is designed to run beside the Turbo server, which already
+    holds most of a 6 GB card) produced a raw traceback instead."""
+    eng = _engine(tmp_path)
+    with patch("poc_tts.engine_flash.ChatterboxFlashTTS") as cls:
+        cls.from_pretrained.side_effect = torch.cuda.OutOfMemoryError("CUDA out of memory")
+        with pytest.raises(OutOfMemoryError, match="VRAM"):
+            eng.load()
+    assert eng.loaded is False
+
+
 def test_cuda_oom_is_translated_with_actionable_detail(tmp_path):
     (tmp_path / "a.wav").write_bytes(b"x")
     eng = _engine(tmp_path)

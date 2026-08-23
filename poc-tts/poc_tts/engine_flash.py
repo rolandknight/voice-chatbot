@@ -6,10 +6,21 @@ that boundary is what lets the server tests run with this module mocked.
 
 from __future__ import annotations
 
+import importlib.util
+import logging
 import os
+import re
 import shutil
+from pathlib import Path
 
+import numpy as np
 import torch
+from chatterbox_flash import ChatterboxFlashTTS
+
+logger = logging.getLogger(__name__)
+
+
+# --- device / dtype / backend resolution ------------------------------------
 
 _DTYPES = {
     "bfloat16": torch.bfloat16,
@@ -37,9 +48,14 @@ def resolve_dtype(requested: str, device: str, bf16_supported: bool) -> torch.dt
     """Resolve the compute dtype.
 
     chatterbox-flash's from_pretrained defaults to bfloat16 unconditionally.
-    On sm_75 (Turing, e.g. RTX 2060) torch.cuda.is_bf16_supported() is False,
-    and taking that default gives emulated speeds or a hard failure. Auto
-    therefore steps down to float16 on CUDA rather than trusting the library.
+    On sm_75 (Turing, e.g. RTX 2060) the bare torch.cuda.is_bf16_supported()
+    call returns True, because it counts emulation -- taking that default
+    gives emulated (slow) bf16, not a clean failure, which is exactly what
+    would make the bug silent. See _bf16_supported() below, which calls
+    is_bf16_supported(including_emulation=False) to get the real hardware
+    boundary. Auto therefore steps down to float16 on CUDA when native bf16
+    isn't available, rather than trusting the library's unconditional
+    default or the emulation-inclusive query.
     """
     if requested == "auto":
         if device != "cuda":
@@ -86,8 +102,7 @@ def resolve_backend(
     return requested
 
 
-import re
-from pathlib import Path
+# --- text chunking ------------------------------------------------------------
 
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
 
@@ -123,6 +138,8 @@ def chunk_text(text: str, chunk_size: int) -> list[str]:
     return chunks
 
 
+# --- voice discovery ------------------------------------------------------------
+
 _VOICE_EXTENSIONS = (".wav", ".mp3", ".flac", ".ogg")
 
 
@@ -134,7 +151,10 @@ def discover_voices(paths: list[Path]) -> list[str]:
     the repo-root voices/ directory -- the source of truth in that case --
     ships only .mp3 files. Flash loads reference clips via librosa, which
     reads wav/mp3/flac/ogg alike, so all four are recognised here. Names are
-    de-duplicated, keeping first-path-wins ordering.
+    de-duplicated and the result is alphabetically sorted -- path order buys
+    nothing observable here. (Contrast resolve_voice_path below, which
+    genuinely is first-path-wins: it returns the first match it finds while
+    walking paths in order.)
     """
     seen: dict[str, None] = {}
     for path in paths:
@@ -156,17 +176,10 @@ def resolve_voice_path(name: str, paths: list[Path]) -> Path:
     raise FileNotFoundError(f"reference voice {name!r} not found. Searched: {searched}")
 
 
-import importlib.util
-import logging
-
-import numpy as np
-from chatterbox_flash import ChatterboxFlashTTS
-
-logger = logging.getLogger(__name__)
-
+# --- hardware capability probes ------------------------------------------------
 
 class OutOfMemoryError(Exception):
-    """Raised when generation runs out of VRAM, with actionable detail."""
+    """Raised when load or generation runs out of VRAM, with actionable detail."""
 
 
 def _flashinfer_available() -> bool:
@@ -227,11 +240,12 @@ def _vram_report() -> str:
     )
 
 
+# --- FlashEngine ----------------------------------------------------------------
+
 class FlashEngine:
     """Owns the Chatterbox Flash model for the process lifetime."""
 
     def __init__(self, engine_cfg: dict, generation_cfg: dict, voice_paths: list[Path]):
-        self._engine_cfg = engine_cfg
         self._generation_cfg = generation_cfg
         self._voice_paths = voice_paths
         self._model = None
@@ -262,11 +276,16 @@ class FlashEngine:
                 "flashinfer not in use -- running the portable SDPA path, not "
                 "the CUDA-graph path the published RTF figures come from."
             )
-        self._model = ChatterboxFlashTTS.from_pretrained(
-            device=self.device,
-            dtype=self.dtype,
-            drf_block_size=self.drf_block_size,
-        )
+        try:
+            self._model = ChatterboxFlashTTS.from_pretrained(
+                device=self.device,
+                dtype=self.dtype,
+                drf_block_size=self.drf_block_size,
+            )
+        except torch.cuda.OutOfMemoryError as exc:
+            raise OutOfMemoryError(
+                f"ran out of VRAM loading the model. {_vram_report()}"
+            ) from exc
         self.sr = getattr(self._model, "sr", 24000)
 
     def model_info(self) -> dict:
