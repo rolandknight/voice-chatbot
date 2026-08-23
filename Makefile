@@ -295,16 +295,14 @@ poc-results:  ## PoC: show recorded performance results (poc/reports/runs.jsonl)
 	rows=[json.loads(l) for l in open('poc/reports/runs.jsonl')]; \
 	[print(f\"{r['ts']}  {r['host']:12.12s} {r['os']:6.6s} {r['test']:28.28s} llm={r['llm_model'].split('/')[-1]:24.24s} stt={r.get('stt_backend','whisper'):9.9s}:{r.get('stt_model',r.get('whisper','?')):16.16s}/{r.get('stt_accelerator','?'):5.5s} tts={r['tts_backend']:10.10s}/{r.get('chatterbox_device','-'):5.5s} \" + ' '.join(f'{k}={v}' for k,v in r['results'].items())) for r in rows]"
 
-POC_TTS_PY := poc-tts/.venv/bin/python
-
 poc-tts-setup:  ## poc-tts: mise python 3.10, venv, deps, flashinfer probe (idempotent)
-	@./poc-tts/setup.sh
+	@$(MAKE) -C poc-tts setup
 
 poc-tts:    ## poc-tts: run the Chatterbox Flash server + GUI on :8005
-	@$(POC_TTS_PY) -m poc_tts.server
+	@$(MAKE) -C poc-tts run
 
 poc-tts-bench:  ## poc-tts: sweep Flash tuning configs, append poc-tts/reports/runs.jsonl
-	@$(POC_TTS_PY) -m poc_tts.bench
+	@$(MAKE) -C poc-tts bench
 
 poc-tts-test:  ## poc-tts: GPU-free unit tests
-	@cd poc-tts && .venv/bin/python -m pytest tests -v
+	@$(MAKE) -C poc-tts test
