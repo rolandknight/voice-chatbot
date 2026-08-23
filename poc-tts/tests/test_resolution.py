@@ -69,3 +69,16 @@ def test_backend_auto_never_selects_mlx():
 def test_backend_explicit_flashinfer_when_absent_raises():
     with pytest.raises(ValueError, match="flashinfer requested but not installed"):
         resolve_backend("flashinfer", flashinfer_available=False)
+
+
+def test_backend_auto_on_cpu_never_selects_flashinfer():
+    """flashinfer is CUDA-only. On this project's sm_75 box it IS importable,
+    so an auto resolution that ignored device would hand a CPU engine a CUDA
+    backend and fail at generation time."""
+    got = resolve_backend("auto", flashinfer_available=True, device="cpu")
+    assert got == "torch"
+
+
+def test_backend_explicit_flashinfer_on_cpu_raises():
+    with pytest.raises(ValueError, match="flashinfer requires a CUDA device"):
+        resolve_backend("flashinfer", flashinfer_available=True, device="cpu")

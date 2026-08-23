@@ -56,22 +56,30 @@ def resolve_dtype(requested: str, device: str, bf16_supported: bool) -> torch.dt
     return _DTYPES[requested]
 
 
-def resolve_backend(requested: str, flashinfer_available: bool) -> str:
+def resolve_backend(
+    requested: str, flashinfer_available: bool, device: str = "cuda"
+) -> str:
     """Resolve the inference backend.
 
-    'auto' picks flashinfer when importable, else torch SDPA. mlx is never
-    selected automatically -- upstream marks it experimental and it must be
-    named explicitly.
+    'auto' picks flashinfer only on CUDA -- flashinfer is a CUDA-only kernel
+    library, so selecting it for a CPU engine would fail at generation time.
+    Otherwise 'auto' falls back to torch SDPA. mlx is never selected
+    automatically; upstream marks it experimental and it must be named.
     """
     if requested == "auto":
-        return "flashinfer" if flashinfer_available else "torch"
-    if requested == "flashinfer" and not flashinfer_available:
-        raise ValueError("flashinfer requested but not installed")
+        if device == "cuda" and flashinfer_available:
+            return "flashinfer"
+        return "torch"
     if requested not in ("flashinfer", "torch", "mlx"):
         raise ValueError(
             f"invalid backend {requested!r} "
             "(expected auto, flashinfer, torch, or mlx)"
         )
+    if requested == "flashinfer":
+        if not flashinfer_available:
+            raise ValueError("flashinfer requested but not installed")
+        if device != "cuda":
+            raise ValueError("flashinfer requires a CUDA device")
     return requested
 
 
@@ -184,7 +192,7 @@ class FlashEngine:
         bf16 = torch.cuda.is_bf16_supported() if self.device == "cuda" else False
         self.dtype = resolve_dtype(engine_cfg.get("dtype", "auto"), self.device, bf16)
         self.backend = resolve_backend(
-            engine_cfg.get("backend", "auto"), _flashinfer_available()
+            engine_cfg.get("backend", "auto"), _flashinfer_available(), self.device
         )
         self.drf_block_size = int(engine_cfg.get("drf_block_size", 16))
         self.sr = 24000
