@@ -114,3 +114,32 @@ def test_flashinfer_unavailable_without_nvcc(monkeypatch):
     monkeypatch.delenv("CUDA_PATH", raising=False)
     monkeypatch.setattr(engine_flash.Path, "exists", lambda self: False)
     assert _flashinfer_available() is False
+
+
+def test_flashinfer_unavailable_on_sm75_even_with_nvcc(monkeypatch):
+    """flashinfer's prebuilt kernels select fp16 QK accumulation on compute
+    capability < 8.0 (Turing and older) and the wheel is not built with
+    FP16_QK_REDUCTION_SUPPORTED, so the JIT compile itself static-asserts and
+    fails -- verified on an RTX 2060 with CUDA 12.4: nvcc ran, the JIT
+    proceeded, and prefill.cuh failed with a static assertion demanding
+    boost_math. A working toolkit is not enough; the card must be Ampere or
+    newer."""
+    monkeypatch.setattr(
+        engine_flash.importlib.util, "find_spec", lambda name: object()
+    )
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: (7, 5))
+    monkeypatch.setattr(engine_flash.shutil, "which", lambda cmd: "/usr/bin/nvcc")
+    assert _flashinfer_available() is False
+
+
+def test_flashinfer_available_on_sm80_with_nvcc(monkeypatch):
+    """The compute-capability guard must not simply disable flashinfer
+    everywhere -- Ampere and newer (sm_80+) can run it."""
+    monkeypatch.setattr(
+        engine_flash.importlib.util, "find_spec", lambda name: object()
+    )
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: (8, 0))
+    monkeypatch.setattr(engine_flash.shutil, "which", lambda cmd: "/usr/bin/nvcc")
+    assert _flashinfer_available() is True

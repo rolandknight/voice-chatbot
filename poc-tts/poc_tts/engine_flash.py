@@ -174,10 +174,19 @@ def _flashinfer_available() -> bool:
 
     flashinfer JIT-compiles its kernels on first use and needs nvcc. Without a
     CUDA toolkit the package imports cleanly and then fails deep inside the
-    first generate(), so importability alone is not enough -- fail closed to
-    torch SDPA instead.
+    first generate(), so importability alone is not enough. And a working
+    toolkit still is not enough: flashinfer's prebuilt kernels select fp16 QK
+    accumulation on compute capability < 8.0 (Turing and older, e.g. the RTX
+    2060's sm_75), and the wheel is not built with
+    FP16_QK_REDUCTION_SUPPORTED, so the JIT compile itself static-asserts and
+    fails. Verified on an RTX 2060 with CUDA 12.4 nvcc 12.4.131: nvcc ran, the
+    JIT proceeded, and prefill.cuh failed 12 times with "static assertion
+    failed ... install boost_math then recompile to support fp16 reduction".
+    Fail closed to torch SDPA in every case.
     """
     if importlib.util.find_spec("flashinfer") is None:
+        return False
+    if not (torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8):
         return False
     if shutil.which("nvcc"):
         return True
