@@ -26,13 +26,11 @@ def test_sentences_are_packed_up_to_chunk_size():
 def test_sentence_longer_than_chunk_size_is_not_dropped():
     long_sentence = "word " * 60 + "end."
     chunks = chunk_text(long_sentence, chunk_size=50)
-    assert len(chunks) >= 1
-    assert "end." in " ".join(chunks)
+    assert len(chunks) == 1
+    assert chunks[0] == long_sentence
 
 
 def test_no_text_is_lost():
     text = "Alpha beta. Gamma delta. Epsilon zeta."
     chunks = chunk_text(text, chunk_size=15)
-    rejoined = " ".join(chunks)
-    for word in ("Alpha", "beta", "Gamma", "delta", "Epsilon", "zeta"):
-        assert word in rejoined
+    assert " ".join(chunks).split() == text.split()
