@@ -1,4 +1,10 @@
-# Pipecat Jabra Mac Prototype
+# Voice Chatbot
+
+## Rust PoC
+
+- make poc-chatterbox
+
+## Pipecat Jabra Mac Prototype
 
 Local voice-to-voice prototype for Apple Silicon Mac Studio + Jabra USB speakerphone.
 

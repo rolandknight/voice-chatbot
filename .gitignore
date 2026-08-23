@@ -32,3 +32,8 @@ poc/.deps/
 webrtc_smoke/.certs/
 poc/vendor/flowcat-core/target/
 poc/vendor/oww_rs/**/target/
+
+# CUDA toolkit installers. Multi-gigabyte vendor downloads, kept out of the
+# tree so a stray `git add -A` cannot commit one. The toolkit itself installs
+# outside the repo (see poc-tts/.env for the CUDA_HOME pointer).
+cuda_*.run

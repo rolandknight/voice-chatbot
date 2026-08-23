@@ -1,0 +1,6 @@
+{
+  "flashinfer_importable": true,
+  "gpu": "NVIDIA GeForce RTX 2060",
+  "compute_capability": "sm_75",
+  "host": "pop-os"
+}
