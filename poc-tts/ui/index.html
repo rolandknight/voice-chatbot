@@ -269,6 +269,18 @@
                                             <input type="range" id="cfg-weight" name="cfg_weight" min="0.0" max="2.0"
                                                 step="0.01" value="0.5" class="form-slider">
                                         </div>
+                                        <div id="flash-knobs-group" class="form-group">
+                                            <label for="num-steps" class="form-label">Diffusion Steps (<span
+                                                    id="num-steps-value" class="tabular-nums">10</span>)</label>
+                                            <input type="range" id="num-steps" name="num_steps" min="1" max="16"
+                                                step="1" value="10" class="form-slider">
+                                            <p class="form-hint">Lower is faster, at some cost to quality.</p>
+                                            <label for="cfm-timesteps" class="form-label">Vocoder CFM Steps (<span
+                                                    id="cfm-timesteps-value" class="tabular-nums">2</span>)</label>
+                                            <input type="range" id="cfm-timesteps" name="n_cfm_timesteps" min="1"
+                                                max="4" step="1" value="2" class="form-slider">
+                                            <p class="form-hint">The meanflow-distilled vocoder is tuned for 2.</p>
+                                        </div>
                                         <div class="form-group">
                                             <label for="speed-factor" class="form-label">
                                                 Speed Factor (<span id="speed-factor-value"

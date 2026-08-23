@@ -98,6 +98,8 @@ document.addEventListener('DOMContentLoaded', async function () {
     const exaggerationValueDisplay = document.getElementById('exaggeration-value');
     const cfgWeightSlider = document.getElementById('cfg-weight');
     const cfgWeightValueDisplay = document.getElementById('cfg-weight-value');
+    const numStepsSlider = document.getElementById('num-steps');
+    const cfmTimestepsSlider = document.getElementById('cfm-timesteps');
     const speedFactorSlider = document.getElementById('speed-factor');
     const speedFactorValueDisplay = document.getElementById('speed-factor-value');
     const speedFactorWarningSpan = document.getElementById('speed-factor-warning');
@@ -360,6 +362,7 @@ document.addEventListener('DOMContentLoaded', async function () {
         // Show/hide model-specific UI sections
         const exaggerationGroup = document.getElementById('exaggeration-group');
         const cfgWeightGroup = document.getElementById('cfg-weight-group');
+        const flashKnobsGroup = document.getElementById('flash-knobs-group');
 
         // Show/hide paralinguistic tags section (Turbo only)
         if (paralinguisticTagsSection) {
@@ -378,6 +381,9 @@ document.addEventListener('DOMContentLoaded', async function () {
             exaggerationGroup?.classList.remove('hidden');
             cfgWeightGroup?.classList.remove('hidden');
         }
+
+        // Show diffusion/CFM step controls only for Flash
+        flashKnobsGroup?.classList.toggle('hidden', modelInfo.type !== 'flash');
 
         // Refresh presets to filter based on current model type
         populatePresets();
@@ -734,7 +740,7 @@ document.addEventListener('DOMContentLoaded', async function () {
             chunkSizeSlider.addEventListener('input', () => { if (chunkSizeValue) chunkSizeValue.textContent = chunkSizeSlider.value; });
             chunkSizeSlider.addEventListener('change', debouncedSaveState);
         }
-        const genParamSliders = [temperatureSlider, exaggerationSlider, cfgWeightSlider, speedFactorSlider];
+        const genParamSliders = [temperatureSlider, exaggerationSlider, cfgWeightSlider, numStepsSlider, cfmTimestepsSlider, speedFactorSlider];
         genParamSliders.forEach(slider => {
             if (slider) {
                 const valueDisplayId = slider.id + '-value';
@@ -1063,6 +1069,8 @@ document.addEventListener('DOMContentLoaded', async function () {
             temperature: parseFloat(temperatureSlider.value),
             exaggeration: parseFloat(exaggerationSlider.value),
             cfg_weight: parseFloat(cfgWeightSlider.value),
+            num_steps: parseInt(numStepsSlider.value, 10),
+            n_cfm_timesteps: parseInt(cfmTimestepsSlider.value, 10),
             speed_factor: parseFloat(speedFactorSlider.value),
             seed: parseInt(seedInput.value, 10),
             language: languageSelect.value,
