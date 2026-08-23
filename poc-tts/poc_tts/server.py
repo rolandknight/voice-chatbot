@@ -6,19 +6,36 @@ so tests can inject a mock and run without a GPU.
 
 from __future__ import annotations
 
+import io
 import logging
+import wave
 from pathlib import Path
 
+import numpy as np
 import yaml
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import FileResponse, JSONResponse
 
 from poc_tts.config import load_config, voice_paths as configured_voice_paths
-from poc_tts.engine_flash import discover_voices
+from poc_tts.engine_flash import OutOfMemoryError, discover_voices
+from poc_tts.models import FlashTTSRequest
 
 logger = logging.getLogger(__name__)
 
 UI_DIR = Path(__file__).resolve().parent.parent / "ui"
+
+
+def _wav_bytes(audio: np.ndarray, sample_rate: int) -> bytes:
+    """Encode mono float32 [-1, 1] as 16-bit PCM WAV."""
+    clipped = np.clip(audio, -1.0, 1.0)
+    pcm = (clipped * 32767.0).astype(np.int16)
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(sample_rate)
+        handle.writeframes(pcm.tobytes())
+    return buffer.getvalue()
 
 
 def _voice_record(name: str) -> dict:
@@ -89,6 +106,59 @@ def create_app(engine, config: dict, voice_paths: list[Path]) -> FastAPI:
             {"message": "Restarting is not supported in the poc-tts PoC. "
                         "Stop and rerun `make poc-tts`."}
         )
+
+    settings_store: dict = {}
+
+    @app.post("/tts")
+    async def tts(request: FlashTTSRequest):
+        if not engine.loaded:
+            raise HTTPException(status_code=503, detail="Flash model is not loaded.")
+
+        if request.voice_mode == "predefined":
+            voice = request.predefined_voice_id
+            if not voice:
+                raise HTTPException(
+                    status_code=400,
+                    detail="predefined_voice_id is required when voice_mode is 'predefined'.",
+                )
+        else:
+            voice = request.reference_audio_filename
+            if not voice:
+                raise HTTPException(
+                    status_code=400,
+                    detail="reference_audio_filename is required when voice_mode is 'clone'.",
+                )
+
+        try:
+            audio, sample_rate = engine.synthesize(
+                text=request.text,
+                voice=voice,
+                temperature=request.temperature,
+                exaggeration=request.exaggeration,
+                cfg_scale=request.cfg_weight,
+                num_steps=request.num_steps,
+                n_cfm_timesteps=request.n_cfm_timesteps,
+                chunk_size=request.chunk_size,
+                split_text=request.split_text,
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except OutOfMemoryError as exc:
+            raise HTTPException(status_code=507, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        return Response(content=_wav_bytes(audio, sample_rate), media_type="audio/wav")
+
+    @app.post("/save_settings")
+    async def save_settings(payload: dict):
+        settings_store.update(payload)
+        return {"message": "Settings saved."}
+
+    @app.post("/reset_settings")
+    async def reset_settings():
+        settings_store.clear()
+        return {"message": "Settings reset."}
 
     return app
 
