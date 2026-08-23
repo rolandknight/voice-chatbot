@@ -1,0 +1,28 @@
+server:
+  host: 127.0.0.1
+  port: 8005
+
+engine:
+  # device: auto | cuda | cpu
+  device: auto
+  # dtype: auto | bfloat16 | float16 | float32
+  # auto = bfloat16 if the GPU supports it, else float16 on CUDA, else float32.
+  # The library default is bfloat16 unconditionally, which is wrong on sm_75.
+  dtype: auto
+  # backend: auto | flashinfer | torch | mlx
+  # auto = flashinfer when importable, else torch. mlx is never automatic.
+  backend: auto
+  drf_block_size: 16
+
+generation:
+  temperature: 0.6
+  exaggeration: 0.5
+  cfg_scale: 1.0
+  num_steps: 10
+  n_cfm_timesteps: 2
+
+voices:
+  # Searched in order. Missing directories are skipped, not an error.
+  paths:
+    - ../voices
+    - ../vendor/chatterbox-tts-server/reference_audio

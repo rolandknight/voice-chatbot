@@ -1,4 +1,4 @@
-.PHONY: flowcat-client-build flowcat-client-devices flowcat-client-run flowcat-client-test flowcat-client-check poc-doctor poc-setup poc-moonshine-setup poc-nemotron-setup poc-build poc-chatterbox poc-up poc-down poc-test poc-test-all poc-results help install-server install-server-os install-client install-client-os install-service run run-webrtc-smoke run-webrtc-smoke-lan run-server run-server-lan run-server-local run-server-lan-local run-webrtc-client run-rpi-client-local run-jabra run-wake-test run-wake-client
+.PHONY: flowcat-client-build flowcat-client-devices flowcat-client-run flowcat-client-test flowcat-client-check poc-doctor poc-setup poc-moonshine-setup poc-nemotron-setup poc-build poc-chatterbox poc-up poc-down poc-test poc-test-all poc-results poc-tts-setup poc-tts poc-tts-bench poc-tts-test help install-server install-server-os install-client install-client-os install-service run run-webrtc-smoke run-webrtc-smoke-lan run-server run-server-lan run-server-local run-server-lan-local run-webrtc-client run-rpi-client-local run-jabra run-wake-test run-wake-client
 
 # Homebrew packages the server needs (macOS). Keep in sync with install_mac.sh.
 BREW_PKGS := portaudio ffmpeg mpv librespot git cmake pkg-config ollama corelocationcli
@@ -211,7 +211,7 @@ FLOWCAT_URL ?= http://127.0.0.1:6210
 LOG_LEVEL ?= info
 FLOWCAT_CLIENT_PKG_CONFIG := $(abspath poc/.deps/prefix/lib/pkgconfig)
 
-.PHONY: flowcat-client-build flowcat-client-devices flowcat-client-run flowcat-client-test flowcat-client-check poc-doctor poc-setup poc-moonshine-setup poc-nemotron-setup poc-build poc-chatterbox poc-up poc-down poc-test poc-test-all poc-results
+.PHONY: flowcat-client-build flowcat-client-devices flowcat-client-run flowcat-client-test flowcat-client-check poc-doctor poc-setup poc-moonshine-setup poc-nemotron-setup poc-build poc-chatterbox poc-up poc-down poc-test poc-test-all poc-results poc-tts-setup poc-tts poc-tts-bench poc-tts-test
 
 flowcat-client-build:  ## Build the native Rust CPAL/WebRTC client
 	@PKG_CONFIG_PATH="$(FLOWCAT_CLIENT_PKG_CONFIG):$${PKG_CONFIG_PATH:-}" \
@@ -294,3 +294,17 @@ poc-results:  ## PoC: show recorded performance results (poc/reports/runs.jsonl)
 	@poc/.venv/bin/python -c "import json,sys; \
 	rows=[json.loads(l) for l in open('poc/reports/runs.jsonl')]; \
 	[print(f\"{r['ts']}  {r['host']:12.12s} {r['os']:6.6s} {r['test']:28.28s} llm={r['llm_model'].split('/')[-1]:24.24s} stt={r.get('stt_backend','whisper'):9.9s}:{r.get('stt_model',r.get('whisper','?')):16.16s}/{r.get('stt_accelerator','?'):5.5s} tts={r['tts_backend']:10.10s}/{r.get('chatterbox_device','-'):5.5s} \" + ' '.join(f'{k}={v}' for k,v in r['results'].items())) for r in rows]"
+
+POC_TTS_PY := poc-tts/.venv/bin/python
+
+poc-tts-setup:  ## poc-tts: mise python 3.10, venv, deps, flashinfer probe (idempotent)
+	@./poc-tts/setup.sh
+
+poc-tts:    ## poc-tts: run the Chatterbox Flash server + GUI on :8005
+	@$(POC_TTS_PY) -m poc_tts.server
+
+poc-tts-bench:  ## poc-tts: sweep Flash tuning configs, append poc-tts/reports/runs.jsonl
+	@$(POC_TTS_PY) -m poc_tts.bench
+
+poc-tts-test:  ## poc-tts: GPU-free unit tests
+	@cd poc-tts && .venv/bin/python -m pytest tests -v
