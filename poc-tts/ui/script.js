@@ -842,13 +842,17 @@ document.addEventListener('DOMContentLoaded', async function () {
     function populatePresets() {
         if (!presetsContainer || !appPresets) return;
 
-        // Filter presets based on current model
-        // Hide "Turbo" presets when Chatterbox-Original is loaded
+        // Hide presets the loaded model cannot actually render.
+        //
+        // The original check was name-based -- startsWith('turbo') -- but every
+        // such preset is named "\u26a1 Turbo: ...", so the leading emoji meant it
+        // never matched and the tag-heavy presets stayed on screen for models
+        // that ignore the tags. Filter on the thing that matters instead: does
+        // the preset's TEXT use paralinguistic tags this model supports?
+        const PARALINGUISTIC_TAG = /\[(laugh|chuckle|sigh|gasp|cough|clear throat|sniff|groan|shush)\]/i;
         let filteredPresets = appPresets;
-        if (currentModelInfo && currentModelInfo.type !== 'turbo') {
-            filteredPresets = appPresets.filter(preset =>
-                !preset.name.toLowerCase().startsWith('turbo')
-            );
+        if (currentModelInfo && currentModelInfo.supports_paralinguistic_tags === false) {
+            filteredPresets = appPresets.filter(preset => !PARALINGUISTIC_TAG.test(preset.text || ''));
         }
 
         // Clear container

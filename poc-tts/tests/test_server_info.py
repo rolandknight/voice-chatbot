@@ -190,3 +190,33 @@ def test_standard_narration_preset_exists_and_is_neutral(client):
     match = [p for p in presets if p["name"] == "Standard Narration"]
     assert match, "the neutral default preset script.js looks for is missing"
     assert "[sigh]" not in match[0]["text"] and "[laugh]" not in match[0]["text"]
+
+
+def test_tag_using_presets_are_identifiable_by_their_text(client):
+    """The GUI hides presets whose text uses paralinguistic tags when the model
+    reports supports_paralinguistic_tags=false (Flash does).
+
+    ui/script.js filters on preset TEXT, not on the name: every tag-using preset
+    is named "⚡ Turbo: ..." and the leading emoji made the original
+    startsWith('turbo') check never match. This pins the two to agree, so a
+    future Turbo-named preset without tags -- or a tag-using preset named
+    something else -- cannot silently slip past the filter.
+    """
+    import re
+
+    tag = re.compile(r"\[(laugh|chuckle|sigh|gasp|cough|clear throat|sniff|groan|shush)\]", re.I)
+    presets = client.get("/api/ui/initial-data").json()["presets"]
+    assert presets, "no presets served"
+
+    named_turbo = {p["name"] for p in presets if "turbo:" in p["name"].lower()}
+    uses_tags = {p["name"] for p in presets if tag.search(p["text"])}
+    assert named_turbo == uses_tags, (
+        f"naming and tag usage disagree; named-only={named_turbo - uses_tags}, "
+        f"tagged-only={uses_tags - named_turbo}"
+    )
+    assert "Standard Narration" not in uses_tags, "the neutral default must survive the filter"
+
+
+def test_flash_reports_no_paralinguistic_support(client):
+    """The filter above is keyed on this flag, so it must actually be false."""
+    assert client.get("/api/model-info").json()["supports_paralinguistic_tags"] is False
