@@ -83,11 +83,11 @@ def main() -> None:
         engine.load()
         engine.synthesize(text="Warming up the voice.", voice=voice)
 
-        if torch.cuda.is_available():
-            torch.cuda.reset_peak_memory_stats()
-
         for combo in per_request_configs:
             full_config = {"drf_block_size": block_size, **combo}
+
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
 
             for name, text in SENTENCES:
                 timings = []
