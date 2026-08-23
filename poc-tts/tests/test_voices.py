@@ -11,13 +11,32 @@ def test_discovers_wavs_sorted(tmp_path):
     assert discover_voices([d]) == ["alpha.wav", "zeta.wav"]
 
 
-def test_ignores_non_wav_files(tmp_path):
+def test_ignores_non_audio_files(tmp_path):
+    """mp3/flac/ogg are now recognised reference formats (see
+    test_discovers_mp3_files below) -- only genuinely non-audio files like
+    .md are still ignored."""
     d = tmp_path / "voices"
     d.mkdir()
     (d / "a.wav").write_bytes(b"x")
     (d / "notes.md").write_bytes(b"x")
-    (d / "b.mp3").write_bytes(b"x")
     assert discover_voices([d]) == ["a.wav"]
+
+
+def test_discovers_mp3_files(tmp_path):
+    """Flash loads reference clips via librosa, which reads mp3 fine, and the
+    repo-root voices/ directory (the source of truth when the vendor clone is
+    absent) ships only .mp3 files."""
+    d = tmp_path / "voices"
+    d.mkdir()
+    (d / "one-one.mp3").write_bytes(b"x")
+    assert discover_voices([d]) == ["one-one.mp3"]
+
+
+def test_resolve_returns_mp3_path(tmp_path):
+    d = tmp_path / "voices"
+    d.mkdir()
+    (d / "one-one.mp3").write_bytes(b"x")
+    assert resolve_voice_path("one-one.mp3", [d]) == d / "one-one.mp3"
 
 
 def test_missing_directory_is_skipped_not_an_error(tmp_path):

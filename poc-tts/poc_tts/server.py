@@ -45,7 +45,7 @@ def _voice_record(name: str) -> dict:
     agree, so the derivation lives in one place.
     """
     return {
-        "display_name": name.replace(".wav", "").replace("_", " ").title(),
+        "display_name": Path(name).stem.replace("_", " ").title(),
         "filename": name,
     }
 

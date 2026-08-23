@@ -6,6 +6,9 @@ that boundary is what lets the server tests run with this module mocked.
 
 from __future__ import annotations
 
+import os
+import shutil
+
 import torch
 
 _DTYPES = {
@@ -120,19 +123,26 @@ def chunk_text(text: str, chunk_size: int) -> list[str]:
     return chunks
 
 
+_VOICE_EXTENSIONS = (".wav", ".mp3", ".flac", ".ogg")
+
+
 def discover_voices(paths: list[Path]) -> list[str]:
-    """List available reference .wav filenames across the search paths.
+    """List available reference audio filenames across the search paths.
 
     Missing directories are skipped rather than raising: the vendor clone
-    under vendor/chatterbox-tts-server/ is gitignored and may be absent.
-    Names are de-duplicated, keeping first-path-wins ordering.
+    under vendor/chatterbox-tts-server/ is gitignored and may be absent, and
+    the repo-root voices/ directory -- the source of truth in that case --
+    ships only .mp3 files. Flash loads reference clips via librosa, which
+    reads wav/mp3/flac/ogg alike, so all four are recognised here. Names are
+    de-duplicated, keeping first-path-wins ordering.
     """
     seen: dict[str, None] = {}
     for path in paths:
         if not path.is_dir():
             continue
-        for wav in sorted(path.glob("*.wav")):
-            seen.setdefault(wav.name, None)
+        for ext in _VOICE_EXTENSIONS:
+            for audio in sorted(path.glob(f"*{ext}")):
+                seen.setdefault(audio.name, None)
     return sorted(seen)
 
 
@@ -160,7 +170,38 @@ class OutOfMemoryError(Exception):
 
 
 def _flashinfer_available() -> bool:
-    return importlib.util.find_spec("flashinfer") is not None
+    """Whether flashinfer can actually run, not merely import.
+
+    flashinfer JIT-compiles its kernels on first use and needs nvcc. Without a
+    CUDA toolkit the package imports cleanly and then fails deep inside the
+    first generate(), so importability alone is not enough -- fail closed to
+    torch SDPA instead.
+    """
+    if importlib.util.find_spec("flashinfer") is None:
+        return False
+    if shutil.which("nvcc"):
+        return True
+    for var in ("CUDA_HOME", "CUDA_PATH"):
+        root = os.environ.get(var)
+        if root and (Path(root) / "bin" / "nvcc").exists():
+            return True
+    return (Path("/usr/local/cuda") / "bin" / "nvcc").exists()
+
+
+def _bf16_supported() -> bool:
+    """Whether the GPU supports bfloat16 NATIVELY.
+
+    torch.cuda.is_bf16_supported() defaults to including_emulation=True and
+    returns True on sm_75, where bf16 is emulated and slow -- which silently
+    defeated this guard. Older torch has no such kwarg, so fall back to the
+    real hardware boundary: native bf16 starts at compute capability 8.0.
+    """
+    if not torch.cuda.is_available():
+        return False
+    try:
+        return torch.cuda.is_bf16_supported(including_emulation=False)
+    except TypeError:
+        return torch.cuda.get_device_capability()[0] >= 8
 
 
 def _vram_report() -> str:
@@ -189,7 +230,7 @@ class FlashEngine:
         self.device = resolve_device(
             engine_cfg.get("device", "auto"), torch.cuda.is_available()
         )
-        bf16 = torch.cuda.is_bf16_supported() if self.device == "cuda" else False
+        bf16 = _bf16_supported() if self.device == "cuda" else False
         self.dtype = resolve_dtype(engine_cfg.get("dtype", "auto"), self.device, bf16)
         self.backend = resolve_backend(
             engine_cfg.get("backend", "auto"), _flashinfer_available(), self.device

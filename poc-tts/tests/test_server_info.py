@@ -3,7 +3,7 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
-from poc_tts.server import create_app
+from poc_tts.server import _voice_record, create_app
 
 
 @pytest.fixture
@@ -84,3 +84,9 @@ def test_predefined_voices_agree_between_endpoints(client):
     direct = client.get("/get_predefined_voices").json()
     embedded = client.get("/api/ui/initial-data").json()["predefined_voices"]
     assert direct == embedded
+
+
+def test_voice_record_strips_actual_extension_not_just_wav():
+    """_voice_record used to do name.replace('.wav', ''), which left '.mp3'
+    in the display name -- voices/ ships mp3 reference clips."""
+    assert _voice_record("some_voice.mp3")["display_name"] == "Some Voice"

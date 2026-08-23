@@ -1,8 +1,11 @@
 import pytest
 import torch
 
+import poc_tts.engine_flash as engine_flash
 from poc_tts.engine_flash import (
     UnsupportedDtypeError,
+    _bf16_supported,
+    _flashinfer_available,
     resolve_backend,
     resolve_device,
     resolve_dtype,
@@ -82,3 +85,32 @@ def test_backend_auto_on_cpu_never_selects_flashinfer():
 def test_backend_explicit_flashinfer_on_cpu_raises():
     with pytest.raises(ValueError, match="flashinfer requires a CUDA device"):
         resolve_backend("flashinfer", flashinfer_available=True, device="cpu")
+
+
+def test_bf16_supported_rejects_sm75_emulation(monkeypatch):
+    """torch.cuda.is_bf16_supported() defaults to including_emulation=True and
+    returns True on sm_75, where bf16 is emulated and slow -- which silently
+    defeated the auto-dtype guard. The honest call passes
+    including_emulation=False explicitly, which real sm_75 hardware reports
+    as False. This mock simulates exactly that split so the test runs on any
+    machine, not just the sm_75 box."""
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(
+        torch.cuda, "is_bf16_supported",
+        lambda including_emulation=True: including_emulation,
+    )
+    assert _bf16_supported() is False
+
+
+def test_flashinfer_unavailable_without_nvcc(monkeypatch):
+    """flashinfer JIT-compiles its kernels on first use and needs nvcc. A
+    package that imports cleanly but has no CUDA toolkit is not actually
+    usable -- fail closed to torch SDPA rather than crash mid-generation."""
+    monkeypatch.setattr(
+        engine_flash.importlib.util, "find_spec", lambda name: object()
+    )
+    monkeypatch.setattr(engine_flash.shutil, "which", lambda cmd: None)
+    monkeypatch.delenv("CUDA_HOME", raising=False)
+    monkeypatch.delenv("CUDA_PATH", raising=False)
+    monkeypatch.setattr(engine_flash.Path, "exists", lambda self: False)
+    assert _flashinfer_available() is False
