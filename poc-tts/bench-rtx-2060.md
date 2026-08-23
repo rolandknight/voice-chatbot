@@ -97,7 +97,8 @@ only real constraint is initial latency, and ~0.6 s is far below this project's 
 end-to-end `reply_start_latency` of 11–14 s.
 
 It will not reach Flash's advertised sub-200 ms time-to-first-packet. That figure comes
-from the FlashInfer streaming path, which **cannot run on this GPU** — see below.
+from the FlashInfer streaming path, which **is not usable on this GPU** — it compiles
+once fp16 QK reduction is disabled, but then produces wrong output. See below.
 
 Three things stand in the way of actually streaming:
 
@@ -110,7 +111,10 @@ Three things stand in the way of actually streaming:
    Turbo server implements that endpoint with `stream: true` support. Until poc-tts
    exposes it, this is a GUI test bench rather than a pipeline component.
 
-## FlashInfer does not work on this GPU
+## FlashInfer: compiles on sm_75, but produces wrong output
+
+Short version: **do not enable it on this card.** The reasoning below is recorded
+because the obvious workaround looks like it works and does not.
 
 Installing a CUDA 12.4 toolkit is necessary but not sufficient. With `nvcc` present,
 FlashInfer's JIT compiles for `sm_75` and then fails a static assertion, twelve times:
@@ -121,14 +125,43 @@ prefill.cuh(342): error: static assertion failed with
    to support fp16 reduction"
 ```
 
-On Turing, FlashInfer selects fp16 QK accumulation because sm_75 lacks Ampere's
-fp32-accumulate path, and the stock wheel is built without `FP16_QK_REDUCTION_SUPPORTED`.
-Making it work would mean rebuilding FlashInfer from source with that define plus
-boost_math.
+**This is not an architectural limit.** `chatterbox_flash/engines/flashinfer.py` sets
+`_use_fp16_qk_red = dtype in (float16, bfloat16)`, requesting fp16 QK reduction — while
+FlashInfer's own default for that flag is `False`, and the stock wheel is not built with
+`FP16_QK_REDUCTION_SUPPORTED`. Turing trips it only because it has no native bf16, so
+the dtype guard correctly steps down to fp16. Ampere passes bf16 and never takes the
+path.
+
+Forcing that flag off makes FlashInfer compile and run on sm_75. A single spot-check
+looked excellent — the long sentence in 1.13 s against SDPA's 3.38 s, RTF 0.063, better
+than Resemble's published 0.076. **A full 36-row sweep showed the output is wrong.**
+
+| sentence | torch SDPA median | FlashInfer median |
+|---|---:|---:|
+| short | 2.10 s | 2.18 s |
+| medium | **5.30 s** | **14.88 s** |
+| long | **17.26 s** | **29.40 s** |
+
+Nine of twelve medium runs produced *exactly* 14.88 s — a ceiling, not variation. An
+energy profile settles what the extra audio is:
+
+```
+torch       dur  5.00s  rms/sec: [0.156, 0.147, 0.127, 0.138]
+flashinfer  dur 14.20s  rms/sec: [0.154, 0.192, 0.162, 0.160, 0.137, 0.104,
+                                  0.153, 0.157, 0.134, 0.102, 0.137, 0.100, 0.124, 0.098]
+```
+
+Continuous speech-level energy throughout — it hallucinates roughly nine extra seconds
+past the end of the sentence rather than emitting trimmable silence. The apparent speed
+win was an artifact: more audio per second, but the audio is wrong.
+
+The single spot-check missed this because it used the *long* sentence, where a
+legitimate ~17 s output and an over-run ~18 s sample are hard to tell apart. The medium
+sentence is what exposed it.
 
 `_flashinfer_available()` therefore requires compute capability ≥ 8.0 in addition to a
-findable `nvcc`, and fails closed to torch SDPA. On an Ampere-or-newer card the same
-code path would engage FlashInfer normally.
+findable `nvcc`, and fails closed to torch SDPA. That gate is right, though the original
+reasoning for it — "Turing cannot compile FlashInfer" — was not.
 
 ## Caveats
 

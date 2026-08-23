@@ -123,10 +123,13 @@ beat the laptop"*.
 
 ## Settled findings — do not re-derive
 
-- **FlashInfer is CUDA-only and irrelevant on Mac.** It also cannot run on sm_75 at all:
-  with a CUDA 12.4 toolkit installed its JIT compiles for sm_75 and then fails a static
-  assertion on fp16 QK reduction, twelve times. That is why the 2060 numbers are the
-  SDPA path rather than the paper's fast path.
+- **FlashInfer is CUDA-only and irrelevant on Mac.** For the record, the reason the 2060
+  numbers are the SDPA path is subtler than "Turing can't run it": chatterbox_flash
+  requests fp16 QK reduction for any fp16/bf16 dtype, the stock wheel isn't built for
+  that, and disabling the request makes FlashInfer compile and run on sm_75 — but
+  produce wrong output (it hallucinates roughly nine extra seconds past the end of a
+  sentence). See `bench-rtx-2060.md`. None of this applies to Metal, but it is a
+  cautionary example of a workaround that benchmarks beautifully and is broken.
 - **The bf16 trap.** `torch.cuda.is_bf16_supported()` defaults to
   `including_emulation=True` and returns `True` on hardware where bf16 is emulated and
   slow — which silently defeated the guard the whole design was built around.
