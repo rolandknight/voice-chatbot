@@ -73,3 +73,66 @@ def resolve_backend(requested: str, flashinfer_available: bool) -> str:
             "(expected auto, flashinfer, torch, or mlx)"
         )
     return requested
+
+
+import re
+from pathlib import Path
+
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+
+
+def chunk_text(text: str, chunk_size: int) -> list[str]:
+    """Split text into chunks of roughly chunk_size characters.
+
+    Splits on sentence boundaries and packs whole sentences together up to
+    the target size. A single sentence longer than chunk_size is emitted
+    whole rather than cut mid-word -- Flash handles long blocks better than
+    it handles a severed clause.
+    """
+    text = text.strip()
+    if not text:
+        return []
+
+    sentences = [s.strip() for s in _SENTENCE_END.split(text) if s.strip()]
+    if not sentences:
+        return []
+
+    chunks: list[str] = []
+    current = ""
+    for sentence in sentences:
+        if not current:
+            current = sentence
+        elif len(current) + 1 + len(sentence) <= chunk_size:
+            current = f"{current} {sentence}"
+        else:
+            chunks.append(current)
+            current = sentence
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def discover_voices(paths: list[Path]) -> list[str]:
+    """List available reference .wav filenames across the search paths.
+
+    Missing directories are skipped rather than raising: the vendor clone
+    under vendor/chatterbox-tts-server/ is gitignored and may be absent.
+    Names are de-duplicated, keeping first-path-wins ordering.
+    """
+    seen: dict[str, None] = {}
+    for path in paths:
+        if not path.is_dir():
+            continue
+        for wav in sorted(path.glob("*.wav")):
+            seen.setdefault(wav.name, None)
+    return sorted(seen)
+
+
+def resolve_voice_path(name: str, paths: list[Path]) -> Path:
+    """Resolve a reference filename to a concrete path, first match wins."""
+    for path in paths:
+        candidate = path / name
+        if candidate.is_file():
+            return candidate
+    searched = ", ".join(str(p) for p in paths)
+    raise FileNotFoundError(f"reference voice {name!r} not found. Searched: {searched}")
