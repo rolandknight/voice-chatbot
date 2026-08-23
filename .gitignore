@@ -24,6 +24,7 @@ scripts/wakeword/_work/
 poc/models/
 poc/logs/
 poc/flowcat/target/
+poc/flowcat-client/target/
 poc/.deps/
 
 # Self-signed certs for the LAN dev servers (smoke + main backend).

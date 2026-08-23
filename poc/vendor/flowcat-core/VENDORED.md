@@ -7,4 +7,6 @@ Local modifications for the PoC:
   FlowCat's Cargo workspace.
 - `build_cascaded_call_duplex` accepts extra input processors between the VAD
   and speech gate. Babel uses this seam for its optional wake-word gate.
+- The shared media-transport facade uses a single-owner command actor so a
+  pending inbound receive cannot block bot-first audio or playback clears.
 - `Cargo.lock` is retained for standalone validation of the vendored crate.
