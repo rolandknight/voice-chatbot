@@ -260,7 +260,7 @@ class FlashEngine:
 
         gen = self._generation_cfg
         prompt = str(resolve_voice_path(voice, self._voice_paths))
-        chunks = chunk_text(text, chunk_size) if split_text else [text.strip()]
+        chunks = chunk_text(text, chunk_size) if split_text else [t for t in [text.strip()] if t]
         if not chunks:
             raise ValueError("text is empty")
 

@@ -126,3 +126,19 @@ def test_cuda_oom_is_translated_with_actionable_detail(tmp_path):
         eng.load()
         with pytest.raises(OutOfMemoryError, match="VRAM"):
             eng.synthesize(text="hi", voice="a.wav")
+
+
+def test_synthesize_rejects_blank_text_when_splitting_disabled(tmp_path):
+    """split_text=False took [text.strip()] verbatim, so blank input became
+    [""] -- a non-empty list that slipped past the empty-text guard and sent
+    an empty string to generate()."""
+    (tmp_path / "a.wav").write_bytes(b"x")
+    eng = _engine(tmp_path)
+    fake_model = MagicMock()
+    fake_model.sr = 24000
+    with patch("poc_tts.engine_flash.ChatterboxFlashTTS") as cls:
+        cls.from_pretrained.return_value = fake_model
+        eng.load()
+        with pytest.raises(ValueError, match="text is empty"):
+            eng.synthesize(text="   ", voice="a.wav", split_text=False)
+    fake_model.generate.assert_not_called()
