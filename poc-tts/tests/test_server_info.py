@@ -146,3 +146,47 @@ def test_main_exits_cleanly_on_load_time_oom(monkeypatch):
         with pytest.raises(SystemExit):
             main()
         run.assert_not_called()
+
+
+def test_initial_data_round_trips_saved_ui_state(client):
+    """Saved UI state must come back as config.ui_state.
+
+    script.js:621 reads config.ui_state and restores last_text from it. When
+    /save_settings was write-only, every load saw an empty textarea, took the
+    "no text" branch at script.js:711 and re-applied the default preset -- so
+    a preset could never be cleared. This is that round-trip.
+    """
+    before = client.get("/api/ui/initial-data").json()["config"]
+    assert before["ui_state"] == {}
+
+    # The real client posts {"ui_state": {...}} (ui/script.js:278). Posting a
+    # flat dict here would pass against a server that double-nests -- which is
+    # exactly the bug this test failed to catch the first time it was written.
+    saved = client.post(
+        "/save_settings",
+        json={"ui_state": {
+            "last_text": "cleared by the user",
+            "last_preset_name": "Standard Narration",
+        }},
+    )
+    assert saved.status_code == 200
+
+    after = client.get("/api/ui/initial-data").json()["config"]
+    assert after["ui_state"]["last_text"] == "cleared by the user"
+    assert after["ui_state"]["last_preset_name"] == "Standard Narration"
+
+
+def test_reset_settings_clears_round_tripped_ui_state(client):
+    client.post("/save_settings", json={"ui_state": {"last_text": "something"}})
+    assert client.post("/reset_settings").status_code == 200
+    assert client.get("/api/ui/initial-data").json()["config"]["ui_state"] == {}
+
+
+def test_standard_narration_preset_exists_and_is_neutral(client):
+    """script.js:714 prefers a preset named exactly 'Standard Narration' over
+    presets[0]. Without it the load-time default fell through to the Turbo
+    tech-support piece, whose paralinguistic tags Flash does not support."""
+    presets = client.get("/api/ui/initial-data").json()["presets"]
+    match = [p for p in presets if p["name"] == "Standard Narration"]
+    assert match, "the neutral default preset script.js looks for is missing"
+    assert "[sigh]" not in match[0]["text"] and "[laugh]" not in match[0]["text"]

@@ -654,7 +654,11 @@ document.addEventListener('DOMContentLoaded', async function () {
     }
 
     function loadInitialUiState() {
-        if (textArea && currentUiState.last_text) {
+        // Restore any SAVED text, including a deliberately emptied box. Testing
+        // truthiness here meant an explicit clear was indistinguishable from
+        // "never saved", so the default preset was re-applied on every reload
+        // and could never be dismissed.
+        if (textArea && typeof currentUiState.last_text === 'string') {
             textArea.value = currentUiState.last_text;
             if (charCount) charCount.textContent = textArea.value.length;
         }
@@ -709,7 +713,8 @@ document.addEventListener('DOMContentLoaded', async function () {
         }
 
         // 2. Logic to apply preset (if empty) OR just highlight button (if text exists)
-        if (textArea && !textArea.value && appPresets && appPresets.length > 0) {
+        const hasSavedText = typeof currentUiState.last_text === 'string';
+        if (textArea && !textArea.value && !hasSavedText && appPresets && appPresets.length > 0) {
             // Case A: No text entered. We want to load a preset fully.
             // Priority: Saved preset > "Standard Narration" > First available
             const savedPreset = appPresets.find(p => p.name === currentPresetName);

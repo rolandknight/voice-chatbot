@@ -38,7 +38,7 @@ def _wav_bytes(audio: np.ndarray, sample_rate: int) -> bytes:
     return buffer.getvalue()
 
 
-def _ui_shaped_config(config: dict) -> dict:
+def _ui_shaped_config(config: dict, ui_state: dict | None = None) -> dict:
     """Reshape config.yaml into the keys ui/script.js's initializeUI expects.
 
     script.js:699 reads config.audio_output.format, falling back to 'mp3'
@@ -54,6 +54,16 @@ def _ui_shaped_config(config: dict) -> dict:
     dead for all GUI traffic; script.js found no generation_defaults and
     fell back to its own hardcoded slider defaults.
 
+    script.js:621 reads config.ui_state and restores last_text and
+    last_preset_name from it. Without it every page load saw an empty
+    textarea, took the "no text" branch at script.js:711, and re-applied the
+    default preset -- so a preset could never be cleared. /save_settings
+    already collects that state; this is what hands it back.
+
+    Note the shape: script.js:278 posts {"ui_state": {...}}, so the settings
+    store holds that wrapper and the caller must pass the INNER dict. Passing
+    the whole store double-nests it and script.js reads undefined.
+
     The raw config.yaml keys (engine, generation, voices, server, ...) pass
     through unchanged via the spread below, so nothing that already worked
     is lost -- callers that want the PoC's own config shape still have it.
@@ -65,7 +75,13 @@ def _ui_shaped_config(config: dict) -> dict:
         **config,
         "audio_output": {**config.get("audio_output", {}), "format": "wav"},
         "generation_defaults": generation,
+        "ui_state": dict(ui_state or {}),
     }
+
+
+# The UI is edited in place during PoC work; a cached script.js silently
+# serves stale behaviour and makes browser verification lie. Never cache it.
+_NO_STORE = {"Cache-Control": "no-store, must-revalidate"}
 
 
 def _voice_record(name: str) -> dict:
@@ -83,17 +99,20 @@ def _voice_record(name: str) -> dict:
 def create_app(engine, config: dict, voice_paths: list[Path]) -> FastAPI:
     app = FastAPI(title="poc-tts: Chatterbox Flash", version="0.1.0")
 
+    # Round-tripped to the UI as config.ui_state so preset/text choices stick.
+    settings_store: dict = {}
+
     @app.get("/", include_in_schema=False)
     async def index():
-        return FileResponse(UI_DIR / "index.html")
+        return FileResponse(UI_DIR / "index.html", headers=_NO_STORE)
 
     @app.get("/script.js", include_in_schema=False)
     async def script_js():
-        return FileResponse(UI_DIR / "script.js", media_type="application/javascript")
+        return FileResponse(UI_DIR / "script.js", media_type="application/javascript", headers=_NO_STORE)
 
     @app.get("/styles.css", include_in_schema=False)
     async def styles_css():
-        return FileResponse(UI_DIR / "styles.css", media_type="text/css")
+        return FileResponse(UI_DIR / "styles.css", media_type="text/css", headers=_NO_STORE)
 
     @app.get("/vendor/wavesurfer.min.js", include_in_schema=False)
     async def wavesurfer_js():
@@ -124,7 +143,7 @@ def create_app(engine, config: dict, voice_paths: list[Path]) -> FastAPI:
                     presets = loaded
         names = discover_voices(voice_paths)
         return {
-            "config": _ui_shaped_config(config),
+            "config": _ui_shaped_config(config, settings_store.get("ui_state", {})),
             "reference_files": names,
             "predefined_voices": [_voice_record(n) for n in names],
             "presets": presets,
@@ -143,7 +162,6 @@ def create_app(engine, config: dict, voice_paths: list[Path]) -> FastAPI:
                         "Stop and rerun `make poc-tts`."}
         )
 
-    settings_store: dict = {}
 
     @app.post("/tts")
     async def tts(request: FlashTTSRequest):

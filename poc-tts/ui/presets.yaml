@@ -4,6 +4,28 @@
 # varied texts for testing quality, intonation, and chunking.
 
 # ============================================================================
+# NEUTRAL DEFAULT
+# ============================================================================
+# script.js picks the load-time default by priority: your saved preset, then
+# a preset named exactly "Standard Narration", then presets[0]. Without this
+# entry it fell through to presets[0] -- the Turbo tech-support piece, whose
+# paralinguistic tags Chatterbox Flash does not support. Its params mirror
+# config.yaml's `generation:` block, so this is the neutral baseline.
+
+- name: "Standard Narration"
+  text: |
+    The quick brown fox jumps over the lazy dog. Neutral settings, plain
+    prose, and no paralinguistic tags -- a clean baseline for comparing
+    voices or tuning parameters.
+  params:
+    temperature: 0.6
+    exaggeration: 0.5
+    cfg_weight: 1.0
+    seed: 0
+    speed_factor: 1.0
+    language: "en"
+
+# ============================================================================
 # ⚡ TURBO MODEL DEMONSTRATIONS (Paralinguistic Tags)
 # ============================================================================
 # These presets utilize tags supported ONLY by the Chatterbox Turbo model.
