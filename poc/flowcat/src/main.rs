@@ -31,6 +31,9 @@ use crate::session::StubSession;
 pub struct PocConfig {
     pub openrouter_key: String,
     pub llm_model: String,
+    /// OpenAI-compatible chat-completions base. Default OpenRouter; point at a
+    /// local llama-server (Phase 2) with OPENROUTER_BASE_URL=http://127.0.0.1:8080/v1.
+    pub llm_base_url: String,
     pub whisper_model: String,
     pub kokoro_url: String,
     pub kokoro_voice: String,
@@ -77,6 +80,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         openrouter_key: std::env::var("OPENROUTER_API_KEY")
             .map_err(|_| "OPENROUTER_API_KEY not set (see poc/.env)")?,
         llm_model: env_or("POC_LLM_MODEL", "google/gemma-4-26b-a4b-it:free"),
+        llm_base_url: env_or("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
         whisper_model: env_or(
             "POC_WHISPER_MODEL",
             &poc_dir.join("models/ggml-base.en.bin").to_string_lossy(),

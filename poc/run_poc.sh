@@ -11,7 +11,15 @@ VENV="$POC_DIR/.venv"
 LOGS="$POC_DIR/logs"
 FLOWCAT_BIN="$POC_DIR/flowcat/target/debug/flowcat-poc"
 
-[ -f "$POC_DIR/.env" ] && set -a && . "$POC_DIR/.env" && set +a
+# .env provides defaults; already-set caller env wins (same semantics as
+# flowcat's dotenvy load, so e.g. OPENROUTER_BASE_URL=... overrides work).
+if [ -f "$POC_DIR/.env" ]; then
+    while IFS= read -r line; do
+        case "$line" in '' | \#*) continue ;; esac
+        key="${line%%=*}"
+        [ -z "${!key+x}" ] && export "${line?}"
+    done <"$POC_DIR/.env"
+fi
 
 start_proc() { # name workdir cmd...
     local name="$1" workdir="$2"; shift 2

@@ -21,6 +21,7 @@ RUNS_PATH = Path(__file__).resolve().parent.parent / "reports" / "runs.jsonl"
 def _config_snapshot() -> dict[str, Any]:
     return {
         "llm_model": os.environ.get("POC_LLM_MODEL", "(default)"),
+        "llm_base": os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
         "whisper": Path(os.environ.get("POC_WHISPER_MODEL", "ggml-base.en.bin")).name,
         "tts_backend": os.environ.get("POC_TTS_BACKEND", "kokoro"),
         "wake": bool(os.environ.get("POC_WAKE_MODEL")),
