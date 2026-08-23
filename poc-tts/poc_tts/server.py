@@ -21,6 +21,18 @@ logger = logging.getLogger(__name__)
 UI_DIR = Path(__file__).resolve().parent.parent / "ui"
 
 
+def _voice_record(name: str) -> dict:
+    """Shape one reference filename the way ui/script.js expects.
+
+    Used by both /get_predefined_voices and /api/ui/initial-data -- they must
+    agree, so the derivation lives in one place.
+    """
+    return {
+        "display_name": name.replace(".wav", "").replace("_", " ").title(),
+        "filename": name,
+    }
+
+
 def create_app(engine, config: dict, voice_paths: list[Path]) -> FastAPI:
     app = FastAPI(title="poc-tts: Chatterbox Flash", version="0.1.0")
 
@@ -46,11 +58,7 @@ def create_app(engine, config: dict, voice_paths: list[Path]) -> FastAPI:
 
     @app.get("/get_predefined_voices")
     async def get_predefined_voices():
-        return [
-            {"display_name": name.replace(".wav", "").replace("_", " ").title(),
-             "filename": name}
-            for name in discover_voices(voice_paths)
-        ]
+        return [_voice_record(name) for name in discover_voices(voice_paths)]
 
     @app.get("/api/ui/initial-data")
     async def initial_data():
@@ -65,11 +73,7 @@ def create_app(engine, config: dict, voice_paths: list[Path]) -> FastAPI:
         return {
             "config": config,
             "reference_files": names,
-            "predefined_voices": [
-                {"display_name": n.replace(".wav", "").replace("_", " ").title(),
-                 "filename": n}
-                for n in names
-            ],
+            "predefined_voices": [_voice_record(n) for n in names],
             "presets": presets,
             "initial_gen_result": {
                 "outputUrl": None, "filename": None, "genTime": None,

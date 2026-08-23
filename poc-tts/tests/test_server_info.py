@@ -76,3 +76,11 @@ def test_restart_server_is_a_clear_noop_not_a_404(client):
     r = client.post("/restart_server")
     assert r.status_code == 200
     assert "not supported" in r.json()["message"].lower()
+
+
+def test_predefined_voices_agree_between_endpoints(client):
+    """Both endpoints derive display_name from the same filenames; a change
+    applied to one and missed in the other would be a silent UI mismatch."""
+    direct = client.get("/get_predefined_voices").json()
+    embedded = client.get("/api/ui/initial-data").json()["predefined_voices"]
+    assert direct == embedded
