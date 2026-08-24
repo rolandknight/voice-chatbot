@@ -2,10 +2,16 @@
 synthesize_stream() with the config.yaml generation defaults.
 
     make bench-stream   ->   reports/stream_runs.jsonl (one line per sentence)
+
+``--block-stream`` swaps in the Task 16 spike engine
+(``engine_blockstream.BlockStreamEngine``), which vocodes each finished T3
+block rather than each finished sentence. Rows are tagged ``engine:
+"blockstream"`` so both sets can live in the same JSONL.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import platform
 import time
@@ -38,14 +44,25 @@ def measure(engine, text: str, voice: str, knobs: dict) -> dict:
     }
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     import torch
-    from poc_tts_streaming.engine_flash import FlashEngine
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--block-stream", action="store_true",
+                        help="use the Task 16 spike engine (intra-sentence block streaming)")
+    parser.add_argument("--runs", type=int, default=2,
+                        help="measured runs per sentence; the best ttfa_s wins (default 2)")
+    args = parser.parse_args(argv)
+
+    if args.block_stream:
+        from poc_tts_streaming.engine_blockstream import BlockStreamEngine as Engine
+    else:
+        from poc_tts_streaming.engine_flash import FlashEngine as Engine
 
     config = load_config()
     paths = voice_paths(config)
-    engine = FlashEngine(engine_cfg=config.get("engine", {}), generation_cfg=config.get("generation", {}),
-                         voice_paths=paths)
+    engine = Engine(engine_cfg=config.get("engine", {}), generation_cfg=config.get("generation", {}),
+                    voice_paths=paths)
     engine.load()
     gen = config.get("generation", {})
     knobs = {k: gen[k] for k in ("chunk_size", "split_text", "split_on_clauses") if k in gen}
@@ -57,8 +74,10 @@ def main() -> None:
         for label, text in SENTENCES:   # list of (name, text) tuples in bench.py:39
             if torch.cuda.is_available():
                 torch.cuda.reset_peak_memory_stats()
-            best = min((measure(engine, text, voice, knobs) for _ in range(2)), key=lambda r: r["ttfa_s"])
+            best = min((measure(engine, text, voice, knobs) for _ in range(args.runs)),
+                       key=lambda r: r["ttfa_s"])
             row = {"ts": int(time.time()), "host": platform.node(), "sentence": label, "chars": len(text),
+                   "engine": "blockstream" if args.block_stream else "sentence",
                    "dtype": str(engine.dtype).replace("torch.", ""), "backend": engine.backend,
                    "drf_block_size": engine.drf_block_size, "generation": gen,
                    "vram_peak_mb": (round(torch.cuda.max_memory_reserved() / 2**20)

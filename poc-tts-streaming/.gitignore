@@ -4,3 +4,5 @@ outputs/
 __pycache__/
 .pytest_cache/
 reports/*.log
+# Task 16 spike listening samples (WAVs, kept out of git deliberately).
+reports/spike-wavs/

@@ -47,6 +47,7 @@ from chatterbox_flash.model import (
     _zero_text_content_keep_pad,
 )
 from chatterbox_flash.tts import _speech_len_for_text_tokens
+from chatterbox.models.s3gen.s3gen import S3Token2Mel as _S3Token2Mel
 
 from poc_tts_streaming.engine_flash import (
     FlashEngine,
@@ -298,19 +299,37 @@ MEL_PER_TOKEN = 2
 SAMPLES_PER_MEL = 480
 SAMPLES_PER_TOKEN = MEL_PER_TOKEN * SAMPLES_PER_MEL
 
-# CosyVoice2's streaming vocoder keeps a short mel/source overlap across
-# window boundaries so HiFTGAN's NSF source signal stays phase-continuous. Same
-# idea here: re-vocode the last OVERLAP_MEL frames with the new window,
-# seeded by the previous window's source tail, then drop the re-vocoded
-# samples from the output.
+# CosyVoice2's streaming vocoder (cosyvoice/cli/model.py, mel_cache_len=8 at
+# 24 kHz) keeps a short mel/source/speech overlap across window boundaries.
+# Three caches, all of them load-bearing:
+#   * mel    -- the last OVERLAP_MEL frames are re-vocoded with the new window
+#               so HiFTGAN sees left context;
+#   * source -- seeds the NSF sine generator, which otherwise restarts its
+#               phase accumulator (theta = cumsum(f0)) at every call;
+#   * speech -- the previous window's rendering of the overlap region, which is
+#               cross-faded with the new one. Seeding the source only fixes the
+#               phase for the cached samples; the fresh cumsum picks up an
+#               unrelated phase where the cache ends, so without the cross-fade
+#               there is a step discontinuity exactly at each join. Measured:
+#               |step| at the joins was 9-45x the local median |diff| before
+#               this was added (see results-rtx-2060.md).
 OVERLAP_MEL = 8
 OVERLAP_SAMPLES = OVERLAP_MEL * SAMPLES_PER_MEL
 
-# With finalize=False the flow withholds pre_lookahead_len (3) tokens' worth of
-# mel, so a window shorter than that produces a negative-length slice inside
-# CausalMaskedDiffWithXvec.inference. Skip such stubs; the finalize=True tail
-# pass picks their audio up.
-MIN_WINDOW_TOKENS = 4
+# The flow encoder looks ahead pre_lookahead_len=3 tokens, so the last 3 tokens
+# of a non-final window (6 mel frames) are generated without their real right
+# context. Upstream's `finalize=False` exists to withhold them -- but it is
+# broken in chatterbox-tts 0.1.7: flow.py:171 truncates `h` and then multiplies
+# it by a `mask` built from the UNtruncated `h_lengths`, so the call dies with
+#     RuntimeError: The size of tensor a (558) must match the size of tensor b
+#     (564) at non-singleton dimension 2
+# `finalize` gates nothing else in that method, so we pass finalize=True and do
+# the truncation ourselves. Identical result, minus the crash.
+LOOKAHEAD_MEL = 6
+
+# A non-final window must survive the lookahead truncation AND leave a full
+# OVERLAP_MEL tail to hand to the next one: 2n - LOOKAHEAD_MEL >= OVERLAP_MEL.
+MIN_WINDOW_TOKENS = (OVERLAP_MEL + LOOKAHEAD_MEL) // MEL_PER_TOKEN
 
 
 class _Cancelled(Exception):
@@ -318,55 +337,99 @@ class _Cancelled(Exception):
 
 
 class _MelWindow:
-    """Accumulates flow output and hands out only newly finalised samples."""
+    """Accumulates flow output and hands out only newly finalised samples.
 
-    def __init__(self, s3gen, ref_dict, n_cfm_timesteps: int):
+    Each ``push`` re-runs the flow over the whole token prefix -- the meanflow
+    CFM in this build has no incremental cache (``CausalConditionalCFM`` dropped
+    ``flow_cache``) -- and emits only the mel frames that are new. That would
+    normally make each window a fresh stochastic draw, so the frames already
+    emitted would not be the ones the new draw continues. The fix is to fix the
+    noise: one ``randn`` for the longest possible utterance, sliced per call, so
+    every window is a prefix of the *same* CFM trajectory. That requires
+    bypassing ``flow_inference`` (which redraws unconditionally) and calling
+    ``S3Token2Mel.forward`` with an explicit ``noised_mels``.
+    """
+
+    def __init__(self, s3gen, ref_dict, n_cfm_timesteps: int, max_tokens: int):
         self._s3gen = s3gen
         self._ref = ref_dict
         self._n_cfm = n_cfm_timesteps
-        self._emitted_mel = 0
+        self._vocoded_mel = 0
         self._cache_mel: Tensor | None = None
         self._cache_source: Tensor | None = None
+        self._cache_speech: Tensor | None = None
         self._first = True
+        self._noise = torch.randn(
+            1, 80, max(max_tokens, 1) * MEL_PER_TOKEN,
+            dtype=s3gen.dtype, device=s3gen.device,
+        )
+        # np.hamming(2 * source_cache_len) in CosyVoice; the two halves are the
+        # fade-in for the new rendering and the fade-out for the cached one.
+        self._xfade = torch.hamming_window(
+            2 * OVERLAP_SAMPLES, periodic=False,
+            dtype=torch.float32, device=s3gen.device,
+        )
 
     def push(self, tokens: Tensor, *, finalize: bool) -> np.ndarray:
         """Vocode the token prefix and return the new float32 samples."""
-        if tokens.numel() == 0:
+        n = int(tokens.numel())
+        if n == 0 or (not finalize and n < MIN_WINDOW_TOKENS):
             return np.zeros(0, dtype=np.float32)
-        mels = self._s3gen.flow_inference(
+        mels = _S3Token2Mel.forward(
+            self._s3gen,
             tokens.unsqueeze(0) if tokens.dim() == 1 else tokens,
+            ref_wav=None,
+            ref_sr=None,
             ref_dict=self._ref,
             n_cfm_timesteps=self._n_cfm,
-            finalize=finalize,
+            finalize=True,
+            noised_mels=self._noise[:, :, : n * MEL_PER_TOKEN],
         ).to(dtype=self._s3gen.dtype)
-        total_mel = mels.size(2)
-        if total_mel <= self._emitted_mel:
+        total_mel = mels.size(2) if finalize else mels.size(2) - LOOKAHEAD_MEL
+        if total_mel <= self._vocoded_mel:
             return np.zeros(0, dtype=np.float32)
 
-        new_mel = mels[:, :, self._emitted_mel :]
+        new_mel = mels[:, :, self._vocoded_mel : total_mel]
         if self._cache_mel is not None:
             mel_in = torch.cat([self._cache_mel, new_mel], dim=2)
-            cache_source = self._cache_source
         else:
             mel_in = new_mel
-            cache_source = None
 
-        wav, source = self._s3gen.hift_inference(mel_in, cache_source=cache_source)
-        drop = 0 if cache_source is None else cache_source.size(2)
-        out = wav[:, drop:]
+        wav, source = self._s3gen.hift_inference(
+            mel_in, cache_source=self._cache_source,
+        )
+        wav = wav.float()
 
-        if self._first:
+        if self._cache_speech is not None:
+            # Cross-fade this window's rendering of the overlap region with the
+            # previous window's rendering of the same region.
+            head = wav[:, :OVERLAP_SAMPLES] * self._xfade[:OVERLAP_SAMPLES]
+            head = head + self._cache_speech * self._xfade[OVERLAP_SAMPLES:]
+            wav = torch.cat([head, wav[:, OVERLAP_SAMPLES:]], dim=1)
+        elif self._first:
             # Same spillover guard s3gen.inference() applies to a whole
             # utterance -- only the very first window gets it.
-            fade = self._s3gen.trim_fade
-            out = out.clone()
-            out[:, : len(fade)] *= fade.to(dtype=out.dtype)
+            fade = self._s3gen.trim_fade.float()
+            wav = torch.cat(
+                [wav[:, : len(fade)] * fade, wav[:, len(fade) :]], dim=1,
+            )
             self._first = False
 
-        self._cache_mel = mel_in[:, :, -OVERLAP_MEL:].clone()
-        self._cache_source = source[:, :, -OVERLAP_SAMPLES:].clone()
-        self._emitted_mel = total_mel
-        return out.detach().float().cpu().numpy().reshape(-1)
+        if finalize:
+            out = wav
+            self._vocoded_mel = total_mel
+            self._cache_mel = self._cache_source = self._cache_speech = None
+        else:
+            # Hold the tail back: the next window re-renders it with real right
+            # context and cross-fades over the seam.
+            out = wav[:, :-OVERLAP_SAMPLES]
+            self._cache_speech = wav[:, -OVERLAP_SAMPLES:].clone()
+            self._cache_mel = mel_in[:, :, -OVERLAP_MEL:].clone()
+            self._cache_source = source[:, :, -OVERLAP_SAMPLES:].clone()
+            self._vocoded_mel = total_mel
+        if out.numel() == 0:
+            return np.zeros(0, dtype=np.float32)
+        return out.detach().cpu().numpy().reshape(-1)
 
 
 class BlockStreamEngine(FlashEngine):
@@ -447,7 +510,8 @@ class BlockStreamEngine(FlashEngine):
         model.prepare_conditionals(prompt, exaggeration=exaggeration)
         text_tokens = model._encode_text(chunk, normalize_text=True)
         n_text = int(text_tokens.size(1))
-        window = _MelWindow(model.s3gen, model.conds.gen, n_cfm)
+        max_tokens = _speech_len_for_text_tokens(n_text)
+        window = _MelWindow(model.s3gen, model.conds.gen, n_cfm, max_tokens)
 
         out: "queue.Queue[tuple[str, np.ndarray] | None | BaseException]" = queue.Queue()
         state = {"n": 0}
@@ -458,8 +522,6 @@ class BlockStreamEngine(FlashEngine):
             i = state["n"]
             state["n"] = i + 1
             trimmed = model._trim_to_eos(tokens[0])
-            if trimmed.numel() < MIN_WINDOW_TOKENS:
-                return
             pcm = window.push(trimmed.to(self.device), finalize=False)
             if pcm.size:
                 out.put((f"{chunk} [block {i}]", pcm))
@@ -472,7 +534,7 @@ class BlockStreamEngine(FlashEngine):
                     t3_cond=model.conds.t3,
                     text_tokens=text_tokens,
                     text_token_lens=torch.tensor([n_text], device=self.device),
-                    total_speech_len=_speech_len_for_text_tokens(n_text),
+                    total_speech_len=max_tokens,
                     num_steps=num_steps,
                     temperature=temperature,
                     cfg_scale=cfg_scale,

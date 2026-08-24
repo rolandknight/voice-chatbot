@@ -13,6 +13,11 @@ engine:
   # auto = flashinfer when importable, else torch. mlx is never automatic.
   backend: auto
   drf_block_size: 32
+  # SPIKE (Task 16), default off. When true the server/bench use
+  # engine_blockstream.BlockStreamEngine, which vocodes each finished T3 block
+  # instead of waiting for the whole sentence. See results-rtx-2060.md for the
+  # go/no-go; nothing on the reviewed paths changes while this is false.
+  block_streaming: false
 
 generation:
   temperature: 0.6

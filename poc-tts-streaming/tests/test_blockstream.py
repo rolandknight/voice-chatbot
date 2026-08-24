@@ -1,20 +1,27 @@
-"""Task 16 spike: the hooked block loop must not change what T3 generates.
+"""Task 16 spike: block streaming must not change what T3 generates.
 
-Everything here needs the real model on a GPU, so the whole module is skipped
-off-CUDA. That keeps `make test` GPU-free while still giving the spike a hard
-identity check on the machine that matters.
+Everything but the config guard needs the real model on a GPU, so those tests
+are skipped off-CUDA. That keeps `make test` GPU-free while still giving the
+spike a hard identity check on the machine that matters.
 """
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 import torch
 
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="needs the GPU"
-)
+gpu = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs the GPU")
 
 
+def test_block_streaming_defaults_off():
+    """The spike must not be reachable from a stock checkout."""
+    from poc_tts_streaming.config import load_config
+
+    assert load_config()["engine"]["block_streaming"] is False
+
+
+@gpu
 @pytest.fixture(scope="module")
 def loaded():
     """A warm FlashEngine plus the pieces generate_blocks needs."""
@@ -61,6 +68,7 @@ def _t3_kwargs(engine, model, text: str, config: dict) -> dict:
     )
 
 
+@gpu
 def test_generate_blocks_matches_generate(loaded):
     """Same seed in, same speech tokens out -- hooking must be side-effect free."""
     from poc_tts_streaming.engine_blockstream import generate_blocks
@@ -95,6 +103,7 @@ def test_generate_blocks_matches_generate(loaded):
         assert torch.equal(prefix, hooked[:, :n]), "a callback prefix diverged"
 
 
+@gpu
 def test_block_count_matches_drf_block_size(loaded):
     """One callback per drf_block_size tokens (the last block may be short)."""
     from poc_tts_streaming.engine_blockstream import generate_blocks
@@ -116,6 +125,7 @@ def test_block_count_matches_drf_block_size(loaded):
     assert int(tokens.size(1)) > 0
 
 
+@gpu
 def test_samples_per_token_ratio(loaded):
     """The 960-samples-per-token constant, checked against a real utterance."""
     from poc_tts_streaming import engine_blockstream as bs
@@ -140,4 +150,39 @@ def test_samples_per_token_ratio(loaded):
     ratio = wav.numel() / int(trimmed.numel())
     assert ratio == pytest.approx(bs.SAMPLES_PER_TOKEN, rel=1e-6), (
         f"len(wav)/n_tokens is {ratio}, not {bs.SAMPLES_PER_TOKEN}"
+    )
+
+
+@gpu
+def test_blockstream_engine_end_to_end(loaded):
+    """Windows must tile the utterance exactly: no gap, no overlap, no repeat.
+
+    The whole-utterance length is 960 x n_tokens (test_samples_per_token_ratio),
+    so a concatenation that is not a multiple of 960 means the windowed vocoder
+    lost or duplicated audio somewhere.
+    """
+    from poc_tts_streaming import engine_blockstream as bs
+    from poc_tts_streaming.config import load_config, voice_paths
+
+    _engine, _model, config = loaded
+    engine = bs.BlockStreamEngine(
+        engine_cfg=config.get("engine", {}),
+        generation_cfg=config.get("generation", {}),
+        voice_paths=voice_paths(config),
+    )
+    engine._model = _model          # reuse the fixture's weights, don't reload
+    voice = config.get("bench", {}).get("voice", "one-one.mp3")
+    text = ("I checked the calendar for tomorrow and you have three meetings, "
+            "the first one starting at nine fifteen.")
+
+    windows = list(engine.synthesize_stream(text, voice, split_text=False))
+    assert len(windows) >= 2, "block streaming produced a single window"
+    for label, pcm in windows:
+        assert pcm.size > 0, f"empty window {label}"
+        assert np.isfinite(pcm).all(), f"non-finite samples in {label}"
+
+    total = sum(len(pcm) for _, pcm in windows)
+    assert total % bs.SAMPLES_PER_TOKEN == 0, (
+        f"{total} samples is not a whole number of tokens "
+        f"({total / bs.SAMPLES_PER_TOKEN:.3f})"
     )

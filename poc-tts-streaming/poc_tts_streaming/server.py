@@ -363,7 +363,19 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     config = load_config()
     paths = configured_voice_paths(config)
-    engine = FlashEngine(
+    engine_class = FlashEngine
+    if config.get("engine", {}).get("block_streaming", False):
+        # SPIKE (Task 16), off by default. Importing here rather than at module
+        # scope keeps engine_blockstream off every path the server normally
+        # takes -- including the import graph the server tests exercise.
+        from poc_tts_streaming.engine_blockstream import BlockStreamEngine
+
+        logger.warning(
+            "engine.block_streaming is on -- using the Task 16 spike engine. "
+            "See poc-tts-streaming/results-rtx-2060.md before trusting it."
+        )
+        engine_class = BlockStreamEngine
+    engine = engine_class(
         engine_cfg=config.get("engine", {}),
         generation_cfg=config.get("generation", {}),
         voice_paths=paths,
