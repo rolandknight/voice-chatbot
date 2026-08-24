@@ -1,17 +1,0 @@
-2026-08-24 15:49:20,905 INFO __main__: voices: ['babel', 'marvin', 'one-one']
-2026-08-24 15:49:21,601 INFO httpx: HTTP Request: GET http://127.0.0.1:8007/gradio_api/startup-events "HTTP/1.1 200 OK"
-2026-08-24 15:49:21,608 INFO httpx: HTTP Request: HEAD http://127.0.0.1:8007/ "HTTP/1.1 200 OK"
-2026-08-24 15:49:26,351 INFO httpx: HTTP Request: GET https://huggingface.co/api/models/mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16/revision/main "HTTP/1.1 200 OK"
-* Running on local URL:  http://127.0.0.1:8007
-* To create a public link, set `share=True` in `launch()`.
-Fetching 12 files:   0%|          | 0/12 [00:00<?, ?it/s]Fetching 12 files: 100%|██████████| 12/12 [00:00<00:00, 2276.52it/s]
-[transformers] You are using a model of type `qwen3_tts` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
-/Users/rolandknight/github.com/sir-bonkulus/voice-chatbot/poc-qwen/.venv/lib/python3.12/site-packages/gradio/processing_utils.py:688: UserWarning: Trying to convert audio automatically from float32 to 16-bit int format.
-  warnings.warn(warning.format(data.dtype))
-2026-08-24 15:49:34,697 INFO httpx: HTTP Request: GET https://huggingface.co/api/models/mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-bf16/revision/main "HTTP/1.1 200 OK"
-  Initialized encoder codebooks
-Loaded speech tokenizer from /Users/rolandknight/.cache/huggingface/hub/models--mlx-community--Qwen3-TTS-12Hz-1.7B-Base-bf16/snapshots/a6eb4f68e4b056f1215157bb696209bc82a6db48/speech_tokenizer
-Fetching 12 files:   0%|          | 0/12 [00:00<?, ?it/s]Fetching 12 files:  92%|█████████▏| 11/12 [01:11<00:06,  6.50s/it]Fetching 12 files: 100%|██████████| 12/12 [02:42<00:00, 16.19s/it]Fetching 12 files: 100%|██████████| 12/12 [02:42<00:00, 13.52s/it]
-[transformers] You are using a model of type `qwen3_tts` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
-/Users/rolandknight/github.com/sir-bonkulus/voice-chatbot/poc-qwen/.venv/lib/python3.12/site-packages/gradio/processing_utils.py:688: UserWarning: Trying to convert audio automatically from float32 to 16-bit int format.
-  warnings.warn(warning.format(data.dtype))

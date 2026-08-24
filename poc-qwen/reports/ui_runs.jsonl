@@ -10,3 +10,4 @@
 {"ts": 1787600972.019543, "tab": "Voice Clone", "model": "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16", "load_s": 2.139, "warm_s": 1.021, "gen_s": 2.855, "audio_s": 6.16, "rtf": 0.464, "chunks": 1, "chars": 104, "mode": "icl"}
 {"ts": 1787600974.2635221, "tab": "Voice Clone", "model": "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16", "load_s": 2.139, "warm_s": 1.021, "gen_s": 2.147, "audio_s": 5.36, "rtf": 0.401, "chunks": 1, "chars": 104, "mode": "icl"}
 {"ts": 1787601138.777282, "tab": "TTS", "model": "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-bf16", "load_s": 162.924, "warm_s": 0.612, "gen_s": 0.898, "audio_s": 2.64, "rtf": 0.34, "chunks": 1, "chars": 30}
+{"ts": 1787601473.9795918, "tab": "Voice Design", "model": "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16", "load_s": 0.287, "warm_s": 0.473, "gen_s": 1.352, "audio_s": 4.08, "rtf": 0.331, "chunks": 1, "chars": 43}
