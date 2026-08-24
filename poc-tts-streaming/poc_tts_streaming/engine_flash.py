@@ -11,7 +11,9 @@ import logging
 import os
 import re
 import shutil
+import threading
 from pathlib import Path
+from typing import Iterator
 
 import numpy as np
 import torch
@@ -334,7 +336,7 @@ class FlashEngine:
             "drf_block_size": self.drf_block_size,
         }
 
-    def synthesize(
+    def synthesize_stream(
         self,
         text: str,
         voice: str,
@@ -346,20 +348,31 @@ class FlashEngine:
         n_cfm_timesteps: int | None = None,
         chunk_size: int = 120,
         split_text: bool = True,
-    ) -> tuple[np.ndarray, int]:
-        """Synthesize text with a reference voice. Returns (mono float32, sr)."""
+        split_on_clauses: bool = True,
+        cancel: threading.Event | None = None,
+    ) -> Iterator[tuple[str, np.ndarray]]:
+        """Yield (chunk_text, mono float32 pcm) per sentence chunk, in order.
+
+        Validation (voice, text) happens before the first yield so callers
+        can fail fast. Cancellation is checked between chunks: a chunk
+        already inside generate() finishes (~1 s tuned) and is discarded by
+        the caller. generate() itself cannot be interrupted.
+        """
         if not self.loaded:
             raise RuntimeError("model is not loaded -- call load() first")
-
         gen = self._generation_cfg
         prompt = str(resolve_voice_path(voice, self._voice_paths))
-        chunks = chunk_text(text, chunk_size) if split_text else [t for t in [text.strip()] if t]
+        if split_text:
+            chunks = chunk_text(text, chunk_size, split_on_clauses=split_on_clauses)
+        else:
+            chunks = [t for t in [text.strip()] if t]
         if not chunks:
             raise ValueError("text is empty")
 
-        pieces: list[np.ndarray] = []
-        try:
-            for chunk in chunks:
+        for chunk in chunks:
+            if cancel is not None and cancel.is_set():
+                return
+            try:
                 wav = self._model.generate(
                     chunk,
                     audio_prompt_path=prompt,
@@ -373,10 +386,33 @@ class FlashEngine:
                     ),
                     backend=self.backend,
                 )
-                pieces.append(wav.detach().float().cpu().numpy().reshape(-1))
-        except torch.cuda.OutOfMemoryError as exc:
-            raise OutOfMemoryError(
-                f"ran out of VRAM during generation. {_vram_report()}"
-            ) from exc
+            except torch.cuda.OutOfMemoryError as exc:
+                raise OutOfMemoryError(
+                    f"ran out of VRAM during generation. {_vram_report()}"
+                ) from exc
+            yield chunk, wav.detach().float().cpu().numpy().reshape(-1)
 
+    def synthesize(
+        self,
+        text: str,
+        voice: str,
+        *,
+        temperature: float | None = None,
+        exaggeration: float | None = None,
+        cfg_scale: float | None = None,
+        num_steps: int | None = None,
+        n_cfm_timesteps: int | None = None,
+        chunk_size: int = 120,
+        split_text: bool = True,
+    ) -> tuple[np.ndarray, int]:
+        """Whole-utterance synthesis: synthesize_stream concatenated."""
+        pieces = [
+            pcm for _, pcm in self.synthesize_stream(
+                text, voice,
+                temperature=temperature, exaggeration=exaggeration,
+                cfg_scale=cfg_scale, num_steps=num_steps,
+                n_cfm_timesteps=n_cfm_timesteps, chunk_size=chunk_size,
+                split_text=split_text,
+            )
+        ]
         return np.concatenate(pieces), self.sr

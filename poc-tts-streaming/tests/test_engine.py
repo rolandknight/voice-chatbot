@@ -1,5 +1,6 @@
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+import threading
 
 import numpy as np
 import pytest
@@ -155,3 +156,59 @@ def test_synthesize_rejects_blank_text_when_splitting_disabled(tmp_path):
         with pytest.raises(ValueError, match="text is empty"):
             eng.synthesize(text="   ", voice="a.wav", split_text=False)
     fake_model.generate.assert_not_called()
+
+
+def _loaded_engine(tmp_path, samples_per_chunk=1000):
+    (tmp_path / "a.wav").write_bytes(b"x")
+    eng = _engine(tmp_path)
+    fake_model = MagicMock()
+    fake_model.sr = 24000
+    fake_model.generate.return_value = torch.zeros(1, samples_per_chunk)
+    with patch("poc_tts_streaming.engine_flash.ChatterboxFlashTTS") as cls:
+        cls.from_pretrained.return_value = fake_model
+        eng.load()
+    return eng, fake_model
+
+
+def test_synthesize_stream_yields_one_chunk_per_sentence_in_order(tmp_path):
+    eng, model = _loaded_engine(tmp_path)
+    text = "First sentence here. Second sentence here. Third sentence here."
+    out = list(eng.synthesize_stream(text, "a.wav", chunk_size=25))
+    assert [t for t, _ in out] == [
+        "First sentence here.", "Second sentence here.", "Third sentence here."]
+    assert all(pcm.dtype == np.float32 and pcm.shape == (1000,) for _, pcm in out)
+    assert model.generate.call_count == 3
+
+
+def test_synthesize_stream_is_lazy(tmp_path):
+    """The first chunk must come back before the second is generated --
+    that is the whole point of streaming."""
+    eng, model = _loaded_engine(tmp_path)
+    gen = eng.synthesize_stream("One. Two.", "a.wav", chunk_size=4)
+    next(gen)
+    assert model.generate.call_count == 1
+
+
+def test_synthesize_stream_stops_after_current_chunk_on_cancel(tmp_path):
+    eng, model = _loaded_engine(tmp_path)
+    cancel = threading.Event()
+    gen = eng.synthesize_stream("One. Two. Three.", "a.wav", chunk_size=4, cancel=cancel)
+    next(gen)
+    cancel.set()
+    assert list(gen) == []
+    assert model.generate.call_count == 1
+
+
+def test_synthesize_stream_missing_voice_raises_before_first_yield(tmp_path):
+    eng, model = _loaded_engine(tmp_path)
+    with pytest.raises(FileNotFoundError):
+        next(eng.synthesize_stream("Hello.", "missing.wav"))
+    model.generate.assert_not_called()
+
+
+def test_synthesize_stream_forwards_split_on_clauses(tmp_path):
+    eng, model = _loaded_engine(tmp_path)
+    text = "alpha beta, gamma delta, epsilon zeta, eta theta."
+    whole = list(eng.synthesize_stream(text, "a.wav", chunk_size=20, split_on_clauses=False))
+    split = list(eng.synthesize_stream(text, "a.wav", chunk_size=20, split_on_clauses=True))
+    assert len(whole) == 1 and len(split) > 1
