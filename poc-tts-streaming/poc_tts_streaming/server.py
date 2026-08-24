@@ -6,36 +6,74 @@ so tests can inject a mock and run without a GPU.
 
 from __future__ import annotations
 
-import io
 import logging
-import wave
+import secrets
 from pathlib import Path
+from typing import Callable
 
-import numpy as np
 import yaml
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 
 from poc_tts_streaming.config import load_config, voice_paths as configured_voice_paths
 from poc_tts_streaming.engine_flash import OutOfMemoryError, discover_voices
-from poc_tts_streaming.models import FlashTTSRequest
+from poc_tts_streaming.realtime import ids
+from poc_tts_streaming.realtime.events import EventError
+from poc_tts_streaming.realtime.session import ChatterboxKnobs, RealtimeSession, SynthWorker
 
 logger = logging.getLogger(__name__)
 
 UI_DIR = Path(__file__).resolve().parent.parent / "ui"
 
 
-def _wav_bytes(audio: np.ndarray, sample_rate: int) -> bytes:
-    """Encode mono float32 [-1, 1] as 16-bit PCM WAV."""
-    clipped = np.clip(audio, -1.0, 1.0)
-    pcm = (clipped * 32767.0).astype(np.int16)
-    buffer = io.BytesIO()
-    with wave.open(buffer, "wb") as handle:
-        handle.setnchannels(1)
-        handle.setsampwidth(2)
-        handle.setframerate(sample_rate)
-        handle.writeframes(pcm.tobytes())
-    return buffer.getvalue()
+def openai_error(status: int, message: str, *, type_: str = "invalid_request_error",
+                 code: str | None = None, param: str | None = None) -> JSONResponse:
+    """The error body shape api.openai.com returns, so client code paths match."""
+    return JSONResponse({"error": {"type": type_, "code": code, "message": message, "param": param}},
+                        status_code=status)
+
+
+def bearer_token(request: Request) -> str | None:
+    auth = request.headers.get("authorization", "")
+    return auth[7:].strip() if auth.lower().startswith("bearer ") else None
+
+
+class ClientSecretStore:
+    """In-memory ephemeral keys. Cosmetic on localhost, but it keeps the
+    browser's code path identical to the one it would use against OpenAI."""
+
+    def __init__(self, ttl_s: int = 600, clock: Callable[[], int] = ids.now) -> None:
+        self._ttl, self._clock = ttl_s, clock
+        self._tokens: dict[str, int] = {}
+
+    def issue(self, session_patch: dict | None, *, session_factory=None) -> dict:
+        value = f"ek_{secrets.token_urlsafe(24)}"
+        expires_at = self._clock() + self._ttl
+        self._tokens[value] = expires_at
+        session = session_factory(session_patch).session_object() if session_factory else {}
+        return {"value": value, "expires_at": expires_at, "session": session}
+
+    def verify(self, token: str | None) -> bool:
+        if not token or token not in self._tokens:
+            return False
+        if self._tokens[token] < self._clock():
+            del self._tokens[token]
+            return False
+        return True
+
+
+def engine_synthesizer(engine):
+    """Adapt FlashEngine.synthesize_stream to the session's Synthesizer type."""
+    def synthesize(text, voice, knobs: ChatterboxKnobs, cancel):
+        return engine.synthesize_stream(text, voice, cancel=cancel, **knobs.as_engine_kwargs())
+    return synthesize
+
+
+class _NullSink:
+    def push(self, pcm): ...
+    def flush(self): ...
+    def clear(self): ...
+    async def drained(self): ...
 
 
 def _ui_shaped_config(config: dict, ui_state: dict | None = None) -> dict:
@@ -96,10 +134,25 @@ def _voice_record(name: str) -> dict:
     }
 
 
-def create_app(engine, config: dict, voice_paths: list[Path]) -> FastAPI:
+def create_app(engine, config: dict, voice_paths: list[Path], *,
+               worker: SynthWorker | None = None) -> FastAPI:
     app = FastAPI(
         title="poc-tts-streaming: Chatterbox Flash over Realtime/WebRTC", version="0.1.0"
     )
+    realtime_cfg = {"model": "chatterbox-flash", "default_voice": "one-one.mp3",
+                    "client_secret_ttl_s": 600, **config.get("realtime", {})}
+    app.state.knobs = ChatterboxKnobs.from_config(config.get("generation", {}))
+    app.state.worker = worker or SynthWorker()
+    app.state.secrets = ClientSecretStore(ttl_s=int(realtime_cfg["client_secret_ttl_s"]))
+    app.state.realtime = realtime_cfg
+
+    def build_session(send, sink, session_patch: dict | None = None) -> RealtimeSession:
+        return RealtimeSession(
+            send=send, synthesizer=engine_synthesizer(engine), sink=sink, worker=app.state.worker,
+            voices=lambda: discover_voices(voice_paths), voice=realtime_cfg["default_voice"],
+            knobs=app.state.knobs, model=realtime_cfg["model"], session_patch=session_patch,
+        )
+    app.state.build_session = build_session
 
     # Round-tripped to the UI as config.ui_state so preset/text choices stick.
     settings_store: dict = {}
@@ -164,47 +217,15 @@ def create_app(engine, config: dict, voice_paths: list[Path]) -> FastAPI:
                         "Stop and rerun `make poc-tts`."}
         )
 
-
-    @app.post("/tts")
-    async def tts(request: FlashTTSRequest):
-        if not engine.loaded:
-            raise HTTPException(status_code=503, detail="Flash model is not loaded.")
-
-        if request.voice_mode == "predefined":
-            voice = request.predefined_voice_id
-            if not voice:
-                raise HTTPException(
-                    status_code=400,
-                    detail="predefined_voice_id is required when voice_mode is 'predefined'.",
-                )
-        else:
-            voice = request.reference_audio_filename
-            if not voice:
-                raise HTTPException(
-                    status_code=400,
-                    detail="reference_audio_filename is required when voice_mode is 'clone'.",
-                )
-
+    @app.post("/v1/realtime/client_secrets")
+    async def client_secrets(request: Request):
+        body = await request.json() if int(request.headers.get("content-length", "0") or 0) else {}
+        patch = body.get("session") if isinstance(body, dict) else None
         try:
-            audio, sample_rate = engine.synthesize(
-                text=request.text,
-                voice=voice,
-                temperature=request.temperature,
-                exaggeration=request.exaggeration,
-                cfg_scale=request.cfg_weight,
-                num_steps=request.num_steps,
-                n_cfm_timesteps=request.n_cfm_timesteps,
-                chunk_size=request.chunk_size,
-                split_text=request.split_text,
-            )
-        except FileNotFoundError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        except OutOfMemoryError as exc:
-            raise HTTPException(status_code=507, detail=str(exc)) from exc
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-        return Response(content=_wav_bytes(audio, sample_rate), media_type="audio/wav")
+            return app.state.secrets.issue(
+                patch, session_factory=lambda p: build_session(lambda _e: None, _NullSink(), p))
+        except EventError as err:
+            return openai_error(400, err.message, code=err.code, param=err.param)
 
     @app.post("/save_settings")
     async def save_settings(payload: dict):
