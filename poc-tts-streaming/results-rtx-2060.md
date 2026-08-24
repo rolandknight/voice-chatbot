@@ -452,6 +452,74 @@ utterance — the user's mid-passage pause), 18.00→17.75 s; blockstream
 `reports/spike-wavs/trim-runaway-{sentence,blockstream}-{before,after}.wav`
 are those two seeds rendered both ways.
 
+### Punctuation normalisation for clause fragments (2026-08-24)
+
+`chunk_text`'s clause split keeps the clause mark on the fragment it splits
+off (regex `(?<=[,;:])\s+`), so a fragment like `"it was the age of
+wisdom,"` used to reach the model with a comma where a period belongs — a
+weak EOS signal for a model trained to stop at sentence-final punctuation.
+`engine_flash.speakable(text)` normalises that: a trailing clause mark (`,
+; :`) becomes `.`, anything with no terminal punctuation gets `.` appended,
+and an already-terminal chunk (`"Hello."`, `"Really?!"`, `'He said "go."'`,
+`"..."`) passes through unchanged. Both engines apply it only at the model
+boundary — `FlashEngine.synthesize_stream` calls `generate(speakable(chunk),
+...)`, `BlockStreamEngine._stream_chunk` encodes `speakable(chunk)` — while
+the yielded `(chunk_text, pcm)` label stays the original `chunk`, so
+transcripts and `bench_stream`'s char counts are unaffected.
+
+**Method.** The hypothesis under test: does the missing terminal punctuation
+raise the no-EOS runaway rate this doc's "Chunk-edge silence trim" section
+above measured at 1–2 %? The Dickens opening sentence (the same text as the
+`ui/presets.yaml` "Long Story Excerpt" preset) split by `chunk_text(text,
+120)` gives 6 clause fragments — one already ends in a period (`"...in the
+superlative degree of comparison only."`), a built-in control since
+`speakable()` is a no-op on it. Each fragment was rendered N=60 times through
+the sentence engine's model boundary (`ChatterboxFlashTTS.generate`, what
+`FlashEngine.synthesize_stream` calls) at `config.yaml`'s tuned knobs
+(`num_steps: 4, n_cfm_timesteps: 1, drf_block_size: 32, temperature: 0.5`),
+seeds 0–59 fixed and shared between arm A and arm B for a given fragment so
+any rate difference isn't RNG-draw noise. Arm A is the raw fragment (what the
+model saw before this task); arm B is `speakable(fragment)`. Runaway = T3
+never emitted `stop_speech_token` and ran the whole
+`_speech_len_for_text_tokens` budget, detected by comparing the token count
+`t3.generate` returns to the budget it was called with — **not** by checking
+whether the returned tensor contains the stop token, which is always absent
+either way (T3's early return truncates *exclusive* of it, same as the
+`generate_blocks` copy this doc's post-EOS section already documents). A
+first pass at this harness used the stop-token-presence check and got 60/60
+"runaways" on the first fragment — a methodology bug caught before any real
+numbers were recorded, not a finding.
+
+| # | fragment (arm A tail → arm B tail) | A runaways | A audio_s | A gen_s | B runaways | B audio_s | B gen_s |
+|---|---|---:|---:|---:|---:|---:|---:|
+| 0 | "...age of foolishness," → "...foolishness." | 0/60 | 6.944 | 1.224 | 0/60 | 6.951 | 1.252 |
+| 1 | "...season of Darkness," → "...Darkness." | 1/60 | 8.950 | 1.554 | 0/60 | 8.700 | 1.526 |
+| 2 | "...had nothing before us," → "...before us." | 0/60 | 7.541 | 1.311 | 0/60 | 7.636 | 1.323 |
+| 3 | "...other way – in short," → "...in short." | 0/60 | 4.971 | 0.954 | 1/60 | 5.061 | 0.967 |
+| 4 | "...insisted on its being received," → "...received." | 3/60 | 7.650 | 1.340 | 2/60 | 7.667 | 1.299 |
+| 5 | "...comparison only." (already terminal — control, A = B) | 2/60 | 5.469 | 1.052 | 2/60 | 5.469 | 1.058 |
+| **all 6** | | **6/360 (1.67 %)** | **6.921** | **1.239** | **5/360 (1.39 %)** | **6.914** | **1.237** |
+
+Fragment 5 is the control: identical text, identical seeds → identical
+runaway count and audio length in both arms (the sub-millisecond `gen_s`
+difference is wall-clock noise, not a computation difference), which is the
+harness's own sanity check on the seed-pairing.
+
+**Conclusion: within noise.** 6/360 vs 5/360 is a 1.67 % vs 1.39 % runaway
+rate — a gap of one trial in 360. At this sample size the per-arm standard
+error on ~1.5 % is about 0.65 percentage points, several times the 0.28-point
+gap, so this is not a detectable effect; Task A's own post-EOS section notes
+the same power limit at a similar sample size. Mean audio duration (6.921 s
+vs 6.914 s) and mean generation time (1.239 s vs 1.237 s) are also
+indistinguishable — normalisation costs nothing. **The normalisation still
+ships**: it does not make anything worse, it is what the fix was already
+argued for on prosody grounds (a correct EOS signal for a model trained on
+sentence-final punctuation, not a runaway-rate claim), and it fixes a real
+mismatch between what a clause fragment says and what mark it ends on. It
+just isn't the runaway-rate fix a 1–2 % baseline and a 720-trial harness
+could show one way or the other — the fix for that remains the edge-silence
+trim above.
+
 ### Verdict
 
 **GO**, with caveats.

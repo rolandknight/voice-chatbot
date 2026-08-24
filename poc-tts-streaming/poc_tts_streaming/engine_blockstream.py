@@ -59,6 +59,7 @@ from poc_tts_streaming.engine_flash import (
     _vram_report,
     chunk_text,
     resolve_voice_path,
+    speakable,
 )
 
 logger = logging.getLogger(__name__)
@@ -543,10 +544,15 @@ class BlockStreamEngine(FlashEngine):
         producer pushes finished windows onto a queue and the generator drains
         it. Everything stays on one CUDA stream, so T3 and S3Gen serialise on
         the GPU anyway; the thread only bridges the callback/generator gap.
+
+        The model is handed ``speakable(chunk)``, not ``chunk`` itself --
+        mirroring ``FlashEngine.synthesize_stream`` -- so a clause fragment's
+        trailing ``, ; :`` does not reach T3 as a weak EOS signal. ``chunk``
+        (the original) is still what ``put`` below labels emitted audio with.
         """
         model = self._model
         model.prepare_conditionals(prompt, exaggeration=exaggeration)
-        text_tokens = model._encode_text(chunk, normalize_text=True)
+        text_tokens = model._encode_text(speakable(chunk), normalize_text=True)
         n_text = int(text_tokens.size(1))
         max_tokens = _speech_len_for_text_tokens(n_text)
         window = _MelWindow(model.s3gen, model.conds.gen, n_cfm, max_tokens)

@@ -166,6 +166,51 @@ def chunk_text(text: str, chunk_size: int, split_on_clauses: bool = True) -> lis
     return _pack(units, chunk_size)
 
 
+_TERMINAL = ".!?"
+_CLAUSE = ",;:"
+# Closing quotes/brackets a clause mark or terminal punctuation can hide
+# behind -- "wisdom,\"" and "(done.)" both end in one of these, not in the
+# mark itself.
+_CLOSERS = "\"')]}»”’"
+
+
+def speakable(text: str) -> str:
+    """Give a chunk a sentence-final ending for synthesis: a trailing clause
+    mark (, ; :) becomes '.', anything else without terminal punctuation gets
+    '.' appended. Closing quotes/brackets after the mark are preserved.
+    Transcript/labels keep the original text; this only changes what the
+    model sees.
+
+    ``chunk_text`` splits an over-long sentence on clause punctuation and
+    keeps the punctuation on the fragment, so a fragment like "it was the
+    age of wisdom," reaches the model with a comma where a period belongs --
+    a weak EOS signal for a model trained to stop at sentence-final
+    punctuation. This is a pure text transform with no model dependency, so
+    it is cheap to apply to every chunk regardless of how it was split: an
+    already-terminal chunk (whole sentence, "...", "?!") passes through
+    unchanged.
+    """
+    stripped = text.rstrip()
+    if not stripped:
+        return text
+    trailing_ws = text[len(stripped):]
+
+    # Walk back over any closing quotes/brackets to find the punctuation (or
+    # lack of it) they are trailing.
+    i = len(stripped)
+    while i > 0 and stripped[i - 1] in _CLOSERS:
+        i -= 1
+    core, closers = stripped[:i], stripped[i:]
+
+    if core and core[-1] in _TERMINAL:
+        return text
+    if core and core[-1] in _CLAUSE:
+        core = core[:-1] + "."
+    else:
+        core = core + "."
+    return core + closers + trailing_ws
+
+
 # --- voice discovery ------------------------------------------------------------
 
 _VOICE_EXTENSIONS = (".wav", ".mp3", ".flac", ".ogg")
@@ -418,6 +463,13 @@ class FlashEngine:
         can fail fast. Cancellation is checked between chunks: a chunk
         already inside generate() finishes (~1 s tuned) and is discarded by
         the caller. generate() itself cannot be interrupted.
+
+        ``generate()`` is called with ``speakable(chunk)``, not ``chunk``
+        itself -- a clause fragment off ``chunk_text``'s clause split keeps
+        its trailing ``, ; :``, which is a weak EOS signal for a model
+        trained on sentence-final punctuation. The yielded text is still the
+        original ``chunk``: transcripts and ``bench_stream``'s char counts
+        must reflect what the text actually was, not what the model heard.
         """
         if not self.loaded:
             raise RuntimeError("model is not loaded -- call load() first")
@@ -435,7 +487,7 @@ class FlashEngine:
                 return
             try:
                 wav = self._model.generate(
-                    chunk,
+                    speakable(chunk),
                     audio_prompt_path=prompt,
                     temperature=temperature if temperature is not None else gen["temperature"],
                     exaggeration=exaggeration if exaggeration is not None else gen["exaggeration"],

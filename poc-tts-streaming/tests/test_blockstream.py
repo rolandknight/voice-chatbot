@@ -344,6 +344,49 @@ def test_streamed_samples_match_trimmed_tokens(loaded, monkeypatch):
 
 
 @gpu
+def test_stream_chunk_encodes_speakable_text_but_labels_the_original(loaded, monkeypatch):
+    """A clause fragment off chunk_text's clause split keeps its trailing
+    ``, ; :`` -- a weak EOS signal for a model trained on sentence-final
+    punctuation. ``_stream_chunk`` must encode ``speakable(chunk)`` for the
+    model while the emitted label stays the original chunk text, mirroring
+    the sentence engine's contract (test_engine.py's
+    test_synthesize_stream_normalises_clause_fragments_for_the_model).
+    """
+    from poc_tts_streaming import engine_blockstream as bs
+    from poc_tts_streaming.config import voice_paths
+    from poc_tts_streaming.engine_flash import speakable
+
+    _engine, model, config = loaded
+    engine = bs.BlockStreamEngine(
+        engine_cfg=config.get("engine", {}),
+        generation_cfg=config.get("generation", {}),
+        voice_paths=voice_paths(config),
+    )
+    engine._model = model
+    voice = config.get("bench", {}).get("voice", "one-one.mp3")
+    chunk = "it was the age of wisdom,"
+    assert speakable(chunk) == "it was the age of wisdom."
+
+    seen: list[str] = []
+    original_encode = model._encode_text
+
+    def spy(text, **kwargs):
+        seen.append(text)
+        return original_encode(text, **kwargs)
+
+    monkeypatch.setattr(model, "_encode_text", spy)
+
+    torch.manual_seed(5)
+    windows = list(engine.synthesize_stream(chunk, voice, split_text=False))
+
+    assert seen == ["it was the age of wisdom."], (
+        f"model saw {seen!r}, not the speakable() fragment"
+    )
+    labels = [label for label, _ in windows if label]
+    assert labels == [chunk], f"emitted label(s) {labels!r} != original chunk {chunk!r}"
+
+
+@gpu
 def test_the_chunk_label_rides_the_first_piece_emitted(loaded, monkeypatch):
     """A chunk whose first window is silence still delivers its text.
 

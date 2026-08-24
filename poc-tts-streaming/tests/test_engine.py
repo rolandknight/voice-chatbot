@@ -236,6 +236,22 @@ def test_synthesize_stream_trims_the_chunk_edge_silence(tmp_path):
     assert np.array_equal(pcm[keep:keep + 12000], np.full(12000, 0.3, dtype=np.float32))
 
 
+def test_synthesize_stream_normalises_clause_fragments_for_the_model(tmp_path):
+    """chunk_text keeps a clause mark (, ; :) on an over-long sentence's
+    fragment, so the model would otherwise see "it was the age of wisdom,"
+    with no sentence-final punctuation. speakable() must be applied at the
+    generate() boundary while the yielded label -- what transcripts and
+    bench_stream's chars count -- stays the original chunk text."""
+    eng, model = _loaded_engine(tmp_path)
+    chunk = "it was the age of wisdom,"
+
+    (label, _pcm), = list(eng.synthesize_stream(chunk, "a.wav", split_text=False))
+
+    args, _kwargs = model.generate.call_args
+    assert args[0] == "it was the age of wisdom."
+    assert label == chunk
+
+
 def test_trim_keep_ms_zero_is_rejected(tmp_path):
     """A zero keep lets an all-silent chunk emit nothing at all, and the block
     path puts the chunk's transcript label on the first piece it emits -- so
