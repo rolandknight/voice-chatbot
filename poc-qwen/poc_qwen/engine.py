@@ -9,8 +9,11 @@ from __future__ import annotations
 import importlib
 import logging
 import platform
+import queue
+import threading
 import time
 from collections import OrderedDict
+from concurrent.futures import Future
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterator
@@ -85,7 +88,35 @@ class Qwen3Engine:
         self._load_s: dict[str, float] = {}
         self._warm_s: dict[str, float] = {}
         self._ref_cache: dict[str, np.ndarray] = {}
-        self._whisper_ok: bool | None = None
+        # Every MLX/Metal call runs on this one persistent daemon thread. Gradio
+        # (anyio) executes handlers on pooled worker threads that are torn down
+        # after a few idle seconds, and MLX keeps per-thread Metal state that
+        # is destroyed with the thread -- which segfaulted the app between
+        # requests. A daemon thread is also never joined at interpreter exit,
+        # so the same teardown cannot crash the process on shutdown.
+        self._jobs: queue.Queue = queue.Queue()
+        self._worker = threading.Thread(target=self._worker_loop, name="mlx-worker", daemon=True)
+        self._worker.start()
+
+    def _worker_loop(self) -> None:
+        while True:
+            fn, args, kwargs, fut = self._jobs.get()
+            if fut.set_running_or_notify_cancel():
+                try:
+                    fut.set_result(fn(*args, **kwargs))
+                except BaseException as exc:  # noqa: BLE001 - delivered to the caller
+                    fut.set_exception(exc)
+
+    def _submit(self, fn, *args, **kwargs) -> Future:
+        fut: Future = Future()
+        self._jobs.put((fn, args, kwargs, fut))
+        return fut
+
+    def _on_worker(self, fn, *args, **kwargs):
+        """Run fn on the MLX thread and return its result (re-entrant from the worker itself)."""
+        if threading.current_thread() is self._worker:
+            return fn(*args, **kwargs)
+        return self._submit(fn, *args, **kwargs).result()
 
     # ---- model registry -------------------------------------------------
     def model_id(self, kind: str, size: str = "1.7B") -> str:
@@ -140,6 +171,9 @@ class Qwen3Engine:
         self._warm_s[model_id] = time.perf_counter() - t0
 
     def unload_all(self) -> None:
+        self._on_worker(self._unload_all)
+
+    def _unload_all(self) -> None:
         self._models.clear()
         self._clear_cache()
 
@@ -199,6 +233,9 @@ class Qwen3Engine:
         return audio
 
     def clone(self, text, ref_audio, ref_text: str | None, language="auto", size="1.7B", *, xvector_only=False) -> Result:
+        return self._on_worker(self._clone, text, ref_audio, ref_text, language, size, xvector_only)
+
+    def _clone(self, text, ref_audio, ref_text, language, size, xvector_only) -> Result:
         if not text.strip():
             raise ValueError("Target text is empty")
         ref = self._ref_audio(ref_audio)
@@ -214,6 +251,9 @@ class Qwen3Engine:
         return result
 
     def custom_voice(self, text, speaker, language="auto", instruct="", size="1.7B") -> Result:
+        return self._on_worker(self._custom_voice, text, speaker, language, instruct, size)
+
+    def _custom_voice(self, text, speaker, language, instruct, size) -> Result:
         if not text.strip():
             raise ValueError("Text is empty")
         kwargs = {"voice": speaker, "lang_code": lang_key(language), **self._sampling()}
@@ -222,6 +262,9 @@ class Qwen3Engine:
         return self._run(self.model_id("custom_voice", size), text, kwargs)
 
     def voice_design(self, text, instruct, language="auto") -> Result:
+        return self._on_worker(self._voice_design, text, instruct, language)
+
+    def _voice_design(self, text, instruct, language) -> Result:
         if not text.strip():
             raise ValueError("Text is empty")
         if not (instruct or "").strip():
@@ -230,23 +273,48 @@ class Qwen3Engine:
         return self._run(self.model_id("voice_design"), text, kwargs)
 
     def stream_clone(self, text, ref_audio, ref_text, language="auto", size="1.7B", interval_s=0.32) -> Iterator[np.ndarray]:
-        """Iteration-2 seam: yields float32 chunks as mlx-audio emits them. Used by the streaming spike only."""
-        model = self._load(self.model_id("clone", size))
-        import mlx.core as mx
+        """Iteration-2 seam: yields float32 chunks as mlx-audio emits them.
 
-        for r in model.generate(
-            text=text,
-            ref_audio=mx.array(self._ref_audio(ref_audio)),
-            ref_text=ref_text,
-            lang_code=lang_key(language),
-            stream=True,
-            streaming_interval=interval_s,
-            **self._sampling(),
-        ):
-            yield np.array(r.audio, dtype=np.float32).reshape(-1)
+        Generation runs on the MLX thread; chunks cross to the caller through a
+        queue, so this can be consumed from any thread (or an async loop).
+        """
+        q: queue.Queue = queue.Queue()
+        done = object()
+
+        def produce():
+            try:
+                model = self._load(self.model_id("clone", size))
+                import mlx.core as mx
+
+                for r in model.generate(
+                    text=text,
+                    ref_audio=mx.array(self._ref_audio(ref_audio)),
+                    ref_text=ref_text,
+                    lang_code=lang_key(language),
+                    stream=True,
+                    streaming_interval=interval_s,
+                    **self._sampling(),
+                ):
+                    q.put(np.array(r.audio, dtype=np.float32).reshape(-1))
+            except BaseException as exc:  # propagate to the consumer
+                q.put(exc)
+            finally:
+                q.put(done)
+
+        self._submit(produce)
+        while True:
+            item = q.get()
+            if item is done:
+                return
+            if isinstance(item, BaseException):
+                raise item
+            yield item
 
     # ---- helpers ----------------------------------------------------------
     def transcribe(self, audio_path) -> str:
+        return self._on_worker(self._transcribe, audio_path)
+
+    def _transcribe(self, audio_path) -> str:
         tcfg = self.cfg.get("transcribe", {})
         if not tcfg.get("enabled", True):
             return ""
@@ -268,6 +336,9 @@ class Qwen3Engine:
         return list(LANGUAGES)
 
     def model_info(self) -> dict:
+        return self._on_worker(self._model_info)
+
+    def _model_info(self) -> dict:
         info = {
             "chip": platform.processor() or platform.machine(),
             "resident": list(self._models),

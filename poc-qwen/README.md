@@ -22,7 +22,10 @@ Python is mise-pinned (`mise.toml`, 3.12); the rest of the repo stays on hermit.
 - `poc_qwen/engine.py` — `Qwen3Engine`: lazy model registry (LRU of
   `models.max_resident`), warm-up incl. the ICL clone path, sentence-chunked
   generation with crossfaded seams, `stream_clone()` generator for iteration 2.
-  Owns every `mlx_audio` import.
+  Owns every `mlx_audio` import. All MLX calls run on one persistent daemon
+  thread: MLX keeps per-thread Metal state, and running it on Gradio's
+  short-lived anyio worker threads segfaulted the app when those threads
+  were recycled between requests.
 - `poc_qwen/app.py` — Gradio Blocks; never imports `mlx_audio`. Presets come
   from `../voices/*.{wav,mp3}`; a `<name>.txt` sidecar supplies the transcript,
   otherwise `Auto-transcribe` runs mlx-whisper. Each generation appends to

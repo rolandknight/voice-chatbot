@@ -81,3 +81,30 @@ def test_warmup_exercises_icl_path(engine, fake_loader):
     engine.clone("Hi.", REF, "t", size="0.6B")
     warm = fake_loader.loaded[0].calls[0]
     assert "ref_audio" in warm and warm["ref_text"] == "Warm up."
+
+
+def test_all_mlx_work_runs_on_one_persistent_thread(engine, fake_loader, cfg):
+    import threading
+
+    seen = set()
+    orig = fake_loader
+
+    def loader(model_id):
+        seen.add(threading.current_thread().name)
+        return orig(model_id)
+
+    from poc_qwen.engine import Qwen3Engine
+
+    eng = Qwen3Engine(cfg, loader=loader)
+    threads = [threading.Thread(target=lambda: eng.clone("Hi.", REF, "t", size="0.6B")), threading.Thread(target=lambda: eng.voice_design("Hi.", "x"))]
+    for t in threads:
+        t.start(); t.join()
+    eng.model_info(); eng.unload_all()
+    assert seen == {"mlx-worker"}
+
+
+def test_stream_clone_yields_chunks_from_worker(engine, fake_loader):
+    chunks = list(engine.stream_clone("Hello there.", REF, "t", size="0.6B"))
+    assert len(chunks) == 1 and chunks[0].dtype == np.float32
+    call = fake_loader.loaded[0].calls[-1]
+    assert call["stream"] is True and call["streaming_interval"] == 0.32
