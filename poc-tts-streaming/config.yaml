@@ -52,9 +52,12 @@ generation:
 
 voices:
   # Searched in order. Missing directories are skipped, not an error.
+  # Curated list only -- babel, marvin, one-one -- from the repo-tracked
+  # clips in ../voices. The vendor clone's reference_audio/ carries its own
+  # bundled voices that we don't want surfaced here, so it's deliberately
+  # left out of this list (see tests/test_voices.py for the pin).
   paths:
     - ../voices
-    - ../vendor/chatterbox-tts-server/reference_audio
 
 bench:
   # bench.py's default (marvin.wav) lives only in the gitignored vendor
