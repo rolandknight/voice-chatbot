@@ -97,7 +97,11 @@ def trim_edge_silence(
     Interior silence is untouched -- a pause the model put *inside* a sentence
     is prosody, not padding. An entirely silent clip yields at most ``keep_ms``
     of itself, so a chunk that produced only silence still contributes a beat
-    rather than disappearing; only an empty input gives an empty result.
+    rather than disappearing -- but that is a guarantee only while
+    ``keep_ms > 0``: at ``keep_ms == 0`` an all-silent input correctly returns
+    an empty array, since there is no edge silence it is allowed to keep.
+    ``FlashEngine`` refuses ``trim_keep_ms < 1`` for exactly that reason (a
+    chunk that emits nothing also emits no transcript label).
     """
     pcm = np.asarray(pcm, dtype=np.float32)
     if pcm.size == 0:

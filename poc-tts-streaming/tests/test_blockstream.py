@@ -327,11 +327,19 @@ def test_streamed_samples_match_trimmed_tokens(loaded, monkeypatch):
                 f"({(len(raw) - n_tokens * bs.SAMPLES_PER_TOKEN) / bs.SAMPLES_PER_TOKEN:+.2f} tokens)"
             )
             emitted = np.concatenate([pcm for _, pcm in windows])
-            assert np.array_equal(emitted, trim_edge_silence(raw, engine.sr)), (
+            # The engine's own knobs, not the module defaults: config.yaml
+            # happens to repeat them today, and a test that hardcodes -45/120
+            # would go quietly vacuous the moment it stops.
+            whole = trim_edge_silence(
+                raw, engine.sr,
+                threshold_db=engine.trim_threshold_db,
+                keep_ms=engine.trim_keep_ms,
+            )
+            assert np.array_equal(emitted, whole), (
                 f"{chunk!r}: the gate emitted {len(emitted)} samples; a whole-chunk "
-                f"trim of the same audio gives {len(trim_edge_silence(raw, engine.sr))} "
-                f"(vocoded {len(raw)}) -- the gate must remove edge silence and "
-                "nothing else"
+                f"trim of the same audio at threshold_db={engine.trim_threshold_db} "
+                f"keep_ms={engine.trim_keep_ms} gives {len(whole)} (vocoded "
+                f"{len(raw)}) -- the gate must remove edge silence and nothing else"
             )
 
 

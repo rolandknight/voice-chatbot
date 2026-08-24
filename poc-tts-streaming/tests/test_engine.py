@@ -236,6 +236,23 @@ def test_synthesize_stream_trims_the_chunk_edge_silence(tmp_path):
     assert np.array_equal(pcm[keep:keep + 12000], np.full(12000, 0.3, dtype=np.float32))
 
 
+def test_trim_keep_ms_zero_is_rejected(tmp_path):
+    """A zero keep lets an all-silent chunk emit nothing at all, and the block
+    path puts the chunk's transcript label on the first piece it emits -- so
+    the sentence would vanish from output_audio_transcript.delta while the
+    sentence path still labelled its (empty) yield. Fail loudly at construction
+    instead of diverging the two engines at runtime."""
+    with pytest.raises(ValueError, match="trim_keep_ms"):
+        _engine(tmp_path, trim_keep_ms=0)
+
+
+def test_trim_keep_ms_zero_is_allowed_when_trimming_is_off(tmp_path):
+    """The guard is about what the trim emits; with trim_silence off there is
+    no trim, so the value is inert rather than dangerous."""
+    eng = _engine(tmp_path, trim_silence=False, trim_keep_ms=0)
+    assert eng.trim_silence is False
+
+
 def test_trim_silence_can_be_switched_off(tmp_path):
     """engine.trim_silence: false streams the raw draw -- the escape hatch the
     sample-count identity tests use to pin the un-gated length."""

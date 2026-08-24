@@ -312,6 +312,14 @@ class FlashEngine:
             engine_cfg.get("trim_threshold_db", TRIM_THRESHOLD_DB)
         )
         self.trim_keep_ms = int(engine_cfg.get("trim_keep_ms", TRIM_KEEP_MS))
+        if self.trim_silence and self.trim_keep_ms < 1:
+            raise ValueError(
+                "trim_keep_ms must be at least 1 ms when trim_silence is on: the "
+                "block path labels the first piece a chunk actually emits, and a "
+                "zero keep lets an all-silent chunk emit nothing at all -- which "
+                "drops that sentence's output_audio_transcript.delta. Use "
+                "trim_silence: false to stream the raw draw instead."
+            )
 
     def _trim_chunk(self, pcm: np.ndarray) -> np.ndarray:
         """Trim one finished chunk's edge silence (sentence path)."""

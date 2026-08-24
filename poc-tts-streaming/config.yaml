@@ -30,6 +30,9 @@ engine:
   # 120 ms. Set trim_silence: false to stream the raw draw.
   trim_silence: true
   trim_threshold_db: -45.0
+  # Must be >= 1 while trim_silence is on -- the block path puts a chunk's
+  # transcript label on the first piece that chunk actually emits, and a zero
+  # keep lets an all-silent chunk emit nothing at all. FlashEngine raises.
   trim_keep_ms: 120
 
 generation:

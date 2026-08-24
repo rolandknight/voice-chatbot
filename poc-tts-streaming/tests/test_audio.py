@@ -108,6 +108,14 @@ def test_trim_edge_silence_keep_ms_zero_removes_every_edge_sample():
     assert len(trim_edge_silence(pcm, SR, keep_ms=0)) == SR
 
 
+def test_trim_edge_silence_all_silent_with_zero_keep_is_empty():
+    """The one corner where a non-empty input gives an empty result: there is
+    no edge silence a zero keep is allowed to hold on to. Documented rather
+    than hidden -- FlashEngine refuses trim_keep_ms < 1 precisely because a
+    chunk that emits nothing also emits no transcript label."""
+    assert trim_edge_silence(_silence(SR), SR, keep_ms=0).size == 0
+
+
 # --- TrailingSilenceGate ------------------------------------------------------
 
 def _drain_len(gate, windows):
