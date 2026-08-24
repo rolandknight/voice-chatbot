@@ -134,6 +134,20 @@ question reduces to "does windowed vocoding of the same tokens sound the
 same", not "does chopping the sentence change the delivery". It does not:
 the sentence is never chopped.
 
+One honest qualification, measured on 2026-08-24. The identity test drives
+`on_block` with a callback that does nothing, and *there* the loop is
+byte-identical. The **production** callback vocodes, and vocoding consumes
+torch RNG — `CausalConditionalCFM.forward` does `z = torch.randn_like(mu)`
+unconditionally even when `noised_mels` is supplied
+(`s3gen/flow_matching.py:216`), and HiFTGAN's NSF source draws
+`torch.randn_like` per call (`s3gen/hifigan.py:226,282`). So a block-streamed
+utterance is a *different draw* from what the sentence path produces off the
+same seed, not the same one. Over 40 seeds the no-op callback reproduced
+`t3.generate`'s token counts exactly (40/40 identical); the vocoding callback
+did not. This is a re-roll of the dice, not a change of distribution — see the
+active-speech numbers in the EOS subsection below — but the loop's "must not
+consume torch RNG" docstring is violated on the path that ships.
+
 ### TTFA (benched configuration)
 
 `spike_analysis seams --runs 3`, both paths off one set of loaded weights,
@@ -325,6 +339,77 @@ asserted.
    (`fade_in_out`, Hamming over 2 × 3840 samples). With that, the joins
    measure as tabulated above.
 
+### Post-EOS hallucination report (2026-08-24) — **not reproduced**
+
+A user running the flag on in the browser reported hallucinated trailing
+speech — babble after the intended text, inconsistent across runs — and the
+working hypothesis was that the streamed path never trims at
+`stop_speech_token` and so speaks out the rest of the token budget. **That is
+not what happens.** The evidence, all on the RTX 2060 at `config.yaml`'s knobs
+(`num_steps: 4`, `n_cfm_timesteps: 1`, `drf_block_size: 32`):
+
+1. **`generate_blocks` already stops at EOS.** It carries the same early
+   return as upstream `ChatterboxFlashT3.generate`: the EOS block is truncated
+   at the stop token (exclusive) and the loop returns. Over 40 seeds on the
+   reported sentence, `generate_blocks` with a no-op callback produced
+   *identical* token counts to `t3.generate` — including which runs
+   terminated where. Typical run: budget 300 tokens / 10 blocks, EOS in
+   block 3, 4 callbacks, 103 tokens returned, 0 stop tokens in the result.
+
+2. **There is a second, independent guard.** `_stream_chunk`'s `on_block`
+   applies `model._trim_to_eos` to *every* block prefix before it reaches the
+   vocoder, so even a loop that over-ran could not push post-EOS tokens
+   through S3Gen — `_MelWindow` would see a prefix that stopped growing and
+   emit nothing.
+
+3. **Sample counts are exact.** Streamed samples minus `trimmed_tokens × 960`
+   was **0 on every one of 160 runs** (2 voices × 2 knob sets × 2 engines ×
+   20 runs). Same-token A/B — one runaway token stream vocoded (a) one-shot
+   through `s3gen.inference` and (b) through `_MelWindow` as it ships — gave
+   288000 samples both ways, delta 0.
+
+4. **No extra speech, either.** Measuring *active* (non-silent) audio rather
+   than total, block streaming is level with or slightly below the
+   sentence-level path:
+
+   | text | engine | total_s med / max | active_s med / max |
+   |---|---|---:|---:|
+   | "The time is 5 oclock. it also is sunny outside." | blockstream | 3.88 / 7.56 | 2.71 / 3.06 |
+   | | sentence | 3.88 / 6.36 | 2.83 / 3.14 |
+   | 3-sentence reply (multi-chunk) | blockstream | 8.36 / 14.96 | 6.13 / 6.94 |
+   | | sentence | 8.30 / 15.12 | 6.25 / 7.38 |
+
+   30 runs each. Repeated with `marvin.mp3` and with the hot preset knobs
+   (temperature 0.85, exaggeration 1.2, cfg 0.55): same picture.
+
+**What is real** is a different, engine-agnostic failure. Roughly **1–2 % of
+chunks never emit EOS at all** and run the full
+`_speech_len_for_text_tokens` budget — `max(6 × n_text, 300)`, so a 46-char
+sentence gets a 300-token / **12 s** floor. Measured over 200 trials on the
+reported sentence: `t3.generate` 2/200, `generate_blocks` with an
+RNG-consuming callback 4/200 — statistically indistinguishable, and the
+sentence-level path hit it too (2/30 on the multi-chunk text). **The excess is
+silence, not babble**: across 8 captured runaways the RMS after the sentence
+ends is 0.000 for the remaining 8–9 s. Listening pairs in
+`reports/spike-wavs/eos-*.wav` (gitignored), including
+`eos-runaway-{oneshot,streamed}.wav` — the same runaway tokens through both
+vocoders.
+
+So the trailing-audio complaint is a **T3 budget-exhaustion bug affecting both
+engines**, and what it produces is a long silent tail. Whether that is what
+the user heard is unresolved; nothing in 160 paired runs produced trailing
+*speech* on either path. Two follow-ups are open and neither belongs to the
+streaming spike: cap or trim the unterminated budget (it changes the
+flag-off path too), and decide whether the RNG re-roll noted under "Prosody"
+should be fenced off with `torch.random.fork_rng`.
+
+Regression cover added:
+`tests/test_blockstream.py::test_generate_blocks_stops_at_the_eos_block`
+(no block is emitted after the EOS block; the result carries no stop token)
+and `::test_streamed_samples_match_trimmed_tokens` (three bench sentences,
+chunked as they ship). The first was verified to fail when the early return
+is removed from the copied loop.
+
 ### Verdict
 
 **GO**, with caveats.
@@ -336,8 +421,15 @@ asserted.
   its own render's control p95; exact tiling in the paired test; and a
   whole-waveform glitch scan whose maxima are comparable between the two paths
   on the same text. ✅
-- Prosody: T3 sees the whole sentence and the token stream is byte-identical
-  (identity test). ✅
+- Prosody: T3 sees the whole sentence, and the block loop is byte-identical to
+  `generate` for a given RNG stream (identity test). The shipping callback
+  consumes RNG while vocoding, so the *draw* differs from the sentence path —
+  distributionally the same, not the same utterance. ✅ with the qualification
+  under "Prosody is preserved by construction".
+- Post-EOS hallucination: investigated 2026-08-24 and **not reproduced** —
+  streamed samples equal `trimmed_tokens × 960` on 160/160 runs. The real
+  defect found is a 1–2 % T3 budget-exhaustion runaway that affects both
+  engines and produces trailing silence. See the subsection above. ✅
 
 Caveats a follow-up must clear before this ships:
 

@@ -14,6 +14,13 @@ import torch
 gpu = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs the GPU")
 
 
+def _bench_sentences() -> list[str]:
+    """The three sentences every baseline in this PoC is measured on."""
+    from poc_tts_streaming.bench import SENTENCES
+
+    return [text for _label, text in SENTENCES]
+
+
 def test_block_streaming_defaults_off():
     """The spike must not be reachable from a stock checkout."""
     from poc_tts_streaming.config import load_config
@@ -185,3 +192,99 @@ def test_blockstream_engine_end_to_end(loaded):
         f"{total} samples is not a whole number of tokens "
         f"({total / bs.SAMPLES_PER_TOKEN:.3f})"
     )
+
+
+@gpu
+def test_generate_blocks_stops_at_the_eos_block(loaded):
+    """No block is emitted that starts after the one carrying the stop token.
+
+    The 2026-08-24 hallucination investigation asked whether the streamed path
+    keeps vocoding past EOS and speaks out the rest of the (generous) token
+    budget. It does not -- ``generate_blocks`` truncates the EOS block at the
+    stop token (exclusive) and returns immediately, exactly as upstream's
+    ``ChatterboxFlashT3.generate`` does. This pins that down so a future edit
+    to the copied loop cannot quietly reintroduce it.
+    """
+    import math
+
+    from poc_tts_streaming.engine_blockstream import generate_blocks
+
+    engine, model, config = loaded
+    stop_tok = model.t3.hp.stop_speech_token
+    bs = model.t3.drf_block_size
+
+    for seed, text in enumerate(_bench_sentences()):
+        kwargs = _t3_kwargs(engine, model, text, config)
+        budget = int(kwargs["total_speech_len"])
+        seen: list[torch.Tensor] = []
+        torch.manual_seed(seed)
+        tokens = generate_blocks(model.t3, on_block=seen.append, **kwargs)
+        n = int(tokens.size(1))
+
+        assert not bool((tokens == stop_tok).any()), (
+            f"{text!r}: the returned tensor still carries the stop token -- "
+            "truncation must be exclusive"
+        )
+        assert seen, f"{text!r}: on_block was never called"
+        assert int(seen[-1].size(1)) == n, (
+            f"{text!r}: last callback saw {int(seen[-1].size(1))} tokens but "
+            f"generate_blocks returned {n}"
+        )
+        # One callback per block up to and including the block EOS landed in.
+        # Without EOS the loop legitimately runs the whole budget.
+        expected = math.ceil(budget / bs) if n >= budget else n // bs + 1
+        assert len(seen) == expected, (
+            f"{text!r}: {len(seen)} blocks emitted for {n} tokens "
+            f"(budget {budget}, block {bs}); expected {expected} -- a block "
+            "starting after the EOS block was vocoded"
+        )
+
+
+@gpu
+def test_streamed_samples_match_trimmed_tokens(loaded, monkeypatch):
+    """Streamed audio is exactly 960 x the tokens that survive _trim_to_eos.
+
+    test_blockstream_engine_end_to_end only checks the total is a whole number
+    of tokens; that would still pass if the stream vocoded the post-EOS budget.
+    This ties the sample count to the token count the non-streaming path would
+    have vocoded, which is the property the EOS contract is really about.
+
+    Driven one chunk per call (``split_text=False`` over a pre-chunked text) so
+    the last ``_trim_to_eos`` call is unambiguously that chunk's tail push.
+    """
+    from poc_tts_streaming import engine_blockstream as bs
+    from poc_tts_streaming.config import voice_paths
+    from poc_tts_streaming.engine_flash import chunk_text
+
+    _engine, model, config = loaded
+    gen = config.get("generation", {})
+    engine = bs.BlockStreamEngine(
+        engine_cfg=config.get("engine", {}),
+        generation_cfg=gen,
+        voice_paths=voice_paths(config),
+    )
+    engine._model = model            # reuse the fixture's weights, don't reload
+    voice = config.get("bench", {}).get("voice", "one-one.mp3")
+
+    original = model._trim_to_eos
+    trimmed_lengths: list[int] = []
+
+    def spy(speech_tokens):
+        out = original(speech_tokens)
+        trimmed_lengths.append(int(out.numel()))
+        return out
+
+    monkeypatch.setattr(model, "_trim_to_eos", spy)
+
+    for seed, text in enumerate(_bench_sentences()):
+        for chunk in chunk_text(text, int(gen.get("chunk_size", 120))):
+            trimmed_lengths.clear()
+            torch.manual_seed(seed)
+            windows = list(engine.synthesize_stream(chunk, voice, split_text=False))
+            total = sum(len(pcm) for _, pcm in windows)
+            n_tokens = trimmed_lengths[-1]
+            assert total == n_tokens * bs.SAMPLES_PER_TOKEN, (
+                f"{chunk!r}: streamed {total} samples for {n_tokens} trimmed "
+                f"tokens; expected {n_tokens * bs.SAMPLES_PER_TOKEN} "
+                f"({(total - n_tokens * bs.SAMPLES_PER_TOKEN) / bs.SAMPLES_PER_TOKEN:+.2f} tokens)"
+            )
