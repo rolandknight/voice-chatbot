@@ -105,37 +105,49 @@ def resolve_backend(
 # --- text chunking ------------------------------------------------------------
 
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+_CLAUSE_END = re.compile(r"(?<=[,;:])\s+")
 
 
-def chunk_text(text: str, chunk_size: int) -> list[str]:
+def _pack(units: list[str], chunk_size: int) -> list[str]:
+    """Pack whole units together up to chunk_size; a unit longer than
+    chunk_size is emitted on its own rather than cut mid-word."""
+    chunks: list[str] = []
+    current = ""
+    for unit in units:
+        if not current:
+            current = unit
+        elif len(current) + 1 + len(unit) <= chunk_size:
+            current = f"{current} {unit}"
+        else:
+            chunks.append(current)
+            current = unit
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def chunk_text(text: str, chunk_size: int, split_on_clauses: bool = True) -> list[str]:
     """Split text into chunks of roughly chunk_size characters.
 
-    Splits on sentence boundaries and packs whole sentences together up to
-    the target size. A single sentence longer than chunk_size is emitted
-    whole rather than cut mid-word -- Flash handles long blocks better than
-    it handles a severed clause.
+    Sentences are the unit: each generate() call is an independent draw with
+    its own prosody and trailing silence, so anything smaller than a clause
+    sounds like a list being read. Whole sentences are packed up to
+    chunk_size. A sentence longer than chunk_size is split on clause
+    punctuation (, ; :) when split_on_clauses is set -- the cheapest way to
+    bring time-to-first-audio down on long sentences -- and otherwise
+    emitted whole.
     """
     text = text.strip()
     if not text:
         return []
-
     sentences = [s.strip() for s in _SENTENCE_END.split(text) if s.strip()]
-    if not sentences:
-        return []
-
-    chunks: list[str] = []
-    current = ""
+    units: list[str] = []
     for sentence in sentences:
-        if not current:
-            current = sentence
-        elif len(current) + 1 + len(sentence) <= chunk_size:
-            current = f"{current} {sentence}"
+        if split_on_clauses and len(sentence) > chunk_size:
+            units.extend(c.strip() for c in _CLAUSE_END.split(sentence) if c.strip())
         else:
-            chunks.append(current)
-            current = sentence
-    if current:
-        chunks.append(current)
-    return chunks
+            units.append(sentence)
+    return _pack(units, chunk_size)
 
 
 # --- voice discovery ------------------------------------------------------------

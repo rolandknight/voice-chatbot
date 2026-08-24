@@ -34,3 +34,22 @@ def test_no_text_is_lost():
     text = "Alpha beta. Gamma delta. Epsilon zeta."
     chunks = chunk_text(text, chunk_size=15)
     assert " ".join(chunks).split() == text.split()
+
+
+def test_overlong_sentence_splits_on_clauses_by_default():
+    text = ("The door opened slowly, the corridor was dark, the air was cold; "
+            "nobody had been here for years, and the dust proved it.")
+    chunks = chunk_text(text, chunk_size=60)
+    assert len(chunks) > 1
+    assert all(len(c) <= 60 for c in chunks)
+    assert " ".join(chunks).split() == text.split()
+
+
+def test_clause_splitting_can_be_disabled():
+    text = ("The door opened slowly, the corridor was dark, the air was cold; "
+            "nobody had been here for years, and the dust proved it.")
+    assert chunk_text(text, chunk_size=60, split_on_clauses=False) == [text]
+
+
+def test_short_sentences_are_never_clause_split():
+    assert chunk_text("Yes, sir.", chunk_size=120) == ["Yes, sir."]
