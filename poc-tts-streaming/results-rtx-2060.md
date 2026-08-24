@@ -134,19 +134,63 @@ question reduces to "does windowed vocoding of the same tokens sound the
 same", not "does chopping the sentence change the delivery". It does not:
 the sentence is never chopped.
 
-One honest qualification, measured on 2026-08-24. The identity test drives
-`on_block` with a callback that does nothing, and *there* the loop is
-byte-identical. The **production** callback vocodes, and vocoding consumes
-torch RNG — `CausalConditionalCFM.forward` does `z = torch.randn_like(mu)`
-unconditionally even when `noised_mels` is supplied
-(`s3gen/flow_matching.py:216`), and HiFTGAN's NSF source draws
-`torch.randn_like` per call (`s3gen/hifigan.py:226,282`). So a block-streamed
-utterance is a *different draw* from what the sentence path produces off the
-same seed, not the same one. Over 40 seeds the no-op callback reproduced
-`t3.generate`'s token counts exactly (40/40 identical); the vocoding callback
-did not. This is a re-roll of the dice, not a change of distribution — see the
-active-speech numbers in the EOS subsection below — but the loop's "must not
-consume torch RNG" docstring is violated on the path that ships.
+**The invariant was violated on the shipping path, and is now fixed.** Found
+2026-08-24: the identity test drove `on_block` with a callback that does
+nothing, and *there* the loop was byte-identical — but the **production**
+callback vocodes, and vocoding consumes torch RNG.
+`CausalConditionalCFM.forward` does `z = torch.randn_like(mu)` unconditionally
+even when `noised_mels` is supplied (`s3gen/flow_matching.py:216`, the draw is
+made and *then* overwritten), and HiFTGAN's NSF source draws `torch.randn_like`
+per call (`s3gen/hifigan.py:226,282`) plus a `Uniform.sample` for the sine
+phase (`:212`). Every window therefore advanced the same global stream the
+decode loop samples its *later* blocks from, and `_MelWindow.__init__`'s noise
+pre-draw shifted it once more before the loop even started. Over 40 seeds the
+no-op callback reproduced `t3.generate`'s token counts exactly (40/40); the
+vocoding callback did not. Same distribution, different utterance — so
+"byte-identical tokens / same prosody as the sentence path" was false of the
+path that ships.
+
+The fix (2026-08-24) is `engine_blockstream._fork_rng`: `torch.random.fork_rng`
+around the noise pre-draw and around each `_MelWindow.push`, snapshotting the
+CPU generator and the CUDA device's and restoring both on exit. `randn_like`
+takes no `generator` argument, so routing the vocoder at a private
+`torch.Generator` would mean forking the installed package; fencing the global
+one is the practical route. Inside the fence the vocoder still gets
+deterministic noise for a fixed seed; outside it the decode loop walks exactly
+the stream `t3.generate` would. One fence per window and one for the pre-draw
+— never one around the whole utterance, which would put the T3 draws inside it.
+
+- **Overhead: 31.8 µs per fence** (5056-byte CPU state copy + 16-byte CUDA
+  one, each way), against a 130 ms mean window on this box — **0.024 %**. A
+  5.45 s utterance pays 0.22 ms across 6 windows and the pre-draw, against
+  782 ms of vocoding. Not measurable in TTFA.
+- **Cover.** `test_generate_blocks_matches_generate` now runs twice: with the
+  no-op callback (pins the loop copy) *and* with the real vocoding one (pins
+  the fence). `test_block_and_sentence_engines_draw_the_same_tokens` compares
+  the two engines end to end — one sentence, one seed, identical trimmed token
+  tensors. Both were confirmed to fail with the fence disabled: the vocoding
+  half drew 109 tokens against `t3.generate`'s 120, and the two engines drew
+  82 against 99.
+- **Scope of the guarantee: per chunk, from the same RNG state.** Across a
+  multi-chunk utterance from a single seed the two engines still diverge from
+  chunk two on, for the mirror-image reason: the *sentence* path's vocoder
+  consumes global RNG between chunks (it is one `model.generate` call, T3 and
+  S3Gen together) and the fenced block path's no longer does. Fixing that
+  would mean fencing the sentence path too, which changes its output for a
+  given seed on the flag-off path. Not done here.
+- **Audio, same tokens.** The two renders still differ, because their vocoder
+  noise differs: the block path slices one fixed pre-draw across its windows,
+  the sentence path takes a fresh CFM `z` for the utterance. Reported by the
+  end-to-end test, not asserted: rel RMS 125.5 %, **log-mel 4.55 %** — against
+  a control of the same tokens through `s3gen.inference` *twice*, which is
+  rel RMS 112.6 % / **log-mel 4.12 %**. Two renders of one token sequence are
+  near-uncorrelated sample-wise whatever you do (the CFM redraws a full-length
+  `z` per call, so each is a fresh sample of the same distribution), which is
+  why only the phase-blind number is worth reading — and on it the block path
+  sits at the redraw floor. Note this control is *not* `spike_analysis
+  paired`'s 0.06–0.16 % one: that holds the mel fixed and re-runs only
+  HiFTGAN, isolating the windowed vocoder; this one holds only the tokens
+  fixed, which is what "same seed, two engines" actually means.
 
 ### TTFA (benched configuration)
 
@@ -401,8 +445,9 @@ the user heard is unresolved; nothing in 160 paired runs produced trailing
 *speech* on either path. Two follow-ups were opened and neither belonged to the
 streaming spike: cap or trim the unterminated budget (it changes the
 flag-off path too), and decide whether the RNG re-roll noted under "Prosody"
-should be fenced off with `torch.random.fork_rng`. The first is now done — see
-the next subsection; the second is still open.
+should be fenced off with `torch.random.fork_rng`. Both are now done — the
+first in the next subsection, the second under "Prosody is preserved by
+construction" above (fenced, 31.8 µs per window).
 
 Regression cover added:
 `tests/test_blockstream.py::test_generate_blocks_stops_at_the_eos_block`
@@ -532,10 +577,12 @@ trim above.
   whole-waveform glitch scan whose maxima are comparable between the two paths
   on the same text. ✅
 - Prosody: T3 sees the whole sentence, and the block loop is byte-identical to
-  `generate` for a given RNG stream (identity test). The shipping callback
-  consumes RNG while vocoding, so the *draw* differs from the sentence path —
-  distributionally the same, not the same utterance. ✅ with the qualification
-  under "Prosody is preserved by construction".
+  `generate` for a given RNG stream (identity test). The shipping callback used
+  to break that by consuming RNG while vocoding; since 2026-08-24 those draws
+  are fenced with `torch.random.fork_rng` (31.8 µs per window, 0.024 %) and
+  both engines draw the same tokens from the same seed on a chunk. ✅ — read
+  the scope note under "Prosody is preserved by construction": the guarantee is
+  per chunk, and multi-chunk utterances still diverge from chunk two.
 - Chunk-edge silence: trimmed to 120 ms per edge on both engines
   (2026-08-24). Runaway chunks go from 12.00 s to 1.75 s / 2.85 s, and every
   ordinary chunk join sheds 0.15–0.6 s. ✅

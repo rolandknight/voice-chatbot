@@ -84,13 +84,47 @@ def _t3_kwargs(engine, model, text: str, config: dict) -> dict:
     )
 
 
+def _prepare_conds(model, config):
+    """Point the model at the bench voice and return its path."""
+    from poc_tts_streaming.config import voice_paths
+    from poc_tts_streaming.engine_flash import resolve_voice_path
+
+    voice = config.get("bench", {}).get("voice", "one-one.mp3")
+    prompt = str(resolve_voice_path(voice, voice_paths(config)))
+    model.prepare_conditionals(
+        prompt, exaggeration=float(config["generation"]["exaggeration"]),
+    )
+    return voice
+
+
 @gpu
 def test_generate_blocks_matches_generate(loaded):
-    """Same seed in, same speech tokens out -- hooking must be side-effect free."""
-    from poc_tts_streaming.engine_blockstream import generate_blocks
+    """Same seed in, same speech tokens out -- hooking must be side-effect free.
+
+    Driven twice, because the two runs pin different things:
+
+    1. a **no-op** callback, which pins the copied decode loop itself against
+       drift in the installed ``ChatterboxFlashT3.generate``; and
+    2. the **real vocoding** callback the engine ships, which pins the RNG
+       fence. Vocoding draws noise -- ``flow_matching.py:216``'s
+       ``randn_like`` (unconditional even with ``noised_mels`` supplied) and
+       HiFTGAN's per-call NSF source noise -- and it happens *inside* the
+       decode loop. Until ``_MelWindow`` fenced those draws behind
+       ``_fork_rng`` (and its own noise pre-draw with them), every window
+       advanced the same global stream the loop's later blocks sample from, so
+       the path that actually ships sampled a different utterance from
+       ``t3.generate``'s off the same seed. Case (1) could not see that: a
+       callback that does nothing draws nothing.
+
+    The ``_MelWindow`` is built *after* the seed, exactly as ``_stream_chunk``
+    builds it before ``generate_blocks``, so an unfenced pre-draw shifts the
+    stream here too.
+    """
+    from poc_tts_streaming.engine_blockstream import _MelWindow, generate_blocks
 
     engine, model, config = loaded
     text = "I checked the calendar for tomorrow and you have three meetings."
+    _prepare_conds(model, config)
     kwargs = _t3_kwargs(engine, model, text, config)
 
     torch.manual_seed(0)
@@ -117,6 +151,36 @@ def test_generate_blocks_matches_generate(loaded):
     for prefix in seen:
         n = int(prefix.size(1))
         assert torch.equal(prefix, hooked[:, :n]), "a callback prefix diverged"
+
+    # ---- and again with the callback the engine actually runs.
+    vocoded: list[int] = []
+    torch.manual_seed(0)
+    window = _MelWindow(
+        model.s3gen, model.conds.gen,
+        int(config["generation"]["n_cfm_timesteps"]),
+        int(kwargs["total_speech_len"]),
+    )
+
+    def vocode(tokens: torch.Tensor) -> None:
+        trimmed = model._trim_to_eos(tokens[0])
+        vocoded.append(window.push(trimmed.to(model.device), finalize=False).size)
+
+    real = generate_blocks(model.t3, on_block=vocode, **kwargs)
+
+    assert sum(1 for n in vocoded if n) >= 2, (
+        f"the vocoding callback produced no audio ({vocoded}) -- this run has "
+        "to actually draw noise or it pins nothing"
+    )
+    assert real.shape == reference.shape, (
+        f"shape drift under the vocoding callback: {tuple(real.shape)} vs "
+        f"reference {tuple(reference.shape)} -- vocoding moved the RNG stream"
+    )
+    assert torch.equal(real, reference), (
+        f"{int((real != reference).sum())} of {reference.numel()} tokens differ "
+        "under the vocoding callback -- the _fork_rng fence around _MelWindow "
+        "is not holding, so the shipping path is a different draw from "
+        "t3.generate's"
+    )
 
 
 @gpu
@@ -207,6 +271,146 @@ def test_blockstream_engine_end_to_end(loaded):
         f"{total} samples is not a whole number of tokens "
         f"({total / bs.SAMPLES_PER_TOKEN:.3f})"
     )
+
+
+@gpu
+def test_block_and_sentence_engines_draw_the_same_tokens(loaded, monkeypatch, capsys):
+    """One sentence, one seed, both engines -> the same speech tokens.
+
+    ``test_generate_blocks_matches_generate`` pins the copied loop against
+    ``t3.generate``. This pins the two *engines* end to end, which is the claim
+    results-rtx-2060.md makes to users: switching block streaming on is not
+    supposed to change what gets said, only when you hear it.
+
+    Scope: one chunk (``split_text=False`` on a sentence), seeded immediately
+    before each render. That is the fence's reach and no further -- across a
+    multi-chunk utterance from a single seed the two engines still diverge from
+    chunk two on, because the *sentence* path's vocoder consumes global RNG
+    between chunks and the fenced block path's no longer does. See the Prosody
+    section of results-rtx-2060.md.
+
+    The tokens being identical, the two renders differ only in vocoder noise
+    (a fixed pre-draw sliced per window here, one fresh draw per utterance
+    there, plus per-call NSF source noise on both). That difference is
+    *reported*, not asserted -- it is the windowed-vocoder divergence the spike
+    already measured, not something this test is in a position to bound. Run
+    with ``-s`` to see it.
+    """
+    from poc_tts_streaming import engine_blockstream as bs
+    from poc_tts_streaming.config import voice_paths
+    from poc_tts_streaming.engine_flash import FlashEngine
+
+    _engine, model, config = loaded
+    # trim_silence off on both: the gate cuts edge samples, and a per-sample
+    # comparison needs the raw draws. Token identity is unaffected either way.
+    engine_cfg = {**config.get("engine", {}), "trim_silence": False}
+    paths = voice_paths(config)
+    block = bs.BlockStreamEngine(
+        engine_cfg=engine_cfg,
+        generation_cfg=config.get("generation", {}),
+        voice_paths=paths,
+    )
+    sentence = FlashEngine(
+        engine_cfg=engine_cfg,
+        generation_cfg=config.get("generation", {}),
+        voice_paths=paths,
+    )
+    block._model = sentence._model = model   # one set of weights, two engines
+    voice = config.get("bench", {}).get("voice", "one-one.mp3")
+    text = "I checked the calendar for tomorrow and you have three meetings."
+
+    original = model._trim_to_eos
+    captured: list[torch.Tensor] = []
+
+    def spy(speech_tokens):
+        out = original(speech_tokens)
+        captured.append(out.clone())
+        return out
+
+    monkeypatch.setattr(model, "_trim_to_eos", spy)
+
+    seed = 11
+    torch.manual_seed(seed)
+    block_pcm = np.concatenate(
+        [pcm for _, pcm in block.synthesize_stream(text, voice, split_text=False)]
+    )
+    block_tokens = captured[-1]          # the tail push's trimmed tokens
+    n_block_calls = len(captured)
+
+    captured.clear()
+    torch.manual_seed(seed)
+    sentence_pcm = np.concatenate(
+        [pcm for _, pcm in sentence.synthesize_stream(text, voice, split_text=False)]
+    )
+    assert len(captured) == 1, (
+        f"the sentence path trimmed {len(captured)} times for one chunk; the "
+        "spy is not reading what it thinks it is"
+    )
+    sentence_tokens = captured[0]
+
+    assert n_block_calls > 1, (
+        "the block path only trimmed once -- it did not stream, so this "
+        "comparison is vacuous"
+    )
+    assert block_tokens.shape == sentence_tokens.shape, (
+        f"block drew {tuple(block_tokens.shape)} tokens, sentence "
+        f"{tuple(sentence_tokens.shape)} -- the two paths diverged from seed "
+        f"{seed}"
+    )
+    assert torch.equal(block_tokens, sentence_tokens), (
+        f"{int((block_tokens != sentence_tokens).sum())} of "
+        f"{sentence_tokens.numel()} tokens differ between the engines at seed "
+        f"{seed} -- something outside the vocoder fence is consuming RNG"
+    )
+
+    # Reported, not asserted: same tokens, different vocoder noise. The control
+    # is the *same* tokens through s3gen.inference twice, which is the floor
+    # any two renders sit at -- the CFM redraws a full-length `z` every call,
+    # so each render is a fresh sample of the same distribution and the two
+    # waveforms are near-uncorrelated sample-wise however identical they sound.
+    # That is why the raw rel-RMS is uninformative on its own and the
+    # phase-blind log-mel number next to it is the one to read.
+    assert block_pcm.shape == sentence_pcm.shape, (
+        f"identical tokens but {block_pcm.size} vs {sentence_pcm.size} samples"
+    )
+    n_cfm = int(config["generation"]["n_cfm_timesteps"])
+    one_shot = [
+        model.s3gen.inference(
+            speech_tokens=sentence_tokens.to(model.device),
+            ref_dict=model.conds.gen, n_cfm_timesteps=n_cfm,
+        )[0].detach().float().cpu().numpy().reshape(-1)
+        for _ in range(2)
+    ]
+
+    def rel(x, y):
+        return float(np.sqrt(np.mean((x - y) ** 2)) / np.sqrt(np.mean(y ** 2)))
+
+    def logmel_rel(x, y):
+        try:
+            import librosa
+        except ImportError:  # pragma: no cover - librosa ships with the model
+            return float("nan")
+        lm = lambda v: np.log(librosa.feature.melspectrogram(  # noqa: E731
+            y=v.astype(np.float32), sr=block.sr,
+            n_fft=1024, hop_length=256, n_mels=80,
+        ) + 1e-8)
+        a, b = lm(x), lm(y)
+        k = min(a.shape[1], b.shape[1])
+        return float(
+            np.sqrt(np.mean((a[:, :k] - b[:, :k]) ** 2))
+            / np.sqrt(np.mean(b[:, :k] ** 2))
+        )
+
+    with capsys.disabled():
+        print(
+            f"\n[same {sentence_tokens.numel()} tokens] block vs sentence audio: "
+            f"peak |d| {float(np.abs(block_pcm - sentence_pcm).max()):.4f}, "
+            f"rel RMS {rel(block_pcm, sentence_pcm):.2%}, "
+            f"log-mel {logmel_rel(block_pcm, sentence_pcm):.2%}  |  CONTROL "
+            f"(one-shot vs one-shot, same tokens) rel RMS "
+            f"{rel(one_shot[0], one_shot[1]):.2%}, "
+            f"log-mel {logmel_rel(one_shot[0], one_shot[1]):.2%}"
+        )
 
 
 @gpu
