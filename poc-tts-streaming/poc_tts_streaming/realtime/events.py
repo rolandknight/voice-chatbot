@@ -118,7 +118,7 @@ def parse_client_event(raw: str) -> ClientEvent:
         raise EventError("invalid_json", "event must be a JSON object")
     event_id = data.get("event_id") if isinstance(data.get("event_id"), str) else None
     type_ = data.get("type")
-    if type_ in UNSUPPORTED:
+    if isinstance(type_, str) and type_ in UNSUPPORTED:
         raise EventError("unsupported_event",
                          f"'{type_}' is not supported by this server (text-to-speech only)",
                          param="type", event_id=event_id)

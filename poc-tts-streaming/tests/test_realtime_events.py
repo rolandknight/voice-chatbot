@@ -57,6 +57,13 @@ def test_schema_failure_names_the_param():
     assert exc.value.param == "item_id"
 
 
+@pytest.mark.parametrize("raw", ['{"type": ["a", "b"]}', '{"type": {"x": 1}}', '{"type": 7}'])
+def test_non_string_type_is_unknown_event_not_a_crash(raw):
+    with pytest.raises(EventError) as exc:
+        parse_client_event(raw)
+    assert exc.value.code == "unknown_event"
+
+
 def test_server_event_adds_an_event_id():
     ev = server_event(E.SESSION_CREATED, session={"id": "sess_x"})
     assert ev["type"] == "session.created"
