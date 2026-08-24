@@ -841,6 +841,7 @@ document.addEventListener('DOMContentLoaded', async function () {
     let rt = null;                      // RealtimeTtsClient
     let analyser = null, meterRaf = null, meterCtx = null;
     let metrics = null;                 // per-response timing
+    let lastDownloadUrl = null;         // blob URL for the last recorded utterance
     const $ = (id) => document.getElementById(id);
 
     function logEvent(kind, ev) {
@@ -887,6 +888,26 @@ document.addEventListener('DOMContentLoaded', async function () {
         rt.on('response.done', (ev) => { if (metrics) { metrics.done = performance.now(); metrics.status = ev.response.status; renderMetrics(); } $('stop-btn').disabled = true; isGenerating = false; hideLoadingOverlay(); });
         rt.on('output_audio_buffer.stopped', () => { if (metrics) { metrics.stopped = performance.now(); renderMetrics(); } });
         rt.on('error', (ev) => showNotification(`${ev.error.code}: ${ev.error.message}`, 'error'));
+
+        // --- MediaRecorder capture of the remote stream, for offline A/B download ---
+        let recorder = null, recorded = [];
+        rt.on('response.created', () => {
+            if (!rt.remoteStream) return;
+            recorded = [];
+            const mimeType = (window.MediaRecorder && MediaRecorder.isTypeSupported('audio/webm;codecs=opus'))
+                ? 'audio/webm;codecs=opus' : null;
+            recorder = mimeType ? new MediaRecorder(rt.remoteStream, { mimeType }) : new MediaRecorder(rt.remoteStream);
+            recorder.ondataavailable = (e) => { if (e.data.size) recorded.push(e.data); };
+            recorder.onstop = () => {
+                if (lastDownloadUrl) URL.revokeObjectURL(lastDownloadUrl);
+                lastDownloadUrl = URL.createObjectURL(new Blob(recorded, { type: 'audio/webm' }));
+                const a = $('download-last'); a.href = lastDownloadUrl; a.hidden = false;
+            };
+            recorder.start(250);
+        });
+        rt.on('output_audio_buffer.stopped', () => { if (recorder && recorder.state === 'recording') recorder.stop(); });
+        rt.on('output_audio_buffer.cleared', () => { if (recorder && recorder.state === 'recording') recorder.stop(); });
+
         await rt.connect();
         return rt;
     }
