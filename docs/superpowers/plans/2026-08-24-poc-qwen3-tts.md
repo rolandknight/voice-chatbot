@@ -65,7 +65,7 @@
   ```
 - [ ] Root `Makefile`: `poc-qwen`, `poc-qwen3-tts-setup`, `poc-qwen3-tts-bench`, `poc-qwen3-tts-test`, each `@$(MAKE) -C poc-qwen <target>`; add to `.PHONY` and `help`.
 - [ ] `.gitignore`: `.venv/`, `__pycache__/`, `reports/*.wav`, `.env`.
-- [ ] Commit: `feat(poc-qwen3-tts): skeleton, uv toolchain, MLX smoke test`.
+- [ ] Commit: `feat(poc-qwen3-tts): skeleton, mise toolchain, MLX smoke test`.
 
 **Verify:** `make smoke` produces `reports/smoke.wav` that sounds like the one-one clip. Record wall time and model download size in the README.
 
