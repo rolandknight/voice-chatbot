@@ -11,3 +11,6 @@
 {"ts": 1787600974.2635221, "tab": "Voice Clone", "model": "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16", "load_s": 2.139, "warm_s": 1.021, "gen_s": 2.147, "audio_s": 5.36, "rtf": 0.401, "chunks": 1, "chars": 104, "mode": "icl"}
 {"ts": 1787601138.777282, "tab": "TTS", "model": "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-bf16", "load_s": 162.924, "warm_s": 0.612, "gen_s": 0.898, "audio_s": 2.64, "rtf": 0.34, "chunks": 1, "chars": 30}
 {"ts": 1787601473.9795918, "tab": "Voice Design", "model": "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16", "load_s": 0.287, "warm_s": 0.473, "gen_s": 1.352, "audio_s": 4.08, "rtf": 0.331, "chunks": 1, "chars": 43}
+{"ts": 1787602021.223959, "tab": "Voice Clone", "model": "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16", "load_s": 0.0, "warm_s": 0.012, "gen_s": 0.0, "audio_s": 0.3, "rtf": 0.0, "chunks": 1, "chars": 6, "mode": "icl"}
+{"ts": 1787602021.228381, "tab": "Voice Design", "model": "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16", "load_s": 0.0, "warm_s": 0.0, "gen_s": 0.0, "audio_s": 0.15, "rtf": 0.0, "chunks": 1, "chars": 3}
+{"ts": 1787602021.22852, "tab": "TTS", "model": "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-bf16", "load_s": 0.0, "warm_s": 0.0, "gen_s": 0.0, "audio_s": 0.15, "rtf": 0.0, "chunks": 1, "chars": 3}

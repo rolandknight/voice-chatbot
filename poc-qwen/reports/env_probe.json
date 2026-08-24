@@ -10,5 +10,5 @@
     "max_buffer_length": 22613000192,
     "resource_limit": 499000
   },
-  "mlx_audio": "unknown"
+  "mlx_audio": "0.5.0"
 }

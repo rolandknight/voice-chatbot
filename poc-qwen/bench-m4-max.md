@@ -32,7 +32,7 @@ two warm repeats; the first repeat per model is recorded `cold: true` in
   — the model simply speaks more slowly. Whole-utterance is not the
   interesting number here anyway; see streaming below.
 
-## Streaming spike (`make spike`, `stream=True`)
+## Streaming spike (`make bench-stream`, `stream=True`)
 
 Medium sentence, 1.7B and 0.6B, mlx-audio's chunked decode
 (`streaming_interval` seconds per chunk), warm run. Raw rows in
@@ -79,5 +79,5 @@ existing `Qwen3Engine.stream_clone()` generator — it already yields float32
 ## Reproduce
 
     make bench          # both sizes, 3 repeats  -> reports/runs.jsonl
-    make spike          # stream=True            -> reports/stream_spike.jsonl
+    make bench-stream   # stream=True            -> reports/stream_spike.jsonl
     make                # Gradio app on :8007

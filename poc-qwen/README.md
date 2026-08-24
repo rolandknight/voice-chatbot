@@ -8,7 +8,8 @@ with preset speakers — running Qwen3-TTS on the M4 Max GPU via mlx-audio.
     make              # install anything missing, then serve on http://127.0.0.1:8007
     make smoke        # go/no-go: clone voices/one-one.mp3 with 0.6B -> reports/smoke.wav
     make bench        # latency/RTF sweep -> reports/runs.jsonl (see bench-m4-max.md)
-    make spike        # stream=True TTFA spike -> reports/stream_spike.jsonl
+    make models       # pre-download all selectable models (~14 GB)
+    make bench-stream # stream=True TTFA spike -> reports/stream_spike.jsonl
     make test         # GPU-free unit tests (engine mocked)
     make clean        # drop the venv
 
