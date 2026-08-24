@@ -890,17 +890,18 @@ document.addEventListener('DOMContentLoaded', async function () {
         rt.on('error', (ev) => showNotification(`${ev.error.code}: ${ev.error.message}`, 'error'));
 
         // --- MediaRecorder capture of the remote stream, for offline A/B download ---
-        let recorder = null, recorded = [];
+        let recorder = null;
         rt.on('response.created', () => {
-            if (!rt.remoteStream) return;
-            recorded = [];
-            const mimeType = (window.MediaRecorder && MediaRecorder.isTypeSupported('audio/webm;codecs=opus'))
+            if (!window.MediaRecorder || !rt.remoteStream) return;
+            const chunks = [];
+            const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
                 ? 'audio/webm;codecs=opus' : null;
             recorder = mimeType ? new MediaRecorder(rt.remoteStream, { mimeType }) : new MediaRecorder(rt.remoteStream);
-            recorder.ondataavailable = (e) => { if (e.data.size) recorded.push(e.data); };
+            recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
             recorder.onstop = () => {
+                const blob = new Blob(chunks, { type: 'audio/webm' });
                 if (lastDownloadUrl) URL.revokeObjectURL(lastDownloadUrl);
-                lastDownloadUrl = URL.createObjectURL(new Blob(recorded, { type: 'audio/webm' }));
+                lastDownloadUrl = URL.createObjectURL(blob);
                 const a = $('download-last'); a.href = lastDownloadUrl; a.hidden = false;
             };
             recorder.start(250);
