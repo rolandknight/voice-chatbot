@@ -172,7 +172,14 @@ def main() -> None:
     log.info("voices: %s", list(voices))
     demo = build_demo(Handlers(engine, voices))
     host = os.environ.get("HOST", cfg["server"]["host"])
-    demo.queue(default_concurrency_limit=1).launch(server_name=host, server_port=int(cfg["server"]["port"]), share=False, show_error=True)
+    demo.queue(default_concurrency_limit=1).launch(
+        server_name=host,
+        server_port=int(cfg["server"]["port"]),
+        share=False,
+        show_error=True,
+        # Preset clips live outside the app dir; Gradio only serves allow-listed paths.
+        allowed_paths=[str(d) for d in voice_dirs(cfg)],
+    )
 
 
 if __name__ == "__main__":

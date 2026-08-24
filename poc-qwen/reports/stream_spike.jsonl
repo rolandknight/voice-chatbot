@@ -1,0 +1,8 @@
+{"size": "0.6B", "interval_s": 0.32, "repeat": 0, "cold": true, "ttfa_s": 4.418, "chunks": 19, "chunk_s_median": 0.32, "gap_s_median": 0.083, "gap_s_max": 0.084, "total_s": 5.91, "audio_s": 5.84}
+{"size": "0.6B", "interval_s": 0.32, "repeat": 1, "cold": false, "ttfa_s": 0.12, "chunks": 21, "chunk_s_median": 0.32, "gap_s_median": 0.083, "gap_s_max": 0.084, "total_s": 1.747, "audio_s": 6.48}
+{"size": "0.6B", "interval_s": 0.64, "repeat": 0, "cold": true, "ttfa_s": 0.196, "chunks": 10, "chunk_s_median": 0.64, "gap_s_median": 0.16, "gap_s_max": 0.16, "total_s": 1.538, "audio_s": 5.92}
+{"size": "0.6B", "interval_s": 0.64, "repeat": 1, "cold": false, "ttfa_s": 0.196, "chunks": 10, "chunk_s_median": 0.64, "gap_s_median": 0.16, "gap_s_max": 0.16, "total_s": 1.557, "audio_s": 6.0}
+{"size": "1.7B", "interval_s": 0.32, "repeat": 0, "cold": true, "ttfa_s": 2.608, "chunks": 18, "chunk_s_median": 0.32, "gap_s_median": 0.106, "gap_s_max": 0.107, "total_s": 4.415, "audio_s": 5.68}
+{"size": "1.7B", "interval_s": 0.32, "repeat": 1, "cold": false, "ttfa_s": 0.181, "chunks": 18, "chunk_s_median": 0.32, "gap_s_median": 0.106, "gap_s_max": 0.107, "total_s": 1.963, "audio_s": 5.6}
+{"size": "1.7B", "interval_s": 0.64, "repeat": 0, "cold": true, "ttfa_s": 0.28, "chunks": 9, "chunk_s_median": 0.64, "gap_s_median": 0.205, "gap_s_max": 0.207, "total_s": 1.902, "audio_s": 5.6}
+{"size": "1.7B", "interval_s": 0.64, "repeat": 1, "cold": false, "ttfa_s": 0.28, "chunks": 8, "chunk_s_median": 0.64, "gap_s_median": 0.205, "gap_s_max": 0.207, "total_s": 1.696, "audio_s": 4.96}

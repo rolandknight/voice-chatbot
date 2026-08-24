@@ -75,3 +75,9 @@ def test_discover_voices_and_sidecar(tmp_path):
     assert list(voices) == ["bob"]
     assert sidecar_transcript(voices["bob"]) == "hello"
     assert sidecar_transcript(tmp_path / "none.wav") is None
+
+
+def test_warmup_exercises_icl_path(engine, fake_loader):
+    engine.clone("Hi.", REF, "t", size="0.6B")
+    warm = fake_loader.loaded[0].calls[0]
+    assert "ref_audio" in warm and warm["ref_text"] == "Warm up."

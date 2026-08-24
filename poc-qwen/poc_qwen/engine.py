@@ -128,7 +128,13 @@ class Qwen3Engine:
                 speakers = model.get_supported_speakers() or ["ryan"]
                 list(model.generate(text=WARMUP_TEXT, voice=speakers[0], lang_code="english"))
             else:
-                list(model.generate(text=WARMUP_TEXT, lang_code="english"))
+                # Exercise the ICL clone path too (reference encoder + prefill),
+                # otherwise the first real clone still pays ~5 s of kernel
+                # compilation on top of the plain-generate warm-up.
+                import mlx.core as mx
+
+                noise = mx.array((np.random.default_rng(0).standard_normal(SAMPLE_RATE) * 0.01).astype(np.float32))
+                list(model.generate(text=WARMUP_TEXT, ref_audio=noise, ref_text="Warm up.", lang_code="english"))
         except Exception as exc:  # warm-up is best effort
             log.warning("warm-up failed for %s: %s", model_id, exc)
         self._warm_s[model_id] = time.perf_counter() - t0
