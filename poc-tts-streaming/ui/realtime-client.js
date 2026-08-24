@@ -81,12 +81,12 @@ class RealtimeTtsClient {
       this._pending.delete(ev.error.event_id);
     }
     for (const [id, p] of this._pending) {
-      if (ev.type === p.okType) { p.resolve(ev); this._pending.delete(id); }
+      if (ev.type === p.okType) { this._pending.delete(id); p.resolve(ev); break; }  // Map iterates in insertion order: oldest first
     }
   }
 
   send(event, okType = null) {
-    if (!this.dc || this.dc.readyState !== "open") throw new Error("not connected");
+    if (!this.dc || this.dc.readyState !== "open") return Promise.reject(new Error("not connected"));
     const event_id = `evt_${++this._seq}`;
     const full = { event_id, ...event };
     this.dc.send(JSON.stringify(full));
