@@ -21,11 +21,21 @@ def _bench_sentences() -> list[str]:
     return [text for _label, text in SENTENCES]
 
 
-def test_block_streaming_defaults_off():
-    """The spike must not be reachable from a stock checkout."""
+def test_block_streaming_defaults_on_for_cuda_torch():
+    """block_streaming defaults true in config.yaml, but the resolved engine
+    only takes the spike path on device=='cuda' with backend=='torch' -- the
+    only combination engine_blockstream.BlockStreamEngine can run (it hooks a
+    copied torch-SDPA T3 loop). Every other resolved device/backend falls
+    back to sentence streaming regardless of the flag."""
     from poc_tts_streaming.config import load_config
+    from poc_tts_streaming.engine_flash import block_streaming_effective
 
-    assert load_config()["engine"]["block_streaming"] is False
+    assert load_config()["engine"]["block_streaming"] is True
+
+    assert block_streaming_effective(True, "cuda", "torch") is True
+    assert block_streaming_effective(True, "cpu", "torch") is False
+    assert block_streaming_effective(True, "cuda", "mlx") is False
+    assert block_streaming_effective(False, "cuda", "torch") is False
 
 
 @pytest.fixture(scope="module")

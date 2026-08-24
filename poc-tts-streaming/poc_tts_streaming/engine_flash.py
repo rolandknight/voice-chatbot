@@ -104,6 +104,13 @@ def resolve_backend(
     return requested
 
 
+def block_streaming_effective(flag: bool, device: str, backend: str) -> bool:
+    """The block path hooks the copied torch-SDPA T3 loop, so it exists only
+    for device=='cuda' with backend=='torch'. Everything else falls back to
+    sentence streaming regardless of the flag."""
+    return bool(flag) and device == "cuda" and backend == "torch"
+
+
 # --- text chunking ------------------------------------------------------------
 
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+")

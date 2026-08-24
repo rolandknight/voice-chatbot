@@ -19,8 +19,12 @@ Two pieces are needed:
    ``chatterbox/models/s3gen/s3gen.py:278`` points at.
 
 **This is spike code.** It is gated by ``engine.block_streaming`` in
-config.yaml, which defaults to ``false``; nothing imports it on the reviewed
-paths. See ``results-rtx-2060.md`` for the go/no-go and the evidence.
+config.yaml, which defaults to ``true`` but is only effective when the
+resolved engine is device=='cuda' with backend=='torch' (see
+``engine_flash.block_streaming_effective``) -- server.py imports this module
+only inside that branch, so it stays off the import graph everywhere else,
+including the server tests. See ``results-rtx-2060.md`` for the go/no-go and
+the evidence.
 """
 
 from __future__ import annotations
