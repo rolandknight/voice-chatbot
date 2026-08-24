@@ -203,15 +203,13 @@ def create_app(engine, config: dict, voice_paths: list[Path], *,
     async def script_js():
         return FileResponse(UI_DIR / "script.js", media_type="application/javascript", headers=_NO_STORE)
 
+    @app.get("/realtime-client.js", include_in_schema=False)
+    async def realtime_client_js():
+        return FileResponse(UI_DIR / "realtime-client.js", media_type="application/javascript", headers=_NO_STORE)
+
     @app.get("/styles.css", include_in_schema=False)
     async def styles_css():
         return FileResponse(UI_DIR / "styles.css", media_type="text/css", headers=_NO_STORE)
-
-    @app.get("/vendor/wavesurfer.min.js", include_in_schema=False)
-    async def wavesurfer_js():
-        return FileResponse(
-            UI_DIR / "vendor" / "wavesurfer.min.js", media_type="application/javascript"
-        )
 
     @app.get("/api/model-info")
     async def model_info():

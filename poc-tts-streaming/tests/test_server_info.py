@@ -220,3 +220,10 @@ def test_tag_using_presets_are_identifiable_by_their_text(client):
 def test_flash_reports_no_paralinguistic_support(client):
     """The filter above is keyed on this flag, so it must actually be false."""
     assert client.get("/api/model-info").json()["supports_paralinguistic_tags"] is False
+
+
+def test_realtime_client_js_is_served_uncached(client):
+    r = client.get("/realtime-client.js")
+    assert r.status_code == 200
+    assert "RealtimeTtsClient" in r.text
+    assert r.headers["cache-control"] == "no-store, must-revalidate"
