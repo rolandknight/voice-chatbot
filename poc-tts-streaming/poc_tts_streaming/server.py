@@ -47,10 +47,10 @@ class ClientSecretStore:
         self._tokens: dict[str, int] = {}
 
     def issue(self, session_patch: dict | None, *, session_factory=None) -> dict:
+        session = session_factory(session_patch).session_object() if session_factory else {}
         value = f"ek_{secrets.token_urlsafe(24)}"
         expires_at = self._clock() + self._ttl
         self._tokens[value] = expires_at
-        session = session_factory(session_patch).session_object() if session_factory else {}
         return {"value": value, "expires_at": expires_at, "session": session}
 
     def verify(self, token: str | None) -> bool:

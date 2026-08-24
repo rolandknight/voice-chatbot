@@ -54,6 +54,15 @@ def test_client_secret_rejects_a_bad_patch_with_the_openai_error_shape(client):
     assert err["param"] == "session.audio.output.voice"
 
 
+def test_rejected_patch_does_not_mint_a_token(client):
+    store = client.app.state.secrets
+    before = len(store._tokens)
+    r = client.post("/v1/realtime/client_secrets",
+                    json={"session": {"audio": {"output": {"voice": "ghost.wav"}}}})
+    assert r.status_code == 400
+    assert len(store._tokens) == before
+
+
 def test_store_expires_tokens():
     t = [1000]
     store = ClientSecretStore(ttl_s=10, clock=lambda: t[0])
