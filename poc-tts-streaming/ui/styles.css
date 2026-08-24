@@ -1810,3 +1810,12 @@ a.btn.disabled {
         justify-content: center;
     }
 }
+
+.pill { padding: 2px 8px; border-radius: 999px; font-size: 12px; background: var(--muted, #e5e7eb); }
+.pill.ok { background: #bbf7d0; } .pill.err { background: #fecaca; }
+#level-meter { height: 8px; background: var(--muted, #e5e7eb); border-radius: 4px; margin: 8px 0; overflow: hidden; }
+#level-bar { height: 100%; width: 0; background: #22c55e; transition: width 60ms linear; }
+.metrics { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; font-variant-numeric: tabular-nums; }
+.metrics dt { opacity: .7; }
+.events-log { max-height: 320px; overflow: auto; font-size: 11px; white-space: pre-wrap; }
+.events-log .out { color: #2563eb; } .events-log .in { color: inherit; } .events-log .err { color: #dc2626; }

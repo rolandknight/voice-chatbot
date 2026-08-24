@@ -280,61 +280,6 @@
                                                 max="4" step="1" value="2" class="form-slider">
                                             <p class="form-hint">The meanflow-distilled vocoder is tuned for 2.</p>
                                         </div>
-                                        <div class="form-group">
-                                            <label for="speed-factor" class="form-label">
-                                                Speed Factor (<span id="speed-factor-value"
-                                                    class="tabular-nums">1.0</span>)
-                                                <span id="speed-factor-warning" class="form-hint hidden"></span>
-                                            </label>
-                                            <input type="range" id="speed-factor" name="speed_factor" min="0.25"
-                                                max="4.0" step="0.05" value="1.0" class="form-slider">
-                                        </div>
-                                        <div class="form-group">
-                                            <label for="seed" class="form-label">Generation Seed</label>
-                                            <input type="number" id="seed" name="seed" value="0"
-                                                placeholder="0 (or -1 for random)" class="form-input narrow"
-                                                title="Enter an integer seed for reproducible results, or -1 for random.">
-                                            <p class="form-hint">Integer for reproducible results. Some engines use 0 or
-                                                -1 for random.</p>
-                                        </div>
-                                        <div id="language-select-container" class="form-group">
-                                            <label for="language" class="form-label">Language</label>
-                                            <select id="language" name="language" class="form-select narrow">
-                                                <option value="ar">Arabic (العربية)</option>
-                                                <option value="zh">Chinese (中文)</option>
-                                                <option value="da">Danish (Dansk)</option>
-                                                <option value="nl">Dutch (Nederlands)</option>
-                                                <option value="en" selected>English</option>
-                                                <option value="fi">Finnish (Suomi)</option>
-                                                <option value="fr">French (Français)</option>
-                                                <option value="de">German (Deutsch)</option>
-                                                <option value="el">Greek (Ελληνικά)</option>
-                                                <option value="he">Hebrew (עברית)</option>
-                                                <option value="hi">Hindi (हिन्दी)</option>
-                                                <option value="it">Italian (Italiano)</option>
-                                                <option value="ja">Japanese (日本語)</option>
-                                                <option value="ko">Korean (한국어)</option>
-                                                <option value="ms">Malay (Bahasa Melayu)</option>
-                                                <option value="no">Norwegian (Norsk)</option>
-                                                <option value="pl">Polish (Polski)</option>
-                                                <option value="pt">Portuguese (Português)</option>
-                                                <option value="ru">Russian (Русский)</option>
-                                                <option value="es">Spanish (Español)</option>
-                                                <option value="sw">Swahili (Kiswahili)</option>
-                                                <option value="sv">Swedish (Svenska)</option>
-                                                <option value="tr">Turkish (Türkçe)</option>
-                                            </select>
-                                        </div>
-                                        <div class="form-group">
-                                            <label for="output-format" class="form-label">Output Format</label>
-                                            <select id="output-format" name="output_format" class="form-select narrow">
-                                                <option value="wav">WAV</option>
-                                                <option value="mp3" selected>MP3</option>
-                                                <option value="opus">Opus</option>
-                                            </select>
-                                            <p class="form-hint">MP3 is recommended for smaller file sizes (e.g.,
-                                                audiobooks).</p>
-                                        </div>
                                         <div class="form-grid__full mt-4 flex-row items-center gap-4">
                                             <button id="save-gen-defaults-btn" type="button" class="btn ghost">Save
                                                 Generation Parameters</button>
@@ -456,7 +401,35 @@
                     </form>
                 </div>
 
-                <div id="audio-player-container" class="mt-8"></div>
+                <section id="stream-panel" class="card mt-8">
+                    <h2 class="card__title">Stream</h2>
+                    <div class="flex-row items-center gap-2 mb-4">
+                        <span id="pill-pc" class="pill">pc: new</span>
+                        <span id="pill-ice" class="pill">ice: new</span>
+                        <span id="pill-dc" class="pill">dc: closed</span>
+                        <button type="button" id="stop-btn" class="btn secondary" disabled>Stop</button>
+                        <button type="button" id="disconnect-btn" class="btn secondary" disabled>Disconnect</button>
+                    </div>
+                    <audio id="remote-audio" autoplay controls></audio>
+                    <div id="level-meter">
+                        <div id="level-bar"></div>
+                    </div>
+                    <dl id="stream-metrics" class="metrics">
+                        <dt>TTFA (browser)</dt>
+                        <dd id="m-ttfa">–</dd>
+                        <dt>TTFA (server)</dt>
+                        <dd id="m-ttfa-server">–</dd>
+                        <dt>Total</dt>
+                        <dd id="m-total">–</dd>
+                        <dt>Audio</dt>
+                        <dd id="m-audio">–</dd>
+                        <dt>Chunks</dt>
+                        <dd id="m-chunks">–</dd>
+                    </dl>
+                    <p class="text-sm">Playback needs a user gesture after a reload: click Generate, not a script.</p>
+                    <h3 class="card__subtitle mt-4">oai-events</h3>
+                    <pre id="events-log" class="events-log"></pre>
+                </section>
 
                 <div class="mt-10">
                     <h2 class="card__title mb-4">Tips & Tricks</h2>

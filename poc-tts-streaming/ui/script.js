@@ -7,8 +7,6 @@ document.addEventListener('DOMContentLoaded', async function () {
     let uiReady = false;
     let listenersAttached = false;
     let isGenerating = false;
-    let wavesurfer = null;
-    let currentAudioBlobUrl = null;
     let saveStateTimeout = null;
     let currentPresetName = null;
 
@@ -22,7 +20,6 @@ document.addEventListener('DOMContentLoaded', async function () {
     let currentModelInfo = null;
     let selectedModelSelector = 'chatterbox-turbo';
     let modelChangesPending = false;
-    let lastMultilingualLanguage = 'en'; // Remember language selection for Multilingual model
 
     let hideChunkWarning = false;
     let hideGenerationWarning = false;
@@ -33,36 +30,6 @@ document.addEventListener('DOMContentLoaded', async function () {
     const API_BASE_URL = IS_LOCAL_FILE ? 'http://localhost:8004' : '';
 
     const DEBOUNCE_DELAY_MS = 750;
-
-    // Language options by model type
-    const LANGUAGES_MULTILINGUAL = [
-        { code: 'ar', name: 'Arabic (العربية)' },
-        { code: 'zh', name: 'Chinese (中文)' },
-        { code: 'da', name: 'Danish (Dansk)' },
-        { code: 'nl', name: 'Dutch (Nederlands)' },
-        { code: 'en', name: 'English' },
-        { code: 'fi', name: 'Finnish (Suomi)' },
-        { code: 'fr', name: 'French (Français)' },
-        { code: 'de', name: 'German (Deutsch)' },
-        { code: 'el', name: 'Greek (Ελληνικά)' },
-        { code: 'he', name: 'Hebrew (עברית)' },
-        { code: 'hi', name: 'Hindi (हिन्दी)' },
-        { code: 'it', name: 'Italian (Italiano)' },
-        { code: 'ja', name: 'Japanese (日本語)' },
-        { code: 'ko', name: 'Korean (한국어)' },
-        { code: 'ms', name: 'Malay (Bahasa Melayu)' },
-        { code: 'no', name: 'Norwegian (Norsk)' },
-        { code: 'pl', name: 'Polish (Polski)' },
-        { code: 'pt', name: 'Portuguese (Português)' },
-        { code: 'ru', name: 'Russian (Русский)' },
-        { code: 'es', name: 'Spanish (Español)' },
-        { code: 'sw', name: 'Swahili (Kiswahili)' },
-        { code: 'sv', name: 'Swedish (Svenska)' },
-        { code: 'tr', name: 'Turkish (Türkçe)' }
-    ];
-    const LANGUAGES_ENGLISH_ONLY = [
-        { code: 'en', name: 'English' }
-    ];
 
     // --- DOM Element Selectors ---
     const appTitleLink = document.getElementById('app-title-link');
@@ -100,13 +67,6 @@ document.addEventListener('DOMContentLoaded', async function () {
     const cfgWeightValueDisplay = document.getElementById('cfg-weight-value');
     const numStepsSlider = document.getElementById('num-steps');
     const cfmTimestepsSlider = document.getElementById('cfm-timesteps');
-    const speedFactorSlider = document.getElementById('speed-factor');
-    const speedFactorValueDisplay = document.getElementById('speed-factor-value');
-    const speedFactorWarningSpan = document.getElementById('speed-factor-warning');
-    const seedInput = document.getElementById('seed');
-    const languageSelectContainer = document.getElementById('language-select-container');
-    const languageSelect = document.getElementById('language');
-    const outputFormatSelect = document.getElementById('output-format');
     const saveGenDefaultsBtn = document.getElementById('save-gen-defaults-btn');
     const genDefaultsStatus = document.getElementById('gen-defaults-status');
     const serverConfigForm = document.getElementById('server-config-form');
@@ -114,7 +74,6 @@ document.addEventListener('DOMContentLoaded', async function () {
     const restartServerBtn = document.getElementById('restart-server-btn');
     const configStatus = document.getElementById('config-status');
     const resetSettingsBtn = document.getElementById('reset-settings-btn');
-    const audioPlayerContainer = document.getElementById('audio-player-container');
     const loadingOverlay = document.getElementById('loading-overlay');
     const loadingMessage = document.getElementById('loading-message');
     const loadingStatusText = document.getElementById('loading-status');
@@ -224,26 +183,10 @@ document.addEventListener('DOMContentLoaded', async function () {
         return notificationDiv;
     }
 
-    function formatTime(seconds) {
-        const minutes = Math.floor(seconds / 60);
-        const secs = Math.floor(seconds % 60).toString().padStart(2, '0');
-        return `${minutes}:${secs}`;
-    }
-
     // --- Theme Management ---
     function applyTheme(theme) {
         const isDark = theme === 'dark';
         document.documentElement.classList.toggle('dark', isDark);
-
-        // WaveSurfer color update
-        if (wavesurfer) {
-            wavesurfer.setOptions({
-                waveColor: isDark ? '#6366f1' : '#a5b4fc',
-                progressColor: isDark ? '#4f46e5' : '#6366f1',
-                cursorColor: isDark ? '#cbd5e1' : '#475569',
-            });
-        }
-
         localStorage.setItem('uiTheme', theme);
     }
 
@@ -262,7 +205,6 @@ document.addEventListener('DOMContentLoaded', async function () {
             last_voice_mode: currentVoiceMode,
             last_predefined_voice: predefinedVoiceSelect ? predefinedVoiceSelect.value : null,
             last_reference_file: cloneReferenceSelect ? cloneReferenceSelect.value : null,
-            last_seed: seedInput ? parseInt(seedInput.value, 10) || 0 : 0,
             last_chunk_size: chunkSizeSlider ? parseInt(chunkSizeSlider.value, 10) : 120,
             last_split_text_enabled: splitTextToggle ? splitTextToggle.checked : true,
             hide_chunk_warning: hideChunkWarning,
@@ -292,19 +234,6 @@ document.addEventListener('DOMContentLoaded', async function () {
         if (!uiReady || !listenersAttached) { return; }
         clearTimeout(saveStateTimeout);
         saveStateTimeout = setTimeout(saveCurrentUiState, DEBOUNCE_DELAY_MS);
-    }
-
-    // --- Speed Factor Warning ---
-    function updateSpeedFactorWarning() {
-        if (speedFactorSlider && speedFactorWarningSpan) {
-            const value = parseFloat(speedFactorSlider.value);
-            if (value !== 1.0) {
-                speedFactorWarningSpan.textContent = "* Experimental, may cause echo.";
-                speedFactorWarningSpan.classList.remove('hidden');
-            } else {
-                speedFactorWarningSpan.classList.add('hidden');
-            }
-        }
     }
 
     // --- Model Management Functions (New Features) ---
@@ -388,50 +317,7 @@ document.addEventListener('DOMContentLoaded', async function () {
         // Refresh presets to filter based on current model type
         populatePresets();
 
-        // Update language options based on model type
-        updateLanguageOptions(modelInfo.type);
-
         console.log('Model UI updated:', modelInfo);
-    }
-
-    function updateLanguageOptions(modelType) {
-        if (!languageSelect || !languageSelectContainer) return;
-
-        const currentValue = languageSelect.value;
-        const isMultilingual = modelType === 'multilingual';
-        const languages = isMultilingual ? LANGUAGES_MULTILINGUAL : LANGUAGES_ENGLISH_ONLY;
-
-        // Save current selection before switching away from Multilingual
-        if (!isMultilingual && currentValue && currentValue !== 'en') {
-            lastMultilingualLanguage = currentValue;
-        }
-
-        // Show/hide language selector based on model type
-        // Only show for multilingual model (or if config says to show it)
-        if (isMultilingual) {
-            languageSelectContainer.classList.remove('hidden');
-        } else {
-            languageSelectContainer.classList.add('hidden');
-        }
-
-        // Clear existing options
-        languageSelect.innerHTML = '';
-
-        // Populate with appropriate languages
-        languages.forEach(lang => {
-            const option = document.createElement('option');
-            option.value = lang.code;
-            option.textContent = lang.name;
-            languageSelect.appendChild(option);
-        });
-
-        // Restore appropriate selection
-        if (isMultilingual) {
-            // Restore last Multilingual language selection
-            languageSelect.value = lastMultilingualLanguage;
-        } else {
-            languageSelect.value = 'en';
-        }
     }
 
     function insertTagAtCursor(tag) {
@@ -599,14 +485,6 @@ document.addEventListener('DOMContentLoaded', async function () {
         populateReferenceFiles();
         populatePresets();
         displayServerConfiguration();
-        if (languageSelectContainer && currentConfig?.ui?.show_language_select === false) {
-            languageSelectContainer.classList.add('hidden');
-        }
-        updateSpeedFactorWarning(); // Initial check for speed factor warning
-        const initialGenResult = currentConfig.initial_gen_result;
-        if (initialGenResult && initialGenResult.outputUrl) {
-            initializeWaveSurfer(initialGenResult.outputUrl, initialGenResult);
-        }
     }
 
     async function fetchInitialData() {
@@ -681,9 +559,6 @@ document.addEventListener('DOMContentLoaded', async function () {
 
         toggleVoiceOptionsDisplay();
 
-        if (seedInput && currentUiState.last_seed !== undefined) seedInput.value = currentUiState.last_seed;
-        else if (seedInput && currentConfig?.generation_defaults?.seed !== undefined) seedInput.value = currentConfig.generation_defaults.seed;
-
         if (splitTextToggle) splitTextToggle.checked = currentUiState.last_split_text_enabled !== undefined ? currentUiState.last_split_text_enabled : true;
 
         if (chunkSizeSlider && currentUiState.last_chunk_size !== undefined) chunkSizeSlider.value = currentUiState.last_chunk_size;
@@ -697,10 +572,6 @@ document.addEventListener('DOMContentLoaded', async function () {
         if (exaggerationValueDisplay) exaggerationValueDisplay.textContent = exaggerationSlider.value;
         if (cfgWeightSlider) cfgWeightSlider.value = genDefaults.cfg_weight !== undefined ? genDefaults.cfg_weight : 0.5;
         if (cfgWeightValueDisplay) cfgWeightValueDisplay.textContent = cfgWeightSlider.value;
-        if (speedFactorSlider) speedFactorSlider.value = genDefaults.speed_factor !== undefined ? genDefaults.speed_factor : 1.0;
-        if (speedFactorValueDisplay) speedFactorValueDisplay.textContent = speedFactorSlider.value;
-        if (languageSelect) languageSelect.value = genDefaults.language || 'en';
-        if (outputFormatSelect) outputFormatSelect.value = currentConfig?.audio_output?.format || 'mp3';
 
         if (hideChunkWarningCheckbox) hideChunkWarningCheckbox.checked = hideChunkWarning;
         if (hideGenerationWarningCheckbox) hideGenerationWarningCheckbox.checked = hideGenerationWarning;
@@ -739,26 +610,22 @@ document.addEventListener('DOMContentLoaded', async function () {
         if (textArea) textArea.addEventListener('input', () => { if (charCount) charCount.textContent = textArea.value.length; debouncedSaveState(); });
         if (predefinedVoiceSelect) predefinedVoiceSelect.addEventListener('change', debouncedSaveState);
         if (cloneReferenceSelect) cloneReferenceSelect.addEventListener('change', debouncedSaveState);
-        if (seedInput) seedInput.addEventListener('change', debouncedSaveState);
         if (splitTextToggle) splitTextToggle.addEventListener('change', () => { toggleChunkControlsVisibility(); debouncedSaveState(); });
         if (chunkSizeSlider) {
             chunkSizeSlider.addEventListener('input', () => { if (chunkSizeValue) chunkSizeValue.textContent = chunkSizeSlider.value; });
             chunkSizeSlider.addEventListener('change', debouncedSaveState);
         }
-        const genParamSliders = [temperatureSlider, exaggerationSlider, cfgWeightSlider, numStepsSlider, cfmTimestepsSlider, speedFactorSlider];
+        const genParamSliders = [temperatureSlider, exaggerationSlider, cfgWeightSlider, numStepsSlider, cfmTimestepsSlider];
         genParamSliders.forEach(slider => {
             if (slider) {
                 const valueDisplayId = slider.id + '-value';
                 const valueDisplay = document.getElementById(valueDisplayId);
                 slider.addEventListener('input', () => {
                     if (valueDisplay) valueDisplay.textContent = slider.value;
-                    if (slider.id === 'speed-factor') updateSpeedFactorWarning(); // Update warning on input
                 });
                 slider.addEventListener('change', debouncedSaveState);
             }
         });
-        if (languageSelect) languageSelect.addEventListener('change', debouncedSaveState);
-        if (outputFormatSelect) outputFormatSelect.addEventListener('change', debouncedSaveState);
 
         // NEW: Model management listeners
         if (modelSelect) {
@@ -893,14 +760,9 @@ document.addEventListener('DOMContentLoaded', async function () {
         if (temperatureSlider && genParams.temperature !== undefined) temperatureSlider.value = genParams.temperature;
         if (exaggerationSlider && genParams.exaggeration !== undefined) exaggerationSlider.value = genParams.exaggeration;
         if (cfgWeightSlider && genParams.cfg_weight !== undefined) cfgWeightSlider.value = genParams.cfg_weight;
-        if (speedFactorSlider && genParams.speed_factor !== undefined) speedFactorSlider.value = genParams.speed_factor;
-        if (seedInput && genParams.seed !== undefined) seedInput.value = genParams.seed;
-        if (languageSelect && genParams.language !== undefined) languageSelect.value = genParams.language;
         if (temperatureValueDisplay && temperatureSlider) temperatureValueDisplay.textContent = temperatureSlider.value;
         if (exaggerationValueDisplay && exaggerationSlider) exaggerationValueDisplay.textContent = exaggerationSlider.value;
         if (cfgWeightValueDisplay && cfgWeightSlider) cfgWeightValueDisplay.textContent = cfgWeightSlider.value;
-        if (speedFactorValueDisplay && speedFactorSlider) speedFactorValueDisplay.textContent = speedFactorSlider.value;
-        updateSpeedFactorWarning();
 
         if (genParams.voice_id && predefinedVoiceSelect) {
             const voiceExists = Array.from(predefinedVoiceSelect.options).some(opt => opt.value === genParams.voice_id);
@@ -954,123 +816,6 @@ document.addEventListener('DOMContentLoaded', async function () {
     }
     if (splitTextToggle) toggleChunkControlsVisibility();
 
-    // --- Audio Player (WaveSurfer) ---
-    function initializeWaveSurfer(audioUrl, resultDetails = {}) {
-        if (wavesurfer) {
-            wavesurfer.unAll(); // Remove all event listeners before destroying
-            wavesurfer.destroy();
-            wavesurfer = null;
-        }
-        if (currentAudioBlobUrl) {
-            URL.revokeObjectURL(currentAudioBlobUrl);
-            currentAudioBlobUrl = null;
-        }
-        currentAudioBlobUrl = audioUrl;
-
-        // Ensure the container is clean or re-created
-        audioPlayerContainer.innerHTML = `
-            <div class="card audio-player">
-                <div class="card__body">
-                    <h2 class="card__title">Generated Audio</h2>
-                    <div class="audio-player__waveform" id="waveform"></div>
-                    <div class="audio-player__controls">
-                        <div class="audio-player__buttons">
-                            <button id="play-btn" class="btn primary" disabled>
-                                <svg class="btn__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
-                                    <path fill-rule="evenodd" d="M2 10a8 8 0 1 1 16 0 8 8 0 0 1-16 0Zm6.39-2.908a.75.75 0 0 1 .766.027l3.5 2.25a.75.75 0 0 1 0 1.262l-3.5 2.25A.75.75 0 0 1 8 12.25v-4.5a.75.75 0 0 1 .39-.658Z" clip-rule="evenodd" />
-                                </svg>
-                                <span>Play</span>
-                            </button>
-                            <a id="download-link" href="#" download="tts_output.wav" class="btn secondary disabled">
-                                <svg class="btn__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
-                                    <path d="M10.75 2.75a.75.75 0 00-1.5 0v8.614L6.295 8.235a.75.75 0 10-1.09 1.03l4.25 4.5a.75.75 0 001.09 0l4.25-4.5a.75.75 0 00-1.09-1.03l-2.955 3.129V2.75z"/>
-                                    <path d="M3.5 12.75a.75.75 0 00-1.5 0v2.5A2.75 2.75 0 004.75 18h10.5A2.75 2.75 0 0018 15.25v-2.5a.75.75 0 00-1.5 0v2.5c0 .69-.56 1.25-1.25 1.25H4.75c-.69 0-1.25-.56-1.25-1.25v-2.5z"/>
-                                </svg>
-                                <span>Download</span>
-                            </a>
-                        </div>
-                        <div class="audio-player__info">
-                            Mode: <span id="player-voice-mode" class="text-primary">--</span>
-                            <span id="player-voice-file-details"></span>
-                            <span class="separator">•</span> Gen Time: <span id="player-gen-time" class="tabular-nums">--s</span>
-                            <span class="separator">•</span> Duration: <span id="audio-duration" class="tabular-nums">--:--</span>
-                        </div>
-                    </div>
-                </div>
-            </div>`;
-
-        // Re-select elements after recreating them
-        const waveformDiv = audioPlayerContainer.querySelector('#waveform');
-        const playBtn = audioPlayerContainer.querySelector('#play-btn');
-        const downloadLink = audioPlayerContainer.querySelector('#download-link');
-        const playerModeSpan = audioPlayerContainer.querySelector('#player-voice-mode');
-        const playerFileSpan = audioPlayerContainer.querySelector('#player-voice-file-details');
-        const playerGenTimeSpan = audioPlayerContainer.querySelector('#player-gen-time');
-        const audioDurationSpan = audioPlayerContainer.querySelector('#audio-duration');
-
-        const audioFilename = resultDetails.filename || (typeof audioUrl === 'string' ? audioUrl.split('/').pop() : 'tts_output.wav');
-        if (downloadLink) {
-            downloadLink.href = audioUrl;
-            downloadLink.download = audioFilename;
-            const downloadTextSpan = downloadLink.querySelector('span'); // Target the span for text update
-            if (downloadTextSpan) {
-                downloadTextSpan.textContent = `Download ${audioFilename.split('.').pop().toUpperCase()}`;
-            }
-        }
-        if (playerModeSpan) playerModeSpan.textContent = resultDetails.submittedVoiceMode || currentVoiceMode || '--';
-        if (playerFileSpan) {
-            let fileDetail = '';
-            if ((resultDetails.submittedVoiceMode || currentVoiceMode) === 'clone' && resultDetails.submittedCloneFile) {
-                fileDetail = `(<span class="font-medium text-slate-700 dark:text-slate-300">${resultDetails.submittedCloneFile}</span>)`;
-            } else if ((resultDetails.submittedVoiceMode || currentVoiceMode) === 'predefined' && resultDetails.submittedPredefinedVoice) {
-                fileDetail = `(<span class="font-medium text-slate-700 dark:text-slate-300">${resultDetails.submittedPredefinedVoice}</span>)`;
-            }
-            playerFileSpan.innerHTML = fileDetail;
-        }
-        if (playerGenTimeSpan) playerGenTimeSpan.textContent = resultDetails.genTime ? `${resultDetails.genTime}s` : '--s';
-
-        const playIconSVG = `<svg class="btn__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M2 10a8 8 0 1 1 16 0 8 8 0 0 1-16 0Zm6.39-2.908a.75.75 0 0 1 .766.027l3.5 2.25a.75.75 0 0 1 0 1.262l-3.5 2.25A.75.75 0 0 1 8 12.25v-4.5a.75.75 0 0 1 .39-.658Z" clip-rule="evenodd" /></svg><span>Play</span>`;
-        const pauseIconSVG = `<svg class="btn__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M2 10a8 8 0 1 1 16 0 8 8 0 0 1-16 0Zm5-2.25A.75.75 0 0 1 7.75 7h.5a.75.75 0 0 1 .75.75v4.5a.75.75 0 0 1-.75.75h-.5a.75.75 0 0 1-.75-.75v-4.5Zm4 0a.75.75 0 0 1 .75-.75h.5a.75.75 0 0 1 .75.75v4.5a.75.75 0 0 1-.75.75h-.5a.75.75 0 0 1-.75-.75v-4.5Z" clip-rule="evenodd" /></svg><span>Pause</span>`;
-        const isDark = document.documentElement.classList.contains('dark');
-
-        wavesurfer = WaveSurfer.create({
-            container: waveformDiv, waveColor: isDark ? '#6366f1' : '#a5b4fc', progressColor: isDark ? '#4f46e5' : '#6366f1',
-            cursorColor: isDark ? '#cbd5e1' : '#475569', barWidth: 3, barRadius: 3, cursorWidth: 1, height: 80, barGap: 2,
-            responsive: true, url: audioUrl, mediaControls: false, normalize: true,
-        });
-
-        wavesurfer.on('ready', () => {
-            const duration = wavesurfer.getDuration();
-            if (audioDurationSpan) audioDurationSpan.textContent = formatTime(duration);
-            if (playBtn) {
-                playBtn.disabled = false;
-                playBtn.innerHTML = playIconSVG;
-            }
-            if (downloadLink) {
-                downloadLink.classList.remove('disabled');
-                downloadLink.removeAttribute('aria-disabled');
-            }
-        });
-        wavesurfer.on('play', () => { if (playBtn) playBtn.innerHTML = pauseIconSVG; });
-        wavesurfer.on('pause', () => { if (playBtn) playBtn.innerHTML = playIconSVG; });
-        wavesurfer.on('finish', () => { if (playBtn) playBtn.innerHTML = playIconSVG; wavesurfer.seekTo(0); });
-        wavesurfer.on('error', (err) => {
-            console.error("WaveSurfer error:", err);
-            showNotification(`Error loading audio waveform: ${err.message || err}`, 'error');
-            if (waveformDiv) waveformDiv.innerHTML = `<p class="p-4 text-sm text-red-600 dark:text-red-400">Could not load waveform.</p>`;
-            if (playBtn) playBtn.disabled = true;
-        });
-
-        if (playBtn) {
-            playBtn.onclick = () => {
-                if (wavesurfer) {
-                    wavesurfer.playPause();
-                }
-            };
-        }
-        setTimeout(() => audioPlayerContainer.scrollIntoView({ behavior: 'smooth', block: 'nearest' }), 150);
-    }
-
     // --- TTS Generation Logic ---
     function getTTSFormData() {
         const jsonData = {
@@ -1080,13 +825,9 @@ document.addEventListener('DOMContentLoaded', async function () {
             cfg_weight: parseFloat(cfgWeightSlider.value),
             num_steps: parseInt(numStepsSlider.value, 10),
             n_cfm_timesteps: parseInt(cfmTimestepsSlider.value, 10),
-            speed_factor: parseFloat(speedFactorSlider.value),
-            seed: parseInt(seedInput.value, 10),
-            language: languageSelect.value,
             voice_mode: currentVoiceMode,
             split_text: splitTextToggle.checked,
             chunk_size: parseInt(chunkSizeSlider.value, 10),
-            output_format: outputFormatSelect.value || 'mp3'
         };
         if (currentVoiceMode === 'predefined' && predefinedVoiceSelect.value !== 'none') {
             jsonData.predefined_voice_id = predefinedVoiceSelect.value;
@@ -1096,48 +837,115 @@ document.addEventListener('DOMContentLoaded', async function () {
         return jsonData;
     }
 
+    // --- Realtime streaming ---
+    let rt = null;                      // RealtimeTtsClient
+    let analyser = null, meterRaf = null;
+    let metrics = null;                 // per-response timing
+    const $ = (id) => document.getElementById(id);
+
+    function logEvent(kind, ev) {
+        const log = $('events-log');
+        const line = document.createElement('div');
+        line.className = kind;
+        const ts = new Date().toISOString().slice(11, 23);
+        line.textContent = `${ts} ${kind === 'out' ? '→' : '←'} ${JSON.stringify(ev)}`;
+        log.appendChild(line);
+        log.scrollTop = log.scrollHeight;
+    }
+
+    function setPill(id, label, cls) { const el = $(id); el.textContent = label; el.className = 'pill' + (cls ? ' ' + cls : ''); }
+
+    function sessionPatchFromControls() {
+        const data = getTTSFormData();
+        const voice = currentVoiceMode === 'predefined' ? data.predefined_voice_id : data.reference_audio_filename;
+        return {
+            audio: { output: { voice } },
+            x_chatterbox: {
+                temperature: data.temperature, exaggeration: data.exaggeration, cfg_scale: data.cfg_weight,
+                num_steps: data.num_steps, n_cfm_timesteps: data.n_cfm_timesteps,
+                chunk_size: data.chunk_size, split_text: data.split_text, split_on_clauses: true,
+            },
+        };
+    }
+
+    async function ensureConnected() {
+        if (rt && rt.state.dc === 'open') return rt;
+        rt = new RealtimeTtsClient({ baseUrl: API_BASE_URL, session: sessionPatchFromControls(),
+                                     iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+        rt.on('*', (ev) => logEvent(ev.type === 'error' ? 'err' : 'in', ev));
+        rt.on('client-event', (ev) => logEvent('out', ev));
+        rt.on('state', (s) => {
+            setPill('pill-pc', `pc: ${s.pc}`, s.pc === 'connected' ? 'ok' : s.pc === 'failed' ? 'err' : '');
+            setPill('pill-ice', `ice: ${s.ice}`, /connected|completed/.test(s.ice) ? 'ok' : s.ice === 'failed' ? 'err' : '');
+            setPill('pill-dc', `dc: ${s.dc}`, s.dc === 'open' ? 'ok' : '');
+            $('disconnect-btn').disabled = s.dc !== 'open';
+        });
+        rt.on('track', (stream) => { $('remote-audio').srcObject = stream; startMeter(stream); });
+        rt.on('response.created', (ev) => { metrics = { id: ev.response.id, created: performance.now(), chunks: 0, firstAudio: null, serverStarted: null }; renderMetrics(); });
+        rt.on('response.output_audio_transcript.delta', () => { if (metrics) { metrics.chunks++; renderMetrics(); } });
+        rt.on('output_audio_buffer.started', () => { if (metrics) { metrics.serverStarted = performance.now(); renderMetrics(); } hideLoadingOverlay(); });
+        rt.on('response.done', (ev) => { if (metrics) { metrics.done = performance.now(); metrics.status = ev.response.status; renderMetrics(); } $('stop-btn').disabled = true; isGenerating = false; hideLoadingOverlay(); });
+        rt.on('output_audio_buffer.stopped', () => { if (metrics) { metrics.stopped = performance.now(); renderMetrics(); } });
+        rt.on('error', (ev) => showNotification(`${ev.error.code}: ${ev.error.message}`, 'error'));
+        await rt.connect();
+        return rt;
+    }
+
+    function startMeter(stream) {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const src = ctx.createMediaStreamSource(stream);
+        analyser = ctx.createAnalyser(); analyser.fftSize = 512;
+        src.connect(analyser);
+        const buf = new Float32Array(analyser.fftSize);
+        const tick = () => {
+            analyser.getFloatTimeDomainData(buf);
+            let peak = 0; for (const v of buf) peak = Math.max(peak, Math.abs(v));
+            $('level-bar').style.width = `${Math.min(100, peak * 300)}%`;
+            if (metrics && metrics.firstAudio === null && peak > 0.01) { metrics.firstAudio = performance.now(); renderMetrics(); }
+            meterRaf = requestAnimationFrame(tick);
+        };
+        if (meterRaf) cancelAnimationFrame(meterRaf);
+        tick();
+    }
+
+    function renderMetrics() {
+        if (!metrics) return;
+        const s = (a, b) => (a != null && b != null) ? `${((b - a) / 1000).toFixed(3)} s` : '–';
+        $('m-ttfa').textContent = s(metrics.created, metrics.firstAudio);
+        $('m-ttfa-server').textContent = s(metrics.created, metrics.serverStarted);
+        $('m-total').textContent = s(metrics.created, metrics.done) + (metrics.status ? ` (${metrics.status})` : '');
+        $('m-audio').textContent = s(metrics.serverStarted, metrics.stopped);
+        $('m-chunks').textContent = String(metrics.chunks);
+    }
+
     async function submitTTSRequest() {
         isGenerating = true;
         showLoadingOverlay();
-        const startTime = performance.now();
-        const jsonData = getTTSFormData();
         try {
-            const response = await fetch(`${API_BASE_URL}/tts`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(jsonData)
-            });
-            if (!response.ok) {
-                const errorResult = await response.json().catch(() => ({ detail: `HTTP error ${response.status}` }));
-                throw new Error(formatErrorDetail(errorResult.detail) || 'TTS generation failed.');
-            }
-            const audioBlob = await response.blob();
-            const endTime = performance.now();
-            const genTime = ((endTime - startTime) / 1000).toFixed(2);
-            const filenameFromServer = response.headers.get('Content-Disposition')?.split('filename=')[1]?.replace(/"/g, '') || 'generated_audio.wav';
-            const resultDetails = {
-                outputUrl: URL.createObjectURL(audioBlob), filename: filenameFromServer, genTime: genTime,
-                submittedVoiceMode: jsonData.voice_mode, submittedPredefinedVoice: jsonData.predefined_voice_id,
-                submittedCloneFile: jsonData.reference_audio_filename
-            };
-            initializeWaveSurfer(resultDetails.outputUrl, resultDetails);
-            showNotification('Audio generated successfully!', 'success');
+            const client = await ensureConnected();
+            await client.updateSession(sessionPatchFromControls());
+            $('stop-btn').disabled = false;
+            await client.speak(textArea.value);
         } catch (error) {
-            console.error('TTS Generation Error:', error);
-            showNotification(error.message || 'An unknown error occurred during TTS generation.', 'error');
-        } finally {
+            console.error('Realtime error:', error);
+            showNotification(error.message || 'Streaming failed.', 'error');
             isGenerating = false;
             hideLoadingOverlay();
         }
     }
+
+    $('stop-btn').addEventListener('click', async () => {
+        if (!rt) return;
+        try { await rt.cancel(); await rt.clear(); } catch (e) { showNotification(e.message, 'error'); }
+    });
+    $('disconnect-btn').addEventListener('click', async () => { if (rt) { await rt.disconnect(); rt = null; } });
 
     function proceedWithSubmissionChecks() {
         const textContent = textArea.value.trim();
         const isSplittingEnabled = splitTextToggle.checked;
         const currentChunkSz = parseInt(chunkSizeSlider.value, 10);
         const needsChunkWarn = isSplittingEnabled && textContent.length >= currentChunkSz * 1.5 &&
-            currentVoiceMode !== 'predefined' && currentVoiceMode !== 'clone' &&
-            (!seedInput || parseInt(seedInput.value, 10) === 0 || seedInput.value === '') && !hideChunkWarning;
+            currentVoiceMode !== 'predefined' && currentVoiceMode !== 'clone' && !hideChunkWarning;
         if (needsChunkWarn) { showChunkWarningModal(); return; }
         submitTTSRequest();
     }
@@ -1229,7 +1037,12 @@ document.addEventListener('DOMContentLoaded', async function () {
         hideGenerationWarningModal(); debouncedSaveState(); proceedWithSubmissionChecks();
     });
     if (loadingCancelBtn) loadingCancelBtn.addEventListener('click', () => {
-        if (isGenerating) { isGenerating = false; hideLoadingOverlay(); showNotification("Generation UI cancelled by user.", "info"); }
+        if (isGenerating) {
+            isGenerating = false;
+            hideLoadingOverlay();
+            showNotification("Generation UI cancelled by user.", "info");
+            if (rt) rt.cancel().catch(() => {});
+        }
     });
     function showLoadingOverlay() {
         if (loadingOverlay && generateBtn && loadingCancelBtn) {
@@ -1331,8 +1144,7 @@ document.addEventListener('DOMContentLoaded', async function () {
         saveGenDefaultsBtn.addEventListener('click', async () => {
             const genParams = {
                 temperature: parseFloat(temperatureSlider.value), exaggeration: parseFloat(exaggerationSlider.value),
-                cfg_weight: parseFloat(cfgWeightSlider.value), speed_factor: parseFloat(speedFactorSlider.value),
-                seed: parseInt(seedInput.value, 10) || 0, language: languageSelect.value
+                cfg_weight: parseFloat(cfgWeightSlider.value),
             };
             updateConfigStatus(saveGenDefaultsBtn, genDefaultsStatus, 'Saving generation defaults...', 'info', 0, false);
             try {
