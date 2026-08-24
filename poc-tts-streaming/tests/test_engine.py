@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 import torch
 
+from poc_tts_streaming.audio import TRIM_KEEP_MS
 from poc_tts_streaming.config import load_config
 from poc_tts_streaming.engine_flash import FlashEngine, OutOfMemoryError
 
@@ -158,9 +159,9 @@ def test_synthesize_rejects_blank_text_when_splitting_disabled(tmp_path):
     fake_model.generate.assert_not_called()
 
 
-def _loaded_engine(tmp_path, samples_per_chunk=1000):
+def _loaded_engine(tmp_path, samples_per_chunk=1000, **engine_overrides):
     (tmp_path / "a.wav").write_bytes(b"x")
-    eng = _engine(tmp_path)
+    eng = _engine(tmp_path, **engine_overrides)
     fake_model = MagicMock()
     fake_model.sr = 24000
     fake_model.generate.return_value = torch.zeros(1, samples_per_chunk)
@@ -212,3 +213,68 @@ def test_synthesize_stream_forwards_split_on_clauses(tmp_path):
     whole = list(eng.synthesize_stream(text, "a.wav", chunk_size=20, split_on_clauses=False))
     split = list(eng.synthesize_stream(text, "a.wav", chunk_size=20, split_on_clauses=True))
     assert len(whole) == 1 and len(split) > 1
+
+
+def test_synthesize_stream_trims_the_chunk_edge_silence(tmp_path):
+    """A draw that pads its budget with silence must not stream the padding.
+
+    This is the runaway case in miniature: 0.5 s of speech followed by 2 s of
+    digital silence, which is what ~1-2 % of real draws look like when the stop
+    token never lands. What reaches the caller is the speech plus one 120 ms
+    breath on each edge.
+    """
+    keep = int(24000 * TRIM_KEEP_MS / 1000)
+    speech = torch.full((1, 12000), 0.3)
+    padded = torch.cat([torch.zeros(1, 4800), speech, torch.zeros(1, 48000)], dim=1)
+    eng, model = _loaded_engine(tmp_path)
+    model.generate.return_value = padded
+
+    (label, pcm), = list(eng.synthesize_stream("Hello there.", "a.wav"))
+
+    assert label == "Hello there."
+    assert len(pcm) == keep + 12000 + keep
+    assert np.array_equal(pcm[keep:keep + 12000], np.full(12000, 0.3, dtype=np.float32))
+
+
+def test_synthesize_stream_normalises_clause_fragments_for_the_model(tmp_path):
+    """chunk_text keeps a clause mark (, ; :) on an over-long sentence's
+    fragment, so the model would otherwise see "it was the age of wisdom,"
+    with no sentence-final punctuation. speakable() must be applied at the
+    generate() boundary while the yielded label -- what transcripts and
+    bench_stream's chars count -- stays the original chunk text."""
+    eng, model = _loaded_engine(tmp_path)
+    chunk = "it was the age of wisdom,"
+
+    (label, _pcm), = list(eng.synthesize_stream(chunk, "a.wav", split_text=False))
+
+    args, _kwargs = model.generate.call_args
+    assert args[0] == "it was the age of wisdom."
+    assert label == chunk
+
+
+def test_trim_keep_ms_zero_is_rejected(tmp_path):
+    """A zero keep lets an all-silent chunk emit nothing at all, and the block
+    path puts the chunk's transcript label on the first piece it emits -- so
+    the sentence would vanish from output_audio_transcript.delta while the
+    sentence path still labelled its (empty) yield. Fail loudly at construction
+    instead of diverging the two engines at runtime."""
+    with pytest.raises(ValueError, match="trim_keep_ms"):
+        _engine(tmp_path, trim_keep_ms=0)
+
+
+def test_trim_keep_ms_zero_is_allowed_when_trimming_is_off(tmp_path):
+    """The guard is about what the trim emits; with trim_silence off there is
+    no trim, so the value is inert rather than dangerous."""
+    eng = _engine(tmp_path, trim_silence=False, trim_keep_ms=0)
+    assert eng.trim_silence is False
+
+
+def test_trim_silence_can_be_switched_off(tmp_path):
+    """engine.trim_silence: false streams the raw draw -- the escape hatch the
+    sample-count identity tests use to pin the un-gated length."""
+    eng, model = _loaded_engine(tmp_path, trim_silence=False)
+    model.generate.return_value = torch.cat(
+        [torch.full((1, 12000), 0.3), torch.zeros(1, 48000)], dim=1
+    )
+    (_label, pcm), = list(eng.synthesize_stream("Hello there.", "a.wav"))
+    assert len(pcm) == 60000

@@ -1,5 +1,6 @@
 import pytest
 
+from poc_tts_streaming.config import load_config, voice_paths
 from poc_tts_streaming.engine_flash import discover_voices, resolve_voice_path
 
 
@@ -73,3 +74,20 @@ def test_resolve_missing_voice_names_the_paths_searched(tmp_path):
     d.mkdir()
     with pytest.raises(FileNotFoundError, match="voices"):
         resolve_voice_path("nope.wav", [d])
+
+
+def test_config_pins_the_curated_voice_list():
+    """config.yaml's voices.paths is just the repo-tracked ../voices dir --
+    the vendor clone's reference_audio/ is deliberately not searched (its
+    extra voices aren't part of the curated babel/marvin/one-one list). This
+    pins that against an accidental re-add, and pins the directory it
+    resolves to against accidental extra clips."""
+    config = load_config()
+    assert config["voices"]["paths"] == ["../voices"]
+
+    [resolved] = voice_paths(config)
+    assert resolved.is_dir()
+    assert resolved.name == "voices"
+    assert sorted(p.name for p in resolved.iterdir() if p.suffix in {".wav", ".mp3"}) == [
+        "babel.mp3", "marvin.mp3", "one-one.mp3",
+    ]

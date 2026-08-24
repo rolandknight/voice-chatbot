@@ -13,27 +13,51 @@ engine:
   # auto = flashinfer when importable, else torch. mlx is never automatic.
   backend: auto
   drf_block_size: 32
-  # SPIKE (Task 16), default off. When true the server/bench use
-  # engine_blockstream.BlockStreamEngine, which vocodes each finished T3 block
-  # instead of waiting for the whole sentence. See results-rtx-2060.md for the
-  # go/no-go; nothing on the reviewed paths changes while this is false.
-  block_streaming: false
+  # Default ON, but only effective when the resolved engine is CUDA + torch
+  # backend -- that's the only combination engine_blockstream.BlockStreamEngine
+  # can run (it hooks a copied torch-SDPA T3 loop). See
+  # engine_flash.block_streaming_effective(): every other resolved
+  # device/backend (cpu, mlx, flashinfer) falls back to sentence streaming
+  # with a logged notice, so this stays true across machines without
+  # per-machine overrides. See results-rtx-2060.md for the go/no-go.
+  block_streaming: true
+  # Chunk-edge silence. Every generate() draw opens and closes with its own
+  # silence, and neighbouring chunks stack theirs at the join; on top of that
+  # ~1-2 % of draws never emit the stop token and pad the whole token budget
+  # (a 300-token / 12 s floor for short text) with digital silence, on both
+  # engines. Trimming each chunk back to trim_keep_ms of natural pause per edge
+  # is the fix for both -- see poc_tts_streaming/audio.py for why -45 dBFS and
+  # 120 ms. Set trim_silence: false to stream the raw draw.
+  trim_silence: true
+  trim_threshold_db: -45.0
+  # Must be >= 1 while trim_silence is on -- the block path puts a chunk's
+  # transcript label on the first piece that chunk actually emits, and a zero
+  # keep lets an all-silent chunk emit nothing at all. FlashEngine raises.
+  trim_keep_ms: 120
 
 generation:
-  temperature: 0.6
+  # Lowered from the paper default of 0.6 to reduce per-chunk variance/
+  # over-generation.
+  temperature: 0.5
   exaggeration: 0.5
   cfg_scale: 1.0
   num_steps: 4
   n_cfm_timesteps: 1
-  chunk_size: 120
+  # Sentence-packing target. 120 optimised TTFA for short replies but
+  # fragments literary text into clause chunks -- 300 keeps prosody while
+  # block streaming keeps TTFA low.
+  chunk_size: 300
   split_text: true
   split_on_clauses: true
 
 voices:
   # Searched in order. Missing directories are skipped, not an error.
+  # Curated list only -- babel, marvin, one-one -- from the repo-tracked
+  # clips in ../voices. The vendor clone's reference_audio/ carries its own
+  # bundled voices that we don't want surfaced here, so it's deliberately
+  # left out of this list (see tests/test_voices.py for the pin).
   paths:
     - ../voices
-    - ../vendor/chatterbox-tts-server/reference_audio
 
 bench:
   # bench.py's default (marvin.wav) lives only in the gitignored vendor

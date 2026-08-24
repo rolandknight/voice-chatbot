@@ -12,6 +12,42 @@ Copy of `poc-tts/` that streams audio sentence-by-sentence over WebRTC on
 Design: `docs/superpowers/specs/2026-08-23-poc-tts-streaming-design.md`
 Measured results: `results-rtx-2060.md`
 
+## Defaults and knobs
+
+`config.yaml`'s `generation:` block:
+
+- `chunk_size: 300` — sentence-packing target for `chunk_text`. 120 optimised
+  TTFA for short replies but fragments literary text into clause chunks; 300
+  keeps prosody while block streaming keeps TTFA low.
+- `temperature: 0.5` — lowered from the paper default of 0.6 to reduce
+  per-chunk variance / over-generation.
+- `split_on_clauses: true` — lets `chunk_text` split long sentences on clause
+  punctuation (`, ; :`) when a sentence alone would exceed `chunk_size`,
+  rather than only ever splitting on sentence boundaries. Exposed as a
+  toggle in the UI (`ui/index.html`'s "Split on clauses" checkbox); the
+  toggle and every generation knob initialise from `config.yaml`'s
+  `generation:` block (`generation_defaults`, wired through
+  `_ui_shaped_config` in `poc_tts_streaming/server.py`) rather than
+  hardcoded slider defaults.
+
+`config.yaml`'s `engine:` block:
+
+- `block_streaming: true` — vocodes each finished T3 block rather than each
+  finished sentence, for a TTFA that no longer scales with sentence length.
+  Effective only when the resolved engine is CUDA + torch backend
+  (`engine_flash.block_streaming_effective()`); every other resolved
+  device/backend (cpu, mlx, flashinfer) falls back to sentence streaming
+  with a logged notice, so this stays on across machines without
+  per-machine overrides. See `results-rtx-2060.md` for the measurements
+  behind the default.
+
+## Voices
+
+`voices.paths: [../voices]` — the curated list lives in the repo-tracked
+`../voices/` directory: `babel.mp3`, `marvin.mp3`, `one-one.mp3`. The vendor
+clone's `reference_audio/` carries its own bundled voices, which are
+deliberately left out of this list (`tests/test_voices.py` pins it).
+
 ## Realtime API surface
 
 Four routes, plus the WebRTC data channel:

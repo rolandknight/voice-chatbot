@@ -1,5 +1,16 @@
 # Reference voice clips for Chatterbox personas
 
+## Current clips
+
+- `babel.mp3` — the `babel` persona (wake word "hey babel").
+- `marvin.mp3` — the `marvin` persona (wake word "hey marvin").
+- `one-one.mp3` — the default/bench reference clip used by
+  `poc-tts-streaming`'s `bench.voice` and `realtime.default_voice`.
+
+This is a curated list, deliberately kept short; poc-tts-streaming's
+`config.yaml` only searches this directory (`voices.paths: [../voices]`) so
+whatever lands here becomes the full predefined-voice list there.
+
 Drop a short reference clip per cloned persona here. Recommended:
 
 - **5–15 seconds**

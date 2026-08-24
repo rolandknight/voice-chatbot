@@ -356,25 +356,51 @@ def create_app(engine, config: dict, voice_paths: list[Path], *,
 def main() -> None:
     import sys
 
+    import torch
     import uvicorn
 
-    from poc_tts_streaming.engine_flash import FlashEngine
+    from poc_tts_streaming.engine_flash import (
+        FlashEngine,
+        _flashinfer_available,
+        block_streaming_effective,
+        resolve_backend,
+        resolve_device,
+    )
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     config = load_config()
     paths = configured_voice_paths(config)
+    engine_cfg = config.get("engine", {})
+
+    # Resolve device/backend the same way FlashEngine.__init__ does, before
+    # deciding which engine class to build -- block streaming hooks a copied
+    # torch-SDPA T3 loop, so it can only run on device=='cuda' with
+    # backend=='torch'. Everything else (cpu, mlx, flashinfer) falls back to
+    # sentence streaming regardless of the config flag.
+    device = resolve_device(engine_cfg.get("device", "auto"), torch.cuda.is_available())
+    backend = resolve_backend(
+        engine_cfg.get("backend", "auto"), _flashinfer_available(), device
+    )
+
+    requested_block_streaming = bool(engine_cfg.get("block_streaming", False))
     engine_class = FlashEngine
-    if config.get("engine", {}).get("block_streaming", False):
-        # SPIKE (Task 16), off by default. Importing here rather than at module
-        # scope keeps engine_blockstream off every path the server normally
-        # takes -- including the import graph the server tests exercise.
+    if block_streaming_effective(requested_block_streaming, device, backend):
+        # SPIKE (Task 16). Importing here rather than at module scope keeps
+        # engine_blockstream off every path the server normally takes --
+        # including the import graph the server tests exercise.
         from poc_tts_streaming.engine_blockstream import BlockStreamEngine
 
-        logger.warning(
-            "engine.block_streaming is on -- using the Task 16 spike engine. "
-            "See poc-tts-streaming/results-rtx-2060.md before trusting it."
+        logger.info(
+            "block streaming engine active (cuda/torch); sentence streaming "
+            "fallback on other backends -- see poc-tts-streaming/"
+            "results-rtx-2060.md for the measurements behind it."
         )
         engine_class = BlockStreamEngine
+    elif requested_block_streaming:
+        logger.info(
+            "block_streaming requested but device=%s backend=%s -- using "
+            "sentence streaming", device, backend,
+        )
     engine = engine_class(
         engine_cfg=config.get("engine", {}),
         generation_cfg=config.get("generation", {}),

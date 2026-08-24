@@ -18,7 +18,7 @@
     prose, and no paralinguistic tags -- a clean baseline for comparing
     voices or tuning parameters.
   params:
-    temperature: 0.6
+    temperature: 0.5
     exaggeration: 0.5
     cfg_weight: 1.0
     seed: 0

@@ -42,6 +42,8 @@ document.addEventListener('DOMContentLoaded', async function () {
     const charCount = document.getElementById('char-count');
     const generateBtn = document.getElementById('generate-btn');
     const splitTextToggle = document.getElementById('split-text-toggle');
+    const splitOnClausesToggle = document.getElementById('split-on-clauses-toggle');
+    const splitOnClausesLabel = document.getElementById('split-on-clauses-label');
     const chunkSizeControls = document.getElementById('chunk-size-controls');
     const chunkSizeSlider = document.getElementById('chunk-size-slider');
     const chunkSizeValue = document.getElementById('chunk-size-value');
@@ -66,7 +68,9 @@ document.addEventListener('DOMContentLoaded', async function () {
     const cfgWeightSlider = document.getElementById('cfg-weight');
     const cfgWeightValueDisplay = document.getElementById('cfg-weight-value');
     const numStepsSlider = document.getElementById('num-steps');
+    const numStepsValueDisplay = document.getElementById('num-steps-value');
     const cfmTimestepsSlider = document.getElementById('cfm-timesteps');
+    const cfmTimestepsValueDisplay = document.getElementById('cfm-timesteps-value');
     const saveGenDefaultsBtn = document.getElementById('save-gen-defaults-btn');
     const genDefaultsStatus = document.getElementById('gen-defaults-status');
     const serverConfigForm = document.getElementById('server-config-form');
@@ -207,6 +211,7 @@ document.addEventListener('DOMContentLoaded', async function () {
             last_reference_file: cloneReferenceSelect ? cloneReferenceSelect.value : null,
             last_chunk_size: chunkSizeSlider ? parseInt(chunkSizeSlider.value, 10) : 120,
             last_split_text_enabled: splitTextToggle ? splitTextToggle.checked : true,
+            last_split_on_clauses: splitOnClausesToggle ? splitOnClausesToggle.checked : true,
             hide_chunk_warning: hideChunkWarning,
             hide_generation_warning: hideGenerationWarning,
             theme: localStorage.getItem('uiTheme') || 'dark',
@@ -531,6 +536,24 @@ document.addEventListener('DOMContentLoaded', async function () {
         }
     }
 
+    // Apply the ui_state > generation_defaults > HTML-markup precedence to one
+    // slider-style control, updating its paired value label the same pass.
+    function applySliderDefault(slider, display, uiValue, configValue) {
+        if (!slider) return;
+        if (uiValue !== undefined) slider.value = uiValue;
+        else if (configValue !== undefined) slider.value = configValue;
+        // else: leave slider.value as set by the HTML `value` attribute.
+        if (display) display.textContent = slider.value;
+    }
+
+    // Same precedence, for a checkbox-style control.
+    function applyCheckboxDefault(checkbox, uiValue, configValue) {
+        if (!checkbox) return;
+        if (uiValue !== undefined) checkbox.checked = uiValue;
+        else if (configValue !== undefined) checkbox.checked = configValue;
+        // else: leave checkbox.checked as set by the HTML `checked` attribute.
+    }
+
     function loadInitialUiState() {
         // Restore any SAVED text, including a deliberately emptied box. Testing
         // truthiness here meant an explicit clear was indistinguishable from
@@ -559,19 +582,25 @@ document.addEventListener('DOMContentLoaded', async function () {
 
         toggleVoiceOptionsDisplay();
 
-        if (splitTextToggle) splitTextToggle.checked = currentUiState.last_split_text_enabled !== undefined ? currentUiState.last_split_text_enabled : true;
+        // Every generation control is initialised with the same precedence:
+        // the user's last explicit choice (ui_state) wins, then config.yaml's
+        // generation_defaults, then whatever value the HTML markup already
+        // shipped with (used verbatim if fetchInitialData() itself failed and
+        // left generation_defaults/ui_state empty -- see the catch block in
+        // fetchInitialData()).
+        const genDefaults = currentConfig.generation_defaults || {};
 
-        if (chunkSizeSlider && currentUiState.last_chunk_size !== undefined) chunkSizeSlider.value = currentUiState.last_chunk_size;
-        if (chunkSizeValue) chunkSizeValue.textContent = chunkSizeSlider ? chunkSizeSlider.value : '120';
+        applyCheckboxDefault(splitTextToggle, currentUiState.last_split_text_enabled, genDefaults.split_text);
+        applyCheckboxDefault(splitOnClausesToggle, currentUiState.last_split_on_clauses, genDefaults.split_on_clauses);
+
+        applySliderDefault(chunkSizeSlider, chunkSizeValue, currentUiState.last_chunk_size, genDefaults.chunk_size);
         toggleChunkControlsVisibility();
 
-        const genDefaults = currentConfig.generation_defaults || {};
-        if (temperatureSlider) temperatureSlider.value = genDefaults.temperature !== undefined ? genDefaults.temperature : 0.8;
-        if (temperatureValueDisplay) temperatureValueDisplay.textContent = temperatureSlider.value;
-        if (exaggerationSlider) exaggerationSlider.value = genDefaults.exaggeration !== undefined ? genDefaults.exaggeration : 0.5;
-        if (exaggerationValueDisplay) exaggerationValueDisplay.textContent = exaggerationSlider.value;
-        if (cfgWeightSlider) cfgWeightSlider.value = genDefaults.cfg_weight !== undefined ? genDefaults.cfg_weight : 0.5;
-        if (cfgWeightValueDisplay) cfgWeightValueDisplay.textContent = cfgWeightSlider.value;
+        applySliderDefault(temperatureSlider, temperatureValueDisplay, undefined, genDefaults.temperature);
+        applySliderDefault(exaggerationSlider, exaggerationValueDisplay, undefined, genDefaults.exaggeration);
+        applySliderDefault(cfgWeightSlider, cfgWeightValueDisplay, undefined, genDefaults.cfg_weight);
+        applySliderDefault(numStepsSlider, numStepsValueDisplay, undefined, genDefaults.num_steps);
+        applySliderDefault(cfmTimestepsSlider, cfmTimestepsValueDisplay, undefined, genDefaults.n_cfm_timesteps);
 
         if (hideChunkWarningCheckbox) hideChunkWarningCheckbox.checked = hideChunkWarning;
         if (hideGenerationWarningCheckbox) hideGenerationWarningCheckbox.checked = hideGenerationWarning;
@@ -611,6 +640,7 @@ document.addEventListener('DOMContentLoaded', async function () {
         if (predefinedVoiceSelect) predefinedVoiceSelect.addEventListener('change', debouncedSaveState);
         if (cloneReferenceSelect) cloneReferenceSelect.addEventListener('change', debouncedSaveState);
         if (splitTextToggle) splitTextToggle.addEventListener('change', () => { toggleChunkControlsVisibility(); debouncedSaveState(); });
+        if (splitOnClausesToggle) splitOnClausesToggle.addEventListener('change', debouncedSaveState);
         if (chunkSizeSlider) {
             chunkSizeSlider.addEventListener('input', () => { if (chunkSizeValue) chunkSizeValue.textContent = chunkSizeSlider.value; });
             chunkSizeSlider.addEventListener('change', debouncedSaveState);
@@ -813,6 +843,7 @@ document.addEventListener('DOMContentLoaded', async function () {
         const isChecked = splitTextToggle ? splitTextToggle.checked : false;
         if (chunkSizeControls) chunkSizeControls.classList.toggle('hidden', !isChecked);
         if (chunkExplanation) chunkExplanation.classList.toggle('hidden', !isChecked);
+        if (splitOnClausesLabel) splitOnClausesLabel.classList.toggle('hidden', !isChecked);
     }
     if (splitTextToggle) toggleChunkControlsVisibility();
 
@@ -827,6 +858,7 @@ document.addEventListener('DOMContentLoaded', async function () {
             n_cfm_timesteps: parseInt(cfmTimestepsSlider.value, 10),
             voice_mode: currentVoiceMode,
             split_text: splitTextToggle.checked,
+            split_on_clauses: splitOnClausesToggle.checked,
             chunk_size: parseInt(chunkSizeSlider.value, 10),
         };
         if (currentVoiceMode === 'predefined' && predefinedVoiceSelect.value !== 'none') {
@@ -864,7 +896,7 @@ document.addEventListener('DOMContentLoaded', async function () {
             x_chatterbox: {
                 temperature: data.temperature, exaggeration: data.exaggeration, cfg_scale: data.cfg_weight,
                 num_steps: data.num_steps, n_cfm_timesteps: data.n_cfm_timesteps,
-                chunk_size: data.chunk_size, split_text: data.split_text, split_on_clauses: true,
+                chunk_size: data.chunk_size, split_text: data.split_text, split_on_clauses: data.split_on_clauses,
             },
         };
     }

@@ -1,4 +1,4 @@
-from poc_tts_streaming.engine_flash import chunk_text
+from poc_tts_streaming.engine_flash import chunk_text, speakable
 
 
 def test_short_text_is_one_chunk():
@@ -53,3 +53,54 @@ def test_clause_splitting_can_be_disabled():
 
 def test_short_sentences_are_never_clause_split():
     assert chunk_text("Yes, sir.", chunk_size=120) == ["Yes, sir."]
+
+
+# --- speakable ----------------------------------------------------------
+
+
+def test_speakable_leaves_period_unchanged():
+    assert speakable("Hello.") == "Hello."
+
+
+def test_speakable_leaves_terminal_punctuation_stacks_unchanged():
+    assert speakable("Really?!") == "Really?!"
+
+
+def test_speakable_leaves_terminal_punctuation_inside_quotes_unchanged():
+    assert speakable('He said "go."') == 'He said "go."'
+
+
+def test_speakable_leaves_terminal_punctuation_inside_parens_unchanged():
+    assert speakable("(done.)") == "(done.)"
+
+
+def test_speakable_treats_ellipsis_as_terminal():
+    assert speakable("Wait...") == "Wait..."
+
+
+def test_speakable_replaces_trailing_comma_with_period():
+    assert speakable("it was the age of wisdom,") == "it was the age of wisdom."
+
+
+def test_speakable_replaces_trailing_semicolon_with_period():
+    assert speakable("the air was cold;") == "the air was cold."
+
+
+def test_speakable_replaces_trailing_colon_with_period():
+    assert speakable("here is the list:") == "here is the list."
+
+
+def test_speakable_keeps_closing_quote_after_replaced_clause_mark():
+    assert speakable('wisdom,"') == 'wisdom."'
+
+
+def test_speakable_appends_period_when_no_punctuation():
+    assert speakable("it was the age of wisdom") == "it was the age of wisdom."
+
+
+def test_speakable_empty_string_unchanged():
+    assert speakable("") == ""
+
+
+def test_speakable_whitespace_only_unchanged():
+    assert speakable("   ") == "   "

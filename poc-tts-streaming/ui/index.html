@@ -138,11 +138,17 @@
                                         class="form-checkbox">
                                     <span>Split text into chunks</span>
                                 </label>
+                                <label for="split-on-clauses-toggle" id="split-on-clauses-label"
+                                    class="checkbox-label hidden">
+                                    <input type="checkbox" id="split-on-clauses-toggle" name="split_on_clauses"
+                                        class="form-checkbox" checked>
+                                    <span>Split long sentences on clauses</span>
+                                </label>
                                 <div id="chunk-size-controls" class="flex-row items-center gap-2 hidden">
                                     <label for="chunk-size-slider" class="form-label small">Chunk Size:</label>
                                     <input type="range" id="chunk-size-slider" name="chunk_size" min="50" max="500"
-                                        step="10" value="120" class="form-slider short">
-                                    <span id="chunk-size-value" class="slider-value tabular-nums">120</span>
+                                        step="10" value="300" class="form-slider short">
+                                    <span id="chunk-size-value" class="slider-value tabular-nums">300</span>
                                 </div>
                             </div>
                             <p id="chunk-explanation" class="form-hint mb-6 hidden">
@@ -252,9 +258,9 @@
                                     <div class="form-grid">
                                         <div class="form-group">
                                             <label for="temperature" class="form-label">Temperature (<span
-                                                    id="temperature-value" class="tabular-nums">0.8</span>)</label>
+                                                    id="temperature-value" class="tabular-nums">0.5</span>)</label>
                                             <input type="range" id="temperature" name="temperature" min="0.0" max="1.5"
-                                                step="0.01" value="0.8" class="form-slider">
+                                                step="0.01" value="0.5" class="form-slider">
                                         </div>
                                         <div id="exaggeration-group" class="form-group">
                                             <label for="exaggeration" class="form-label">Exaggeration (<span
@@ -270,14 +276,14 @@
                                         </div>
                                         <div id="flash-knobs-group" class="form-group">
                                             <label for="num-steps" class="form-label">Diffusion Steps (<span
-                                                    id="num-steps-value" class="tabular-nums">10</span>)</label>
+                                                    id="num-steps-value" class="tabular-nums">4</span>)</label>
                                             <input type="range" id="num-steps" name="num_steps" min="1" max="16"
-                                                step="1" value="10" class="form-slider">
+                                                step="1" value="4" class="form-slider">
                                             <p class="form-hint">Lower is faster, at some cost to quality.</p>
                                             <label for="cfm-timesteps" class="form-label">Vocoder CFM Steps (<span
-                                                    id="cfm-timesteps-value" class="tabular-nums">2</span>)</label>
+                                                    id="cfm-timesteps-value" class="tabular-nums">1</span>)</label>
                                             <input type="range" id="cfm-timesteps" name="n_cfm_timesteps" min="1"
-                                                max="4" step="1" value="2" class="form-slider">
+                                                max="4" step="1" value="1" class="form-slider">
                                             <p class="form-hint">The meanflow-distilled vocoder is tuned for 2.</p>
                                         </div>
                                         <div class="form-grid__full mt-4 flex-row items-center gap-4">

@@ -13,14 +13,20 @@ Two pieces are needed:
    finalised. It is a *copy*, not a patch: the upstream method returns only
    the final tensor and there is no hook to attach to. Everything that
    consumes RNG is left byte-for-byte identical so the hooked loop reproduces
-   the unhooked one for a fixed seed (``tests/test_blockstream.py``).
+   the unhooked one for a fixed seed -- which also obliges the *callback* not
+   to draw, hence :func:`_fork_rng` around the vocoder
+   (``tests/test_blockstream.py``).
 2. :class:`BlockStreamEngine` -- windowed vocoding of those partial token
    prefixes through S3Gen, following the CosyVoice2 streaming pattern that
    ``chatterbox/models/s3gen/s3gen.py:278`` points at.
 
 **This is spike code.** It is gated by ``engine.block_streaming`` in
-config.yaml, which defaults to ``false``; nothing imports it on the reviewed
-paths. See ``results-rtx-2060.md`` for the go/no-go and the evidence.
+config.yaml, which defaults to ``true`` but is only effective when the
+resolved engine is device=='cuda' with backend=='torch' (see
+``engine_flash.block_streaming_effective``) -- server.py imports this module
+only inside that branch, so it stays off the import graph everywhere else,
+including the server tests. See ``results-rtx-2060.md`` for the go/no-go and
+the evidence.
 """
 
 from __future__ import annotations
@@ -55,6 +61,7 @@ from poc_tts_streaming.engine_flash import (
     _vram_report,
     chunk_text,
     resolve_voice_path,
+    speakable,
 )
 
 logger = logging.getLogger(__name__)
@@ -98,9 +105,12 @@ def generate_blocks(
     ``on_block`` is called once per finalised block with the committed token
     prefix ``xt[0:1, :block_end]`` (a clone, safe to keep). The callback runs
     *inside* the decode loop, so it must not consume torch RNG or the tokens
-    will diverge from ``generate``'s -- that invariant is what
-    ``tests/test_blockstream.py::test_generate_blocks_matches_generate``
-    pins down.
+    will diverge from ``generate``'s. The shipping callback vocodes, and the
+    vocoder draws noise (``flow_matching.py``'s ``randn_like``, HiFTGAN's NSF
+    source), so it fences every draw behind :func:`_fork_rng` -- see
+    :class:`_MelWindow`. ``tests/test_blockstream.py::
+    test_generate_blocks_matches_generate`` pins the invariant down with both
+    a no-op callback (the loop copy) and the real vocoding one (the fence).
     """
     if isinstance(text_tokens, list):
         raise ValueError("generate_blocks handles a single sample, not a batch")
@@ -343,6 +353,50 @@ LOOKAHEAD_MEL = 6
 MIN_WINDOW_TOKENS = (OVERLAP_MEL + LOOKAHEAD_MEL) // MEL_PER_TOKEN
 
 
+def _fork_rng(device: torch.device | str):
+    """Fence a vocoder call off from the global torch RNG.
+
+    Vocoding draws noise, and on this path it happens *inside* the T3 decode
+    loop -- so without a fence every window shifts the RNG stream the loop's
+    later blocks sample from, and a block-streamed utterance is a different
+    draw from the sentence path's off the same seed. Three unavoidable draws
+    (all in the installed package, none of which takes a ``generator``):
+
+    * ``chatterbox/models/s3gen/flow_matching.py:216`` -- ``z =
+      torch.randn_like(mu)``, executed unconditionally and *then* overwritten
+      in the non-prompt region when ``noised_mels`` is supplied, so passing
+      fixed noise does not stop the draw;
+    * ``chatterbox/models/s3gen/hifigan.py:226,282`` -- the NSF source's
+      per-call ``torch.randn_like`` (plus a ``Uniform.sample`` for the sine
+      phase at :212).
+
+    ``torch.randn_like`` has no ``generator`` argument, so routing the vocoder
+    at a private ``torch.Generator`` would mean forking the package. Saving and
+    restoring the global state around the call is the practical fence:
+    ``fork_rng`` snapshots the CPU generator and the given CUDA device's, and
+    puts both back on exit. Inside the fence the vocoder still gets
+    deterministic noise for a fixed seed (it sees whatever state the loop is
+    at); outside it, the loop's stream is exactly the one ``t3.generate``
+    would have walked.
+
+    One fence per window (and one for the noise pre-draw), not one per
+    utterance: the T3 draws must stay *outside* it. Cost is a 5056-byte CPU
+    state copy plus a 16-byte CUDA one each way -- 31.8 us measured on the
+    RTX 2060, 0.024 % of that box's 130 ms mean window, 0.22 ms over a 5.5 s
+    utterance.
+
+    Not thread-safe, and cannot be: the generators it saves and restores are
+    process-global. One utterance at a time is the engine's shape today (one
+    CUDA stream, one worker thread per ``_stream_chunk``); two concurrent
+    renders would interleave their fences and corrupt each other's streams --
+    but they would already be racing the same generators without it.
+    """
+    dev = torch.device(device)
+    devices = [dev.index if dev.index is not None else torch.cuda.current_device()] \
+        if dev.type == "cuda" else []
+    return torch.random.fork_rng(devices=devices, enabled=True)
+
+
 class _Cancelled(Exception):
     """Unwinds the T3 loop from inside on_block when the caller cancels."""
 
@@ -359,6 +413,11 @@ class _MelWindow:
     every window is a prefix of the *same* CFM trajectory. That requires
     bypassing ``flow_inference`` (which redraws unconditionally) and calling
     ``S3Token2Mel.forward`` with an explicit ``noised_mels``.
+
+    Every draw this class makes -- the pre-draw below and whatever the vocoder
+    itself consumes per window -- happens inside :func:`_fork_rng`, because
+    ``push`` is called from inside the T3 decode loop and must leave that
+    loop's RNG stream untouched.
     """
 
     def __init__(self, s3gen, ref_dict, n_cfm_timesteps: int, max_tokens: int):
@@ -370,10 +429,11 @@ class _MelWindow:
         self._cache_source: Tensor | None = None
         self._cache_speech: Tensor | None = None
         self._first = True
-        self._noise = torch.randn(
-            1, 80, max(max_tokens, 1) * MEL_PER_TOKEN,
-            dtype=s3gen.dtype, device=s3gen.device,
-        )
+        with _fork_rng(s3gen.device):
+            self._noise = torch.randn(
+                1, 80, max(max_tokens, 1) * MEL_PER_TOKEN,
+                dtype=s3gen.dtype, device=s3gen.device,
+            )
         # np.hamming(2 * source_cache_len) in CosyVoice; the two halves are the
         # fade-in for the new rendering and the fade-out for the cached one.
         self._xfade = torch.hamming_window(
@@ -382,10 +442,23 @@ class _MelWindow:
         )
 
     def push(self, tokens: Tensor, *, finalize: bool) -> np.ndarray:
-        """Vocode the token prefix and return the new float32 samples."""
+        """Vocode the token prefix and return the new float32 samples.
+
+        The whole vocode runs inside one :func:`_fork_rng`, so a window costs
+        the T3 loop that called it nothing in RNG state. One fence for both
+        draws rather than one each: the CFM's ``randn_like`` and HiFTGAN's
+        source noise then see the same relative stream they always did, so the
+        only thing the fence changes about this window's *audio* is where its
+        noise starts.
+        """
         n = int(tokens.numel())
         if n == 0 or (not finalize and n < MIN_WINDOW_TOKENS):
             return np.zeros(0, dtype=np.float32)
+        with _fork_rng(self._s3gen.device):
+            return self._vocode(tokens, n, finalize=finalize)
+
+    def _vocode(self, tokens: Tensor, n: int, *, finalize: bool) -> np.ndarray:
+        """``push``'s body. Called only from inside the RNG fence."""
         mels = _S3Token2Mel.forward(
             self._s3gen,
             tokens.unsqueeze(0) if tokens.dim() == 1 else tokens,
@@ -450,15 +523,28 @@ class BlockStreamEngine(FlashEngine):
     float32 at ``self.sr`` -- but a chunk now arrives as several windows
     instead of one, each covering only the tokens T3 finalised in that block.
 
+    **Edge silence is gated, not trimmed.** The parent can trim a finished
+    chunk because it holds the whole thing; here a runaway silent tail is
+    spread over many windows that have already been handed to the caller by
+    the time the chunk ends. So one ``audio.TrailingSilenceGate`` per chunk
+    sits on the emission path: it releases each window's speech immediately,
+    buffers silence until it knows whether more speech follows, and at chunk
+    end keeps only ``trim_keep_ms`` of what is left. It runs on already
+    cross-faded PCM and never alters a sample, so window continuity is
+    untouched -- and what it emits for a chunk is byte-identical to
+    ``trim_edge_silence`` over that chunk's concatenation.
+
     **The text field is not per-window.** The parent yields the chunk's text
     with the chunk's audio, and every consumer treats that string as new
     transcript: ``realtime.session._run_response`` appends it to the response
     transcript and sends it as an ``output_audio_transcript.delta``. Repeating
     the chunk text on each of its windows would repeat the sentence four to six
-    times in the transcript. So the contract here is: **the first window of a
-    chunk carries that chunk's text, every later window of the same chunk
-    carries ``""``**. Consumers must treat an empty string as "same text, more
-    audio" -- see the ``if chunk_text:`` guard in ``_run_response``. Total
+    times in the transcript. So the contract here is: **the first piece a
+    chunk actually emits carries that chunk's text, every later piece of the
+    same chunk carries ``""``** -- "first emitted", not "first vocoded",
+    because the silence gate above may swallow an opening window whole.
+    Consumers must treat an empty string as "same text, more audio" -- see the
+    ``if chunk_text:`` guard in ``_run_response``. Total
     yielded text over an utterance is therefore identical between the two
     engines, which is what keeps ``bench_stream``'s ``chars`` honest.
     """
@@ -526,24 +612,46 @@ class BlockStreamEngine(FlashEngine):
         producer pushes finished windows onto a queue and the generator drains
         it. Everything stays on one CUDA stream, so T3 and S3Gen serialise on
         the GPU anyway; the thread only bridges the callback/generator gap.
+
+        The model is handed ``speakable(chunk)``, not ``chunk`` itself --
+        mirroring ``FlashEngine.synthesize_stream`` -- so a clause fragment's
+        trailing ``, ; :`` does not reach T3 as a weak EOS signal. ``chunk``
+        (the original) is still what ``put`` below labels emitted audio with.
         """
         model = self._model
         model.prepare_conditionals(prompt, exaggeration=exaggeration)
-        text_tokens = model._encode_text(chunk, normalize_text=True)
+        text_tokens = model._encode_text(speakable(chunk), normalize_text=True)
         n_text = int(text_tokens.size(1))
         max_tokens = _speech_len_for_text_tokens(n_text)
         window = _MelWindow(model.s3gen, model.conds.gen, n_cfm, max_tokens)
 
+        gate = self._silence_gate()
+
         out: "queue.Queue[tuple[str, np.ndarray] | None | BaseException]" = queue.Queue()
         state = {"emitted": 0}
 
-        def emit(pcm: np.ndarray) -> None:
-            """Queue a window, labelling only the first one of this chunk."""
+        def put(pcm: np.ndarray) -> None:
+            """Queue one piece, labelling only the first this chunk emits.
+
+            The label rides the first PCM that actually reaches the caller, not
+            the first window vocoded -- the gate may hold an opening window back
+            (a chunk that starts with silence) and the chunk's text has to
+            travel with whatever comes out first, or the transcript loses a
+            sentence. Later pieces carry "" ("same text, more audio").
+            """
             if not pcm.size:
                 return
             first = state["emitted"] == 0
             state["emitted"] += 1
             out.put((chunk if first else "", pcm))
+
+        def emit(pcm: np.ndarray) -> None:
+            """Send a vocoded window through this chunk's silence gate."""
+            if gate is None:
+                put(pcm)
+                return
+            for piece in gate.push(pcm):
+                put(piece)
 
         def on_block(tokens: Tensor) -> None:
             if cancel is not None and cancel.is_set():
@@ -571,6 +679,11 @@ class BlockStreamEngine(FlashEngine):
                 trimmed = model._trim_to_eos(final[0])
                 if trimmed.numel():
                     emit(window.push(trimmed.to(self.device), finalize=True))
+                # Chunk over: the gate now knows its buffered silence is
+                # trailing, not a pause, and gives back at most keep_ms of it.
+                if gate is not None:
+                    for piece in gate.flush():
+                        put(piece)
             except _Cancelled:
                 pass
             except torch.cuda.OutOfMemoryError as exc:

@@ -19,6 +19,13 @@ import numpy as np
 import torch
 from chatterbox_flash import ChatterboxFlashTTS
 
+from poc_tts_streaming.audio import (
+    TRIM_KEEP_MS,
+    TRIM_THRESHOLD_DB,
+    TrailingSilenceGate,
+    trim_edge_silence,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -104,6 +111,13 @@ def resolve_backend(
     return requested
 
 
+def block_streaming_effective(flag: bool, device: str, backend: str) -> bool:
+    """The block path hooks the copied torch-SDPA T3 loop, so it exists only
+    for device=='cuda' with backend=='torch'. Everything else falls back to
+    sentence streaming regardless of the flag."""
+    return bool(flag) and device == "cuda" and backend == "torch"
+
+
 # --- text chunking ------------------------------------------------------------
 
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
@@ -150,6 +164,51 @@ def chunk_text(text: str, chunk_size: int, split_on_clauses: bool = True) -> lis
         else:
             units.append(sentence)
     return _pack(units, chunk_size)
+
+
+_TERMINAL = ".!?"
+_CLAUSE = ",;:"
+# Closing quotes/brackets a clause mark or terminal punctuation can hide
+# behind -- "wisdom,\"" and "(done.)" both end in one of these, not in the
+# mark itself.
+_CLOSERS = "\"')]}»”’"
+
+
+def speakable(text: str) -> str:
+    """Give a chunk a sentence-final ending for synthesis: a trailing clause
+    mark (, ; :) becomes '.', anything else without terminal punctuation gets
+    '.' appended. Closing quotes/brackets after the mark are preserved.
+    Transcript/labels keep the original text; this only changes what the
+    model sees.
+
+    ``chunk_text`` splits an over-long sentence on clause punctuation and
+    keeps the punctuation on the fragment, so a fragment like "it was the
+    age of wisdom," reaches the model with a comma where a period belongs --
+    a weak EOS signal for a model trained to stop at sentence-final
+    punctuation. This is a pure text transform with no model dependency, so
+    it is cheap to apply to every chunk regardless of how it was split: an
+    already-terminal chunk (whole sentence, "...", "?!") passes through
+    unchanged.
+    """
+    stripped = text.rstrip()
+    if not stripped:
+        return text
+    trailing_ws = text[len(stripped):]
+
+    # Walk back over any closing quotes/brackets to find the punctuation (or
+    # lack of it) they are trailing.
+    i = len(stripped)
+    while i > 0 and stripped[i - 1] in _CLOSERS:
+        i -= 1
+    core, closers = stripped[:i], stripped[i:]
+
+    if core and core[-1] in _TERMINAL:
+        return text
+    if core and core[-1] in _CLAUSE:
+        core = core[:-1] + "."
+    else:
+        core = core + "."
+    return core + closers + trailing_ws
 
 
 # --- voice discovery ------------------------------------------------------------
@@ -287,6 +346,47 @@ class FlashEngine:
         self.drf_block_size = int(engine_cfg.get("drf_block_size", 16))
         self.sr = 24000
 
+        # Chunk-edge silence. Each generate() draw opens and closes with its own
+        # silence, and those stack at every chunk join; on top of that ~1-2 % of
+        # draws never emit the stop token and pad the whole token budget (12 s
+        # for short text) with digital silence. See audio.trim_edge_silence for
+        # why -45 dBFS / 120 ms. Off (trim_silence: false) streams the raw draw,
+        # which is what the sample-count identity tests need.
+        self.trim_silence = bool(engine_cfg.get("trim_silence", True))
+        self.trim_threshold_db = float(
+            engine_cfg.get("trim_threshold_db", TRIM_THRESHOLD_DB)
+        )
+        self.trim_keep_ms = int(engine_cfg.get("trim_keep_ms", TRIM_KEEP_MS))
+        if self.trim_silence and self.trim_keep_ms < 1:
+            raise ValueError(
+                "trim_keep_ms must be at least 1 ms when trim_silence is on: the "
+                "block path labels the first piece a chunk actually emits, and a "
+                "zero keep lets an all-silent chunk emit nothing at all -- which "
+                "drops that sentence's output_audio_transcript.delta. Use "
+                "trim_silence: false to stream the raw draw instead."
+            )
+
+    def _trim_chunk(self, pcm: np.ndarray) -> np.ndarray:
+        """Trim one finished chunk's edge silence (sentence path)."""
+        if not self.trim_silence:
+            return pcm
+        return trim_edge_silence(
+            pcm, self.sr,
+            threshold_db=self.trim_threshold_db, keep_ms=self.trim_keep_ms,
+        )
+
+    def _silence_gate(self) -> TrailingSilenceGate | None:
+        """One gate per chunk for engines that emit a chunk in pieces, or None
+        when trimming is off. Used by BlockStreamEngine, which cannot wait for
+        the whole chunk before emitting."""
+        if not self.trim_silence:
+            return None
+        return TrailingSilenceGate(
+            sr=self.sr,
+            threshold_db=self.trim_threshold_db,
+            keep_ms=self.trim_keep_ms,
+        )
+
     @property
     def loaded(self) -> bool:
         return self._model is not None
@@ -353,10 +453,23 @@ class FlashEngine:
     ) -> Iterator[tuple[str, np.ndarray]]:
         """Yield (chunk_text, mono float32 pcm) per sentence chunk, in order.
 
+        Each chunk's leading and trailing silence is cut back to
+        ``trim_keep_ms`` before it is yielded, so the natural silence two
+        neighbouring draws bring to their shared join does not stack, and a
+        draw that ran its whole token budget contributes a breath rather than
+        a nine-second gap.
+
         Validation (voice, text) happens before the first yield so callers
         can fail fast. Cancellation is checked between chunks: a chunk
         already inside generate() finishes (~1 s tuned) and is discarded by
         the caller. generate() itself cannot be interrupted.
+
+        ``generate()`` is called with ``speakable(chunk)``, not ``chunk``
+        itself -- a clause fragment off ``chunk_text``'s clause split keeps
+        its trailing ``, ; :``, which is a weak EOS signal for a model
+        trained on sentence-final punctuation. The yielded text is still the
+        original ``chunk``: transcripts and ``bench_stream``'s char counts
+        must reflect what the text actually was, not what the model heard.
         """
         if not self.loaded:
             raise RuntimeError("model is not loaded -- call load() first")
@@ -374,7 +487,7 @@ class FlashEngine:
                 return
             try:
                 wav = self._model.generate(
-                    chunk,
+                    speakable(chunk),
                     audio_prompt_path=prompt,
                     temperature=temperature if temperature is not None else gen["temperature"],
                     exaggeration=exaggeration if exaggeration is not None else gen["exaggeration"],
@@ -390,7 +503,9 @@ class FlashEngine:
                 raise OutOfMemoryError(
                     f"ran out of VRAM during generation. {_vram_report()}"
                 ) from exc
-            yield chunk, wav.detach().float().cpu().numpy().reshape(-1)
+            yield chunk, self._trim_chunk(
+                wav.detach().float().cpu().numpy().reshape(-1)
+            )
 
     def synthesize(
         self,
