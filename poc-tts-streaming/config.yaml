@@ -1,0 +1,48 @@
+server:
+  host: 127.0.0.1
+  port: 8006
+
+engine:
+  # device: auto | cuda | cpu
+  device: auto
+  # dtype: auto | bfloat16 | float16 | float32
+  # auto = bfloat16 if the GPU supports it, else float16 on CUDA, else float32.
+  # The library default is bfloat16 unconditionally, which is wrong on sm_75.
+  dtype: auto
+  # backend: auto | flashinfer | torch | mlx
+  # auto = flashinfer when importable, else torch. mlx is never automatic.
+  backend: auto
+  drf_block_size: 32
+  # SPIKE (Task 16), default off. When true the server/bench use
+  # engine_blockstream.BlockStreamEngine, which vocodes each finished T3 block
+  # instead of waiting for the whole sentence. See results-rtx-2060.md for the
+  # go/no-go; nothing on the reviewed paths changes while this is false.
+  block_streaming: false
+
+generation:
+  temperature: 0.6
+  exaggeration: 0.5
+  cfg_scale: 1.0
+  num_steps: 4
+  n_cfm_timesteps: 1
+  chunk_size: 120
+  split_text: true
+  split_on_clauses: true
+
+voices:
+  # Searched in order. Missing directories are skipped, not an error.
+  paths:
+    - ../voices
+    - ../vendor/chatterbox-tts-server/reference_audio
+
+bench:
+  # bench.py's default (marvin.wav) lives only in the gitignored vendor
+  # clone's reference_audio/, so `make bench` would fail on a fresh
+  # checkout. one-one.mp3 is repo-tracked under voices/, and mp3 reference
+  # clips are already proven to work.
+  voice: one-one.mp3
+
+realtime:
+  model: chatterbox-flash
+  default_voice: one-one.mp3
+  client_secret_ttl_s: 600

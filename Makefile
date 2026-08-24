@@ -211,7 +211,7 @@ FLOWCAT_URL ?= http://127.0.0.1:6210
 LOG_LEVEL ?= info
 FLOWCAT_CLIENT_PKG_CONFIG := $(abspath poc/.deps/prefix/lib/pkgconfig)
 
-.PHONY: flowcat-client-build flowcat-client-devices flowcat-client-run flowcat-client-test flowcat-client-check poc-doctor poc-setup poc-moonshine-setup poc-nemotron-setup poc-build poc-chatterbox poc-up poc-down poc-test poc-test-all poc-results poc-tts-setup poc-tts poc-tts-bench poc-tts-test
+.PHONY: flowcat-client-build flowcat-client-devices flowcat-client-run flowcat-client-test flowcat-client-check poc-doctor poc-setup poc-moonshine-setup poc-nemotron-setup poc-build poc-chatterbox poc-up poc-down poc-test poc-test-all poc-results poc-tts-setup poc-tts poc-tts-bench poc-tts-test poc-tts-streaming-setup poc-tts-streaming poc-tts-streaming-bench poc-tts-streaming-test
 
 flowcat-client-build:  ## Build the native Rust CPAL/WebRTC client
 	@PKG_CONFIG_PATH="$(FLOWCAT_CLIENT_PKG_CONFIG):$${PKG_CONFIG_PATH:-}" \
@@ -306,3 +306,15 @@ poc-tts-bench:  ## poc-tts: sweep Flash tuning configs, append poc-tts/reports/r
 
 poc-tts-test:  ## poc-tts: GPU-free unit tests
 	@$(MAKE) -C poc-tts test
+
+poc-tts-streaming-setup:  ## poc-tts-streaming: mise python 3.10, venv, deps, aiortc probe (idempotent)
+	@$(MAKE) -C poc-tts-streaming setup
+
+poc-tts-streaming:    ## poc-tts-streaming: Flash streamed over Realtime/WebRTC on :8006
+	@$(MAKE) -C poc-tts-streaming run
+
+poc-tts-streaming-test:  ## poc-tts-streaming: GPU-free unit + loopback tests
+	@$(MAKE) -C poc-tts-streaming test
+
+poc-tts-streaming-bench:  ## poc-tts-streaming: streaming TTFA bench -> poc-tts-streaming/reports/stream_runs.jsonl
+	@$(MAKE) -C poc-tts-streaming bench-stream
