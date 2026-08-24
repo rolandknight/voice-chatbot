@@ -6,17 +6,24 @@ so tests can inject a mock and run without a GPU.
 
 from __future__ import annotations
 
+import asyncio
+import io
 import json
 import logging
 import secrets
+import threading
+import wave
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Literal
 
+import numpy as np
 import yaml
 from fastapi import FastAPI, Request, Response
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from pydantic import BaseModel, Field
 
+from poc_tts_streaming.audio import SAMPLE_RATE, to_int16
 from poc_tts_streaming.config import load_config, voice_paths as configured_voice_paths
 from poc_tts_streaming.engine_flash import OutOfMemoryError, discover_voices
 from poc_tts_streaming.realtime import ids
@@ -39,6 +46,24 @@ def openai_error(status: int, message: str, *, type_: str = "invalid_request_err
 def bearer_token(request: Request) -> str | None:
     auth = request.headers.get("authorization", "")
     return auth[7:].strip() if auth.lower().startswith("bearer ") else None
+
+
+class SpeechRequest(BaseModel):
+    input: str = Field(..., min_length=1)
+    voice: str
+    response_format: Literal["pcm", "wav"] = "pcm"
+    model: str | None = None
+    x_chatterbox: dict = Field(default_factory=dict)
+
+
+def _wav_bytes(pcm_int16: np.ndarray, sample_rate: int) -> bytes:
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(sample_rate)
+        handle.writeframes(pcm_int16.tobytes())
+    return buffer.getvalue()
 
 
 class ClientSecretStore:
@@ -274,6 +299,62 @@ def create_app(engine, config: dict, voice_paths: list[Path], *,
         if not await app.state.calls.hangup(call_id):
             return openai_error(404, f"no call {call_id!r}", code="not_found", param="call_id")
         return {"ok": True}
+
+    async def _pcm_chunks(text: str, voice: str, knobs: ChatterboxKnobs):
+        """Run the synthesizer on the worker; yield int16 bytes per chunk as they land."""
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue = asyncio.Queue()
+        cancel = threading.Event()
+        done = object()
+
+        def produce():
+            try:
+                for _, pcm in engine_synthesizer(engine)(text, voice, knobs, cancel):
+                    loop.call_soon_threadsafe(queue.put_nowait, to_int16(pcm).tobytes())
+            except Exception as exc:  # noqa: BLE001
+                loop.call_soon_threadsafe(queue.put_nowait, exc)
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, done)
+
+        app.state.worker.submit(produce)
+        try:
+            while True:
+                item = await queue.get()
+                if item is done:
+                    return
+                if isinstance(item, Exception):
+                    raise item
+                yield item
+        finally:
+            cancel.set()
+
+    @app.post("/v1/audio/speech")
+    async def audio_speech(request: Request):
+        try:
+            body = SpeechRequest.model_validate(await request.json())
+        except Exception as exc:  # pydantic ValidationError or bad JSON
+            err = getattr(exc, "errors", lambda: [{"loc": ("body",), "msg": str(exc)}])()[0]
+            return openai_error(400, err.get("msg", "invalid request"),
+                                code="invalid_value", param=str(err.get("loc", ("body",))[-1]))
+        if body.voice not in discover_voices(voice_paths):
+            return openai_error(400, f"unknown voice {body.voice!r}", code="invalid_value", param="voice")
+        if not engine.loaded:
+            return openai_error(503, "Flash model is not loaded", type_="server_error", code="model_not_loaded")
+        try:
+            knobs = app.state.knobs.merged(body.x_chatterbox, param_prefix="x_chatterbox")
+        except EventError as err:
+            return openai_error(400, err.message, code=err.code, param=err.param)
+        chunks = _pcm_chunks(body.input, body.voice, knobs)
+        if body.response_format == "wav":
+            try:
+                data = b"".join([c async for c in chunks])
+            except FileNotFoundError as exc:
+                return openai_error(404, str(exc), code="not_found", param="voice")
+            except Exception as exc:  # noqa: BLE001
+                return openai_error(500, str(exc), type_="server_error", code="synthesis_failed")
+            return Response(_wav_bytes(np.frombuffer(data, dtype=np.int16), SAMPLE_RATE), media_type="audio/wav")
+        return StreamingResponse(chunks, media_type="audio/pcm",
+                                 headers={"X-Sample-Rate": str(SAMPLE_RATE), "X-Channels": "1"})
 
     @app.post("/save_settings")
     async def save_settings(payload: dict):
