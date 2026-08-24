@@ -1,6 +1,7 @@
 import asyncio
 
 import numpy as np
+import pytest
 
 from poc_tts_streaming.track import PcmQueueTrack
 
@@ -56,3 +57,11 @@ def test_drained_on_empty_track_returns_immediately():
         track = PcmQueueTrack(paced=False)
         await asyncio.wait_for(track.drained(), 1)
     run(main())
+
+
+def test_recv_after_stop_raises_media_stream_error():
+    from aiortc.mediastreams import MediaStreamError
+    track = PcmQueueTrack(paced=False)
+    track.stop()
+    with pytest.raises(MediaStreamError):
+        run(track.recv())

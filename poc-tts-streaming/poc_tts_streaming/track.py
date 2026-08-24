@@ -12,6 +12,7 @@ from collections import deque
 
 import numpy as np
 from aiortc import MediaStreamTrack
+from aiortc.mediastreams import MediaStreamError
 from av import AudioFrame
 
 from poc_tts_streaming.audio import FRAME_SAMPLES, SAMPLE_RATE, FrameSlicer, silence_frame, to_int16
@@ -65,7 +66,7 @@ class PcmQueueTrack(MediaStreamTrack):
 
     async def recv(self) -> AudioFrame:
         if self.readyState != "live":
-            raise Exception("track ended")
+            raise MediaStreamError
         if self._paced:
             if self._start is None:
                 self._start = time.monotonic()
