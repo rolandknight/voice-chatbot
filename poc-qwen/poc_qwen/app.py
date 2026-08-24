@@ -164,6 +164,7 @@ def build_demo(handlers: Handlers):
 
 
 def main() -> None:
+    os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "False")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     cfg = load_config()
     engine = Qwen3Engine(cfg)

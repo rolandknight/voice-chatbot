@@ -1,0 +1,6 @@
+2026-08-24 15:44:28,082 INFO __main__: voices: ['babel', 'marvin', 'one-one']
+2026-08-24 15:44:28,777 INFO httpx: HTTP Request: GET http://127.0.0.1:8007/gradio_api/startup-events "HTTP/1.1 200 OK"
+2026-08-24 15:44:28,785 INFO httpx: HTTP Request: HEAD http://127.0.0.1:8007/ "HTTP/1.1 200 OK"
+2026-08-24 15:44:29,306 INFO httpx: HTTP Request: GET https://api.gradio.app/pkg-version "HTTP/1.1 200 OK"
+2026-08-24 15:44:30,099 INFO httpx: HTTP Request: HEAD https://huggingface.co/api/telemetry/https%3A/api.gradio.app/gradio-initiated-analytics "HTTP/1.1 200 OK"
+2026-08-24 15:44:30,130 INFO httpx: HTTP Request: HEAD https://huggingface.co/api/telemetry/https%3A/api.gradio.app/gradio-launched-telemetry "HTTP/1.1 200 OK"
