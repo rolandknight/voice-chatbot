@@ -5,11 +5,12 @@ synthesize_stream is replaced with a generator of tone chunks."""
 
 import asyncio
 import json
+import time
 from unittest.mock import MagicMock
 
 import httpx
 import numpy as np
-from aiortc import RTCPeerConnection, RTCSessionDescription
+from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription
 
 from poc_tts_streaming.server import create_app
 
@@ -35,7 +36,10 @@ def make_app(tmp_path):
 async def _scenario(app):
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as http:
         token = (await http.post("/v1/realtime/client_secrets", json={})).json()["value"]
-        pc = RTCPeerConnection()
+        # No STUN: real loopback only, so ICE never touches the network (see
+        # webrtc.py) and stays sub-second instead of hitting aioice's retry
+        # backoff against an unreachable public STUN server.
+        pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
         events: list[dict] = []
         got: asyncio.Queue = asyncio.Queue()
         frames: list = []
@@ -96,4 +100,6 @@ async def _scenario(app):
 
 
 def test_realtime_loopback_end_to_end(tmp_path):
+    started = time.monotonic()
     asyncio.run(_scenario(make_app(tmp_path)))
+    assert time.monotonic() - started < 8, "loopback ICE must not touch the network"

@@ -10,7 +10,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 
-from aiortc import RTCPeerConnection, RTCSessionDescription
+from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription
 from aiortc.mediastreams import MediaStreamError
 
 from poc_tts_streaming.realtime.events import EventError, error_event
@@ -58,7 +58,12 @@ class CallRegistry:
             # the call would silently never emit session.created.
             build_session(lambda _event: None, _NullSink(), session_patch)
 
-        call = Call(id=new_id("call"), pc=RTCPeerConnection(), track=PcmQueueTrack())
+        # No STUN: this PoC only ever serves localhost, so host candidates are
+        # enough -- and offline/sandboxed runners have no route to aiortc's
+        # default public STUN server anyway. The browser client keeps its own
+        # STUN entry; that candidate simply goes unused here, harmlessly.
+        call = Call(id=new_id("call"), pc=RTCPeerConnection(RTCConfiguration(iceServers=[])),
+                    track=PcmQueueTrack())
         self._calls[call.id] = call
         pc = call.pc
         pc.addTrack(call.track)
