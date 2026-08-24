@@ -83,3 +83,14 @@ def test_hangup(client, fake_calls):
     assert client.delete("/v1/realtime/calls/call_abc").status_code == 200
     fake_calls.hangup.return_value = False
     assert client.delete("/v1/realtime/calls/call_zzz").status_code == 404
+
+
+def test_multipart_with_a_bad_session_patch_is_a_400_and_creates_no_call(app, client):
+    r = client.post("/v1/realtime/calls",
+                    files={"sdp": (None, "v=0\r\noffer"),
+                           "session": (None, '{"audio": {"output": {"voice": "ghost.wav"}}}')},
+                    headers={"authorization": f"Bearer {_token(client)}"})
+    assert r.status_code == 400
+    err = r.json()["error"]
+    assert err["code"] == "invalid_value" and err["param"] == "session.audio.output.voice"
+    assert len(app.state.calls) == 0
