@@ -13,7 +13,7 @@ import dataclasses
 import logging
 import threading
 from dataclasses import dataclass
-from typing import Callable, Iterator, Protocol
+from typing import AsyncIterator, Callable, Iterator, Protocol
 
 import numpy as np
 
@@ -117,6 +117,49 @@ class SynthWorker:
 
     def shutdown(self) -> None:
         self._pool.shutdown(wait=False, cancel_futures=True)
+
+
+class ProducerError(Exception):
+    """The blocking iterator raised on the worker thread; `.cause` is the original."""
+    def __init__(self, cause: BaseException) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+
+
+async def worker_stream(worker: SynthWorker, make_iter: Callable[[], Iterator]) -> AsyncIterator:
+    """Run a blocking iterator on the worker thread and yield its items on the loop.
+
+    Items produced before a failure are yielded, then ProducerError is raised.
+    Never hangs: if the worker cancels the job before it starts (shutdown with
+    cancel_futures), the stream simply ends.
+    """
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+
+    def produce() -> None:
+        try:
+            for item in make_iter():
+                loop.call_soon_threadsafe(queue.put_nowait, item)
+        except Exception as exc:  # noqa: BLE001 -- surfaced to the consumer as ProducerError
+            loop.call_soon_threadsafe(queue.put_nowait, ProducerError(exc))
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, _DONE)
+
+    def on_done(fut: concurrent.futures.Future) -> None:
+        if fut.cancelled():
+            try:
+                loop.call_soon_threadsafe(queue.put_nowait, _DONE)
+            except RuntimeError:
+                pass  # loop already closed
+
+    worker.submit(produce).add_done_callback(on_done)
+    while True:
+        item = await queue.get()
+        if item is _DONE:
+            return
+        if isinstance(item, ProducerError):
+            raise item
+        yield item
 
 
 # ---- session -----------------------------------------------------------------
@@ -330,43 +373,12 @@ class RealtimeSession:
         self._spawn(self._run_response(resp, text, voice, knobs))
 
     async def _run_response(self, resp: _Response, text: str, voice: str, knobs: ChatterboxKnobs) -> None:
-        loop = asyncio.get_running_loop()
-        queue: asyncio.Queue = asyncio.Queue()
-
-        def produce() -> None:
-            try:
-                for chunk in self._synthesizer(text, voice, knobs, resp.cancel):
-                    loop.call_soon_threadsafe(queue.put_nowait, chunk)
-            except Exception as exc:  # noqa: BLE001 -- reported as response.failed
-                loop.call_soon_threadsafe(queue.put_nowait, exc)
-            finally:
-                loop.call_soon_threadsafe(queue.put_nowait, _DONE)
-
-        def _on_worker_done(f: concurrent.futures.Future) -> None:
-            # A produce() that never ran (e.g. SynthWorker.shutdown(cancel_futures=True)
-            # cancelling a still-queued job) never reaches its own `finally`, so the
-            # consumer below would await queue.get() forever without this nudge.
-            if f.cancelled():
-                try:
-                    loop.call_soon_threadsafe(queue.put_nowait, _DONE)
-                except RuntimeError:
-                    pass
-
-        fut = self._worker.submit(produce)
-        fut.add_done_callback(_on_worker_done)
         try:
-            while True:
-                item = await queue.get()
-                if item is _DONE:
-                    break
+            async for chunk_text, pcm in worker_stream(
+                self._worker, lambda: self._synthesizer(text, voice, knobs, resp.cancel)
+            ):
                 if resp.closed:
                     continue  # cancelled: discard whatever the worker still produces
-                if isinstance(item, Exception):
-                    logger.error("response %s failed: %s", resp.id, item)
-                    resp.error = {"type": "server_error", "code": "synthesis_failed", "message": str(item)}
-                    await self._finish(resp, "failed")
-                    continue
-                chunk_text, pcm = item
                 delta = chunk_text + " "
                 resp.transcript += delta
                 self._send(server_event(E.AUDIO_TRANSCRIPT_DELTA, response_id=resp.id, item_id=resp.item_id,
@@ -375,13 +387,21 @@ class RealtimeSession:
                 if not resp.started:
                     resp.started = True
                     self._send(server_event(E.OUTPUT_AUDIO_BUFFER_STARTED, response_id=resp.id))
+        except ProducerError as exc:
             if not resp.closed:
-                await self._finish(resp, "completed")
-        except Exception as exc:  # noqa: BLE001 -- e.g. a dead transport mid-response
-            logger.error("response %s aborted: %s", resp.id, exc)
-            resp.error = {"type": "server_error", "code": "response_aborted", "message": str(exc)}
-            resp.cancel.set()
-            await self._finish(resp, "failed")
+                logger.error("response %s failed: %s", resp.id, exc.cause)
+                resp.error = {"type": "server_error", "code": "synthesis_failed", "message": str(exc.cause)}
+                await self._finish(resp, "failed")
+            return
+        except Exception as exc:  # noqa: BLE001 -- transport/sink failure mid-response
+            if not resp.closed:
+                logger.error("response %s aborted: %s", resp.id, exc)
+                resp.error = {"type": "server_error", "code": "response_aborted", "message": str(exc)}
+                resp.cancel.set()
+                await self._finish(resp, "failed")
+            return
+        if not resp.closed:
+            await self._finish(resp, "completed")
 
     async def _finish(self, resp: _Response, status: str) -> None:
         if resp.closed:

@@ -6,7 +6,9 @@ import numpy as np
 import pytest
 
 from poc_tts_streaming.realtime.events import EventError
-from poc_tts_streaming.realtime.session import ChatterboxKnobs, RealtimeSession, SynthWorker
+from poc_tts_streaming.realtime.session import (
+    ChatterboxKnobs, ProducerError, RealtimeSession, SynthWorker, worker_stream,
+)
 
 KNOBS = ChatterboxKnobs.from_config({
     "temperature": 0.6, "exaggeration": 0.5, "cfg_scale": 1.0,
@@ -370,4 +372,35 @@ def test_send_failure_mid_response_marks_it_failed_and_frees_the_session():
         statuses = [e["response"]["status"] for e in sent if e["type"] == "response.done"]
         assert statuses == ["failed", "completed"]
         assert "error" not in types(sent), "the second response.create must not be rejected"
+    run(main())
+
+
+def test_worker_stream_ends_instead_of_hanging_when_the_job_is_cancelled_before_it_starts():
+    async def main():
+        worker = SynthWorker()
+        release = threading.Event()
+        worker.submit(lambda: release.wait(5))  # occupies the single worker thread
+
+        async def consume():
+            return [i async for i in worker_stream(worker, lambda: iter([1, 2, 3]))]
+
+        task = asyncio.ensure_future(consume())
+        await asyncio.sleep(0.05)
+        worker.shutdown()  # cancels the queued job before it ever runs
+        assert await asyncio.wait_for(task, 2) == []
+        release.set()
+    run(main())
+
+
+def test_worker_stream_yields_earlier_items_then_raises_producer_error():
+    async def main():
+        def gen():
+            yield 1
+            raise RuntimeError("boom")
+        got = []
+        with pytest.raises(ProducerError) as exc:
+            async for i in worker_stream(SynthWorker(), gen):
+                got.append(i)
+        assert got == [1]
+        assert str(exc.value.cause) == "boom"
     run(main())

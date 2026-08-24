@@ -6,7 +6,6 @@ so tests can inject a mock and run without a GPU.
 
 from __future__ import annotations
 
-import asyncio
 import io
 import json
 import logging
@@ -28,7 +27,9 @@ from poc_tts_streaming.config import load_config, voice_paths as configured_voic
 from poc_tts_streaming.engine_flash import OutOfMemoryError, discover_voices
 from poc_tts_streaming.realtime import ids
 from poc_tts_streaming.realtime.events import EventError
-from poc_tts_streaming.realtime.session import ChatterboxKnobs, RealtimeSession, SynthWorker
+from poc_tts_streaming.realtime.session import (
+    ChatterboxKnobs, ProducerError, RealtimeSession, SynthWorker, worker_stream,
+)
 from poc_tts_streaming.realtime.webrtc import CallRegistry
 
 logger = logging.getLogger(__name__)
@@ -302,29 +303,14 @@ def create_app(engine, config: dict, voice_paths: list[Path], *,
 
     async def _pcm_chunks(text: str, voice: str, knobs: ChatterboxKnobs):
         """Run the synthesizer on the worker; yield int16 bytes per chunk as they land."""
-        loop = asyncio.get_running_loop()
-        queue: asyncio.Queue = asyncio.Queue()
         cancel = threading.Event()
-        done = object()
-
-        def produce():
-            try:
-                for _, pcm in engine_synthesizer(engine)(text, voice, knobs, cancel):
-                    loop.call_soon_threadsafe(queue.put_nowait, to_int16(pcm).tobytes())
-            except Exception as exc:  # noqa: BLE001
-                loop.call_soon_threadsafe(queue.put_nowait, exc)
-            finally:
-                loop.call_soon_threadsafe(queue.put_nowait, done)
-
-        app.state.worker.submit(produce)
+        synthesize = engine_synthesizer(engine)
         try:
-            while True:
-                item = await queue.get()
-                if item is done:
-                    return
-                if isinstance(item, Exception):
-                    raise item
-                yield item
+            async for _, pcm in worker_stream(app.state.worker, lambda: synthesize(text, voice, knobs, cancel)):
+                yield to_int16(pcm).tobytes()
+        except ProducerError as exc:
+            logger.error("/v1/audio/speech failed for voice %r: %s", voice, exc.cause)
+            raise exc.cause
         finally:
             cancel.set()
 
