@@ -839,7 +839,7 @@ document.addEventListener('DOMContentLoaded', async function () {
 
     // --- Realtime streaming ---
     let rt = null;                      // RealtimeTtsClient
-    let analyser = null, meterRaf = null;
+    let analyser = null, meterRaf = null, meterCtx = null;
     let metrics = null;                 // per-response timing
     const $ = (id) => document.getElementById(id);
 
@@ -892,9 +892,11 @@ document.addEventListener('DOMContentLoaded', async function () {
     }
 
     function startMeter(stream) {
-        const ctx = new (window.AudioContext || window.webkitAudioContext)();
-        const src = ctx.createMediaStreamSource(stream);
-        analyser = ctx.createAnalyser(); analyser.fftSize = 512;
+        if (meterCtx) { try { meterCtx.close(); } catch {} }
+        meterCtx = new (window.AudioContext || window.webkitAudioContext)();
+        if (meterCtx.state === 'suspended') meterCtx.resume();
+        const src = meterCtx.createMediaStreamSource(stream);
+        analyser = meterCtx.createAnalyser(); analyser.fftSize = 512;
         src.connect(analyser);
         const buf = new Float32Array(analyser.fftSize);
         const tick = () => {
@@ -938,7 +940,11 @@ document.addEventListener('DOMContentLoaded', async function () {
         if (!rt) return;
         try { await rt.cancel(); await rt.clear(); } catch (e) { showNotification(e.message, 'error'); }
     });
-    $('disconnect-btn').addEventListener('click', async () => { if (rt) { await rt.disconnect(); rt = null; } });
+    $('disconnect-btn').addEventListener('click', async () => {
+        if (rt) { await rt.disconnect(); rt = null; }
+        if (meterRaf) { cancelAnimationFrame(meterRaf); meterRaf = null; }
+        if (meterCtx) { try { meterCtx.close(); } catch {} meterCtx = null; }
+    });
 
     function proceedWithSubmissionChecks() {
         const textContent = textArea.value.trim();

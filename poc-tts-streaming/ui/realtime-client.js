@@ -20,7 +20,7 @@ class RealtimeTtsClient {
 
   on(type, fn) { (this._handlers.get(type) || this._handlers.set(type, []).get(type)).push(fn); return this; }
   off(type, fn) { const h = this._handlers.get(type) || []; this._handlers.set(type, h.filter(x => x !== fn)); }
-  _emit(type, ev) { for (const fn of [...(this._handlers.get(type) || []), ...(this._handlers.get("*") || [])]) fn(ev); }
+  _emit(type, ev) { for (const fn of this._handlers.get(type) || []) fn(ev); }
 
   async _clientSecret() {
     if (this.apiKey) return this.apiKey;   // against OpenAI, mint the ephemeral key server-side; here a raw key is fine for a manual check
@@ -76,6 +76,7 @@ class RealtimeTtsClient {
 
   _onServerEvent(ev) {
     this._emit(ev.type, ev);
+    for (const fn of this._handlers.get("*") || []) fn(ev);   // "*" == every server event, not every internal emit
     if (ev.type === "error" && ev.error?.event_id && this._pending.has(ev.error.event_id)) {
       this._pending.get(ev.error.event_id).reject(new Error(`${ev.error.code}: ${ev.error.message}`));
       this._pending.delete(ev.error.event_id);
