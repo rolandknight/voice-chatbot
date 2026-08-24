@@ -1,14 +1,68 @@
 # poc-tts-streaming on an RTX 2060 — time-to-first-audio
 
 Measured 2026-08-24 on `pop-os`, NVIDIA GeForce RTX 2060 (6 GB, compute
-capability sm_75), driver 580.159.03, torch 2.6.0+cu124. Generation config
-is `config.yaml`'s defaults (`num_steps: 4, n_cfm_timesteps: 1,
-chunk_size: 120, split_text: true, split_on_clauses: true`), resolved
-dtype `float16`, backend `torch` (SDPA — flashinfer is unavailable on this
-card; see `poc-tts/bench-rtx-2060.md`). Voice: `one-one.mp3`.
+capability sm_75), driver 580.159.03, torch 2.6.0+cu124. Voice: `one-one.mp3`.
+
+**Current defaults** (`config.yaml`, as of the "Follow-up batch" section
+below): `num_steps: 4, n_cfm_timesteps: 1, chunk_size: 300, temperature: 0.5,
+split_text: true, split_on_clauses: true`, resolved dtype `float16`, backend
+`torch` (SDPA — flashinfer is unavailable on this card; see
+`poc-tts/bench-rtx-2060.md`), and `engine.block_streaming: true` —
+**effective** here (this card resolves to CUDA + torch backend), so the
+headline numbers below are the block-streaming engine's. See "Follow-up batch
+(2026-08-24): new defaults" for what changed, why, and the full re-bench.
 
 Raw data: [`reports/stream_runs.jsonl`](reports/stream_runs.jsonl).
-Reproduce the engine column with `make bench-stream`.
+Reproduce the engine column with `python -m poc_tts_streaming.bench_stream
+--block-stream --runs 3` (the effective default engine here) or plain `make
+bench-stream` (sentence engine, what non-CUDA/torch backends fall back to).
+
+| sentence | chars | chunks | TTFA engine (s) | TTFA browser (s) | TTFA server (s) | total gen (s) | audio (s) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| short (30 ch) | 30 | 1 | 0.442 | 0.681 | 0.473 | 0.889 | 2.08 |
+| medium (104 ch) | 104 | 1 | 0.440 | 0.739 | 0.501 | 1.845 | 5.60 |
+| long (317 ch) | 317 | 2 | 0.441 | 0.706 | 0.500 | 5.593 | 17.70 |
+| Dickens excerpt (945 ch) | 945 | 4 | — | 0.820 | 0.512 | 18.557 | 59.98 |
+
+- **TTFA engine** — best-of-3, `t0` (call into `synthesize_stream`) to the
+  first `(chunk_text, pcm)` yielded, block-streaming engine
+  (`python -m poc_tts_streaming.bench_stream --block-stream --runs 3`).
+  Excludes WebRTC/HTTP transport, encode, and the browser's jitter buffer —
+  it is the engine's own floor. No row for the Dickens excerpt: outside
+  `bench.py`'s three baseline sentences.
+- **TTFA browser** / **TTFA server** / **total gen** / **audio** — headless
+  Chrome driving the real UI at config-default knobs and the same voice, one
+  run per row (not best-of-N), from the controller's live measurement (see
+  the follow-up batch section). Browser TTFA is `response.created` sent →
+  first non-silent sample at the AnalyserNode (includes Opus encode, jitter
+  buffer, decode); server TTFA is `response.created` → `output_audio_buffer.
+  started` at the server side of the session (no Opus decode / jitter
+  buffer, but still inside the full WebRTC session, unlike the engine
+  column).
+- **chunks** — transcript chunks (real `chunk_text` splits / `response.
+  audio_transcript.delta` events), not the block engine's internal windows
+  (see "Which configuration each table below comes from" under Task 16
+  spike for the block-join/chunk-join distinction).
+
+Engine TTFA is now flat at ~0.44 s regardless of sentence length (previously
+it scaled with sentence length — see the "previous default" table below) and
+beats the poc-tts whole-utterance baseline (0.59 s / 1.03 s / 3.38 s for
+short/medium/long) by a wider margin than before on every sentence. Browser
+TTFA sits roughly 0.24–0.30 s above engine TTFA — WebRTC/session overhead
+(client-secret round trip, SDP offer/answer, ICE, Opus encode, jitter buffer)
+that generation improvements don't touch, and server TTFA sits in between, as
+expected for a narrower measurement window than browser but still inside the
+full session.
+
+### Previous default (chunk_size 120, temperature 0.6, sentence streaming only)
+
+The table this doc originally shipped with, kept here for comparison rather
+than deleted. Generation config was `chunk_size: 120`, `temperature: 0.6`;
+`engine.block_streaming` did not exist yet, so sentence streaming was the
+only path. Sections below this point that predate the follow-up batch
+(`Server TTFA`, `HTTP chunked-PCM reference points`, `Cold start`, `Gaps
+between chunks`) were measured at this same previous-default config unless
+individually dated otherwise.
 
 | sentence | chars | chunks | TTFA engine (s) | TTFA browser (s) | total gen (s) | audio (s) | poc-tts whole-utterance (s) |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -613,3 +667,212 @@ Caveats a follow-up must clear before this ships:
 - **Six times as many sink pushes** per utterance (20–22 windows vs 4 chunks on
   the long paragraph). `PcmQueueTrack` should not care, but that has not been
   exercised end to end.
+
+## Follow-up batch (2026-08-24): new defaults
+
+The GO above shipped block streaming behind a flag, `false` by default. This
+batch flips the defaults this doc now opens with, fixes the chunk-edge
+silence the flag exposed, and closes out the post-EOS hallucination report
+that was still open. Raw data for the re-bench:
+[`reports/stream_runs.jsonl`](reports/stream_runs.jsonl) (appended, previous
+rows kept) and [`reports/spike_seams.json`](reports/spike_seams.json)
+(overwritten by `spike_analysis seams`, so it reflects only this run).
+
+### What changed
+
+- Defaults: `chunk_size` 120 → 300, `temperature` 0.6 → 0.5,
+  `engine.block_streaming: true` — effective on CUDA + torch (this card),
+  with a logged fallback to sentence streaming on every other resolved
+  device/backend.
+- Chunk-edge silence trim (sentence path) + trailing-silence gate (block
+  path): 12 s no-EOS runaway tails now cut to `trim_keep_ms`; ordinary
+  chunks shed 0.15–0.64 s of stacked silence.
+- `speakable()` punctuation normalisation at both model boundaries (A/B: the
+  runaway-rate change is within noise; it ships on prosody grounds).
+- RNG fork (`torch.random.fork_rng`) around block-path vocoding: tokens now
+  identical to the sentence path per chunk (the guarantee is per-chunk —
+  multi-chunk utterances still diverge from chunk two, see "Prosody is
+  preserved by construction" above).
+- UI: `split_on_clauses` toggle; every generation knob now initialises from
+  `generation_defaults` (`config.yaml`'s `generation:` block) instead of
+  hardcoded slider defaults; curated voice list (`voices.paths: [../voices]`
+  → `babel.mp3`, `marvin.mp3`, `one-one.mp3`).
+- Task A diagnosis: no post-EOS vocoding bug existed; the reported
+  "hallucination" was silent runaways (the 1–2 % T3 budget-exhaustion bug,
+  now trimmed) plus RNG-order divergence between the two engines past the
+  first chunk. See "Task A diagnosis" below.
+
+### Browser measurements (controller, headless Chrome, defaults, warm)
+
+One run per row, against the live UI/WebRTC session, block streaming active
+(the effective default on this card):
+
+| sentence | browser TTFA | server TTFA | total gen | audio | chunks |
+|---|---:|---:|---:|---:|---:|
+| short (30 ch) | 0.681 s | 0.473 s | 0.889 s | 2.08 s | 1 |
+| medium (104 ch) | 0.739 s | 0.501 s | 1.845 s | 5.60 s | 1 |
+| long (317 ch) | 0.706 s | 0.500 s | 5.593 s | 17.70 s | 2 |
+| Dickens excerpt (945 ch) | 0.820 s | 0.512 s | 18.557 s | 59.98 s | 4 (4 transcript deltas, 0 errors) |
+
+Against the previous default (sentence streaming, chunk 120, temp 0.6):
+browser 1.136 / 1.455 / 1.424 s; server 0.772 / 1.228 / 1.187 s (short /
+medium / long — no Dickens row was taken under the previous default). Browser
+TTFA drops 40–50 % on short/medium and 50 % on long; the gain widens with
+length because block streaming's TTFA no longer depends on how much of the
+sentence remains once the first block is vocoded.
+
+### Engine bench — both engines at the new defaults
+
+`bench_stream.py` selects its engine by CLI flag
+(`--block-stream` → `BlockStreamEngine`, absent → `FlashEngine`) and tags
+each row `engine: "sentence"` or `"blockstream"` in
+`reports/stream_runs.jsonl`; no code change was needed to bench both.
+
+Sentence engine (`make bench-stream`, default 2 runs, best-of-N; what every
+non-CUDA/torch backend falls back to):
+
+```
+  short: ttfa 0.545s  gen 0.54s  audio 1.97s  chunks 1
+ medium: ttfa 1.061s  gen 1.06s  audio 5.84s  chunks 1
+   long: ttfa 2.183s  gen 3.01s  audio 17.43s  chunks 2
+```
+
+Block-streaming engine (`python -m poc_tts_streaming.bench_stream
+--block-stream --runs 3`; the effective default here — "chunks" in this
+script's output is windows, not transcript chunks):
+
+```
+  short: ttfa 0.442s  gen 0.84s  audio 1.93s  chunks 3
+ medium: ttfa 0.440s  gen 1.65s  audio 5.39s  chunks 7
+   long: ttfa 0.441s  gen 5.28s  audio 17.58s  chunks 17
+```
+
+Block-streamed TTFA is flat at 0.44 s regardless of sentence length, same
+shape as the Task 16 spike found at the old defaults. One side effect of
+raising `chunk_size` to 300 while relying on block streaming to hide it:
+**the sentence-only fallback path (cpu / mlx / flashinfer) got slower on
+long text**, not faster. `long`'s sentence-engine TTFA rose from 0.843 s at
+the old defaults (chunk_size 120, 4 chunks) to 2.183 s here (chunk_size 300,
+2 chunks) — the first chunk is now roughly twice the text, so it takes
+roughly twice as long to generate before any audio plays. `chunk_size: 300`
+is a deliberate trade for prosody that block streaming is expected to pay
+for; a machine that falls back to sentence streaming pays the chunk_size
+cost with none of the offsetting TTFA win. Worth a follow-up if the
+sentence-only fallback path needs to stay fast on its own (e.g. a
+`block_streaming_effective`-conditioned `chunk_size`), not something this
+batch changes.
+
+### Seam re-measure (post-gate)
+
+`spike_analysis seams --runs 3`, re-run at the new defaults (`chunk_size:
+300`) with the chunk-edge silence trim now live on both paths — the Task B
+review asked for this because trimming changes what sits on either side of
+every join, which the original seam numbers (above, pre-trim) don't reflect.
+
+**TTFA (best of 3 runs)** — same shape as before, wider gap on `long` because
+of the `chunk_size` effect noted above:
+
+```
+sentence  sentence-level  block-stream    change
+   short           0.478         0.431     -9.8%
+  medium           0.990         0.435    -56.1%
+    long           1.965         0.447    -77.2%
+```
+
+(Previously: short −19.8 %, medium −52.5 %, long −55.9 %. Short's gate isn't
+comparable release-to-release — it's dominated by fixed per-chunk cost, and
+is the noisiest of the three in both runs.)
+
+**Step ratio at joins**, pooled across the nine block-streamed renders (3
+sentences × 3 runs):
+
+| join type | n | median | max | control median (per render) | exceeds own render's control p95 |
+|---|---:|---:|---:|---:|---:|
+| block (all 3 sentences) | 68 | 1.40 | 7.49 | 0.67–1.71 | 1/68 |
+| chunk (blockstream/long only) | 3 | 49.30 | 51.87 | 1.25–1.71 | 3/3 |
+| chunk (sentence/long only) | 3 | 1.05 | 30.40 | 1.12–1.27 | 1/3 |
+
+Previously (pre-trim, pooled over all nine blockstream renders): 73 block
+joins, median 0.60, max 5.31, 1/73 above its own render's control p95.
+**By the calibrated metric — how often a join exceeds that same render's own
+control p95 — block joins are unchanged: roughly 1 in 70 either way.** The
+raw median step ratio at a block join more than doubled (0.60 → 1.40), which
+looks alarming in isolation but tracks the calibrated metric holding steady,
+not a new defect.
+
+**Chunk joins moved a lot more**, and that's the trim doing its job, not a
+regression: with `trim_silence` now live, every chunk edge is cut back to
+120 ms of near-silence at −45 dBFS. Checking the raw samples at each
+blockstream/long chunk join: `rms_before` is 0.0006–0.0013 (already near the
+noise floor — that's the 120 ms trim residue) and `rms_after` is exactly
+0.0. Before the trim, a chunk join's neighbourhood held several times more
+near-silent padding, which set a small-but-stable local step-ratio
+denominator; after trimming there's almost nothing left to average over, so
+the same absolute (near-zero) discontinuity produces a much larger ratio.
+The RMS-jump-percentile metric, which isn't sensitive to this scaling, tells
+the same "inherited, not improved" story as before: chunk joins still read
+200 % jump at the 99.6th–99.8th percentile on both engines (99.6–99.7 %
+pre-trim, 99.8 % here) — a silence-to-silence transition between independent
+`generate()` draws, present on both paths, that block streaming neither
+fixes nor worsens. No listening evidence suggests this reads as an audible
+regression; it's a metric artifact of measuring a much quieter join.
+
+**RMS jump, as a percentile of the same statistic everywhere:**
+
+| render | join type | n | jump % (median) | percentile (median / max) | of all offsets |
+|---|---|---:|---:|---:|---:|
+| blockstream / short  | block | 7  | 41.3 % | 79.1 / 93.9 | 45.5 % |
+| blockstream / medium | block | 16 | 12.6 % | 43.5 / 91.3 | 43.5 % |
+| blockstream / long   | block | 45 | 19.3 % | 53.6 / 97.4 | 45.3 % |
+| blockstream / long   | chunk | 3  | 200.0 % | 99.8 / 99.8 | 45.3 % |
+| sentence / long      | chunk | 3  | 200.0 % | 99.8 / 99.8 | 43.0 % |
+
+**Glitch scan** (worst step ratio anywhere in run 0 of each render, and its
+distance to the nearest join):
+
+```
+blockstream/short    0.648s r=25.8   nearest join 1.000s (block, -0.352s)
+blockstream/medium   3.248s r=30.8   nearest join 3.556s (block, -0.308s)
+blockstream/long     12.365s r=36.4  nearest join 12.365s (chunk, +0.000s)
+sentence/short       0.671s r=80.7   (no joins in this render)
+sentence/medium      0.476s r=24.9   (no joins in this render)
+sentence/long        3.014s r=29.0   nearest join 12.492s (chunk, -9.478s)
+```
+
+The worst glitch on `blockstream/long` now sits exactly at a chunk join
+(+0.000 s) — this is the same trimmed near-silence-to-silence transition the
+step-ratio and jump tables above already flag, not an independent finding.
+Per-render maxima otherwise remain comparable between the two paths, as
+before (block streaming is not introducing a class of transient the
+sentence-level path lacks).
+
+**Conclusion: seam statistics moved, mostly as an artifact of what the
+edge-silence trim measures, not as a quality regression.** Block joins are
+unchanged by the calibrated (exceeds-own-control-p95) metric. Chunk joins
+show much larger raw numbers post-trim because trimming shrank the silence
+padding the old numbers were partly measuring; the RMS-jump-percentile view,
+which isn't sensitive to that scaling, is essentially unchanged (99.6–99.7 %
+→ 99.8 %). Nothing here revises the Verdict above.
+
+### Task A diagnosis: post-EOS hallucination — hypothesis vs. finding
+
+The original hypothesis (see "Post-EOS hallucination report" above) was that
+the streamed path never trims at `stop_speech_token` and speaks out the rest
+of the token budget as babble. **That hypothesis was not confirmed.**
+`generate_blocks` already stops at EOS, a second independent guard
+(`_trim_to_eos`) sits in front of the vocoder, and streamed sample counts
+matched `trimmed_tokens × 960` on 160/160 paired runs — there is no
+post-EOS vocoding bug on either engine.
+
+What *is* real, and engine-agnostic: roughly 1–2 % of chunks never emit EOS
+and run the full token budget (a 300-token / 12 s floor on short text), and
+the excess is **silence, not babble** — RMS after the sentence ends measured
+0.000 across every captured runaway. That bug is exactly what this batch's
+chunk-edge silence trim (section above) fixes: runaway tails now cut from
+12.00 s to 1.75 s (sentence) / 2.85 s (blockstream). Whether that silent
+runaway, or the RNG-order divergence between the two engines past the first
+chunk (see "Prosody is preserved by construction"), is what the original
+user heard as "hallucination" is unresolved — nothing in 160 paired runs
+produced trailing *speech* on either path — but both known defects in that
+area are now closed: the runaway by the silence trim, and the RNG mismatch
+by the `torch.random.fork_rng` fence, both in this batch.

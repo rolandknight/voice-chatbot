@@ -390,9 +390,10 @@ def main() -> None:
         # including the import graph the server tests exercise.
         from poc_tts_streaming.engine_blockstream import BlockStreamEngine
 
-        logger.warning(
-            "engine.block_streaming is on -- using the Task 16 spike engine. "
-            "See poc-tts-streaming/results-rtx-2060.md before trusting it."
+        logger.info(
+            "block streaming engine active (cuda/torch); sentence streaming "
+            "fallback on other backends -- see poc-tts-streaming/"
+            "results-rtx-2060.md for the measurements behind it."
         )
         engine_class = BlockStreamEngine
     elif requested_block_streaming:
