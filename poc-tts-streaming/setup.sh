@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bootstrap the poc-tts environment. Idempotent.
+# Bootstrap the poc-tts-streaming environment. Idempotent.
 set -euo pipefail
 
 POC_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -56,4 +56,4 @@ import av, aiortc, torch
 print(f"aiortc {aiortc.__version__}, av {av.__version__}, torch {torch.__version__}")
 PY
 
-echo "poc-tts setup done"
+echo "poc-tts-streaming setup done"

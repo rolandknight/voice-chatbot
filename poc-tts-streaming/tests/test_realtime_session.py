@@ -435,3 +435,15 @@ def test_unlabelled_window_adds_audio_without_a_transcript_delta():
         assert done["output"][0]["content"][0] == {"type": "audio", "transcript": "Hello. "}
         assert types(sent).count("output_audio_buffer.started") == 1
     run(main())
+
+
+def test_ui_slider_extremes_all_validate():
+    """ui/index.html slider bounds must stay inside the server's _RANGES --
+    a slider that can exceed the range kills Generate with a bare error toast."""
+    ui_bounds = {  # id -> (min, max) as in ui/index.html
+        "temperature": (0.0, 1.5), "exaggeration": (0.0, 2.0), "cfg_scale": (0.0, 2.0),
+        "num_steps": (1, 16), "n_cfm_timesteps": (1, 4), "chunk_size": (50, 500),
+    }
+    for key, (lo, hi) in ui_bounds.items():
+        KNOBS.merged({key: lo}, param_prefix="x")
+        KNOBS.merged({key: hi}, param_prefix="x")

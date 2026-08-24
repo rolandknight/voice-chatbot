@@ -250,7 +250,7 @@ def create_app(engine, config: dict, voice_paths: list[Path], *,
     async def restart_server():
         return JSONResponse(
             {"message": "Restarting is not supported in the poc-tts PoC. "
-                        "Stop and rerun `make poc-tts`."}
+                        "Stop and rerun `make poc-tts-streaming`."}
         )
 
     @app.post("/v1/realtime/client_secrets")
@@ -384,7 +384,7 @@ def main() -> None:
         engine.load()
     except OutOfMemoryError as exc:
         logger.error("failed to load Chatterbox Flash: %s", exc)
-        sys.exit(f"poc-tts: failed to load the model -- {exc}")
+        sys.exit(f"poc-tts-streaming: failed to load the model -- {exc}")
     app = create_app(engine, config, voice_paths=paths)
     uvicorn.run(
         app,

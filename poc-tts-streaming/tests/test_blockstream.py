@@ -21,7 +21,6 @@ def test_block_streaming_defaults_off():
     assert load_config()["engine"]["block_streaming"] is False
 
 
-@gpu
 @pytest.fixture(scope="module")
 def loaded():
     """A warm FlashEngine plus the pieces generate_blocks needs."""

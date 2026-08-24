@@ -7,7 +7,7 @@ VENV := .venv
 PY := $(VENV)/bin/python
 STAMP := $(VENV)/.setup-stamp
 
-# Load poc-tts/.env if present (e.g. CUDA_HOME=$HOME/cuda-12.4) and export its
+# Load poc-tts-streaming/.env if present (e.g. CUDA_HOME=$HOME/cuda-12.4) and export its
 # variables to recipes that run Python. Sourced in the shell rather than
 # pulled in with make's `include`, because `include` would make parse $HOME as
 # a make variable reference ($H followed by literal OME) instead of letting

@@ -43,6 +43,14 @@ expected exception: this server's Chatterbox-specific knobs travel under an
 `x_chatterbox` key (`SpeechRequest.x_chatterbox`, `ChatterboxKnobs.merged`),
 which `api.openai.com` doesn't know about and will reject.
 
+Two known fidelity gaps to keep in mind while poking at this: the
+client-secret's `session` patch is not carried into the call -- this server
+applies session config via `session.update` instead, which the UI sends
+before every speak (`ui/script.js`'s `updateSession(sessionPatchFromControls())`);
+and `RealtimeTtsClient.disconnect()` assumes the `Location` header returned
+by `/v1/realtime/calls` is a relative path, so it would break against a
+server that returns an absolute URL there.
+
 ## aiortc
 
 `setup.sh` pins `aiortc>=1.9,<2` (`requirements.txt`) and resolves to

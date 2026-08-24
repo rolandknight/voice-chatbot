@@ -329,7 +329,7 @@ asserted.
 
 **GO**, with caveats.
 
-- TTFA, medium sentence: −52 % … −59 % across three independent measurement
+- TTFA, medium sentence: −52 % … −59 % across two independent measurement
   sets. Gate: ≥ 40 %. ✅
 - Seams, benched configuration, 3 sentences × 3 renders: 73 block joins with a
   median step ratio of 0.60 against a control median of 1.05, 1 of 73 above
@@ -341,9 +341,10 @@ asserted.
 
 Caveats a follow-up must clear before this ships:
 
-- **Nobody has listened.** Every check above is numeric.
-  `reports/spike-wavs/` holds `{short,medium,long}-{sentence,blockstream}.wav`
-  and the paired pair, for exactly that.
+- **Listened, and it holds up.** Every check above is numeric, but the user
+  listened to the A/B pairs in `reports/spike-wavs/` (holds
+  `{short,medium,long}-{sentence,blockstream}.wav` and the paired pair) on
+  2026-08-24 and confirmed the audio is good — no audible seams.
 - **The 3.3–4.8 % log-mel divergence** from a one-shot render is real, grows
   with window count, and has two unseparated causes (above).
 - **Chunk joins are untouched.** The 200 %-jump / 99.6th-percentile chunk
