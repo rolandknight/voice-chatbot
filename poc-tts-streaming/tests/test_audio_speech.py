@@ -1,8 +1,13 @@
+import socket
 import threading
+import time
+from contextlib import contextmanager
 from unittest.mock import MagicMock
 
+import httpx
 import numpy as np
 import pytest
+import uvicorn
 from fastapi.testclient import TestClient
 
 from poc_tts_streaming.server import create_app
@@ -21,6 +26,36 @@ class GatedStream:
         yield "Two.", np.full(2400, 0.25, dtype=np.float32)
 
 
+@contextmanager
+def live_server(app):
+    """uvicorn on an ephemeral loopback port, in a daemon thread. Only a real
+    HTTP server proves chunked delivery: Starlette's TestClient and httpx's
+    ASGITransport both buffer the whole body before returning it."""
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    # ws="none": the app never opens a WebSocket route, and uvicorn's "auto"
+    # protocol probing imports websockets.legacy at Config.load() time --
+    # which raises a DeprecationWarning this app has no reason to trigger.
+    server = uvicorn.Server(
+        uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning", ws="none")
+    )
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    for _ in range(200):
+        if server.started:
+            break
+        time.sleep(0.025)
+    else:
+        raise RuntimeError("uvicorn did not start")
+    try:
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        server.should_exit = True
+        thread.join(5)
+
+
 @pytest.fixture
 def setup(tmp_path):
     eng = MagicMock()
@@ -35,19 +70,27 @@ def setup(tmp_path):
 
 
 def test_pcm_is_streamed_chunk_by_chunk(setup):
-    app, eng, client = setup
+    app, eng, _ = setup
     stream = eng.synthesize_stream
-    with client.stream("POST", "/v1/audio/speech",
-                       json={"input": "One. Two.", "voice": "one-one.mp3", "response_format": "pcm"}) as r:
-        assert r.status_code == 200
-        assert r.headers["content-type"].startswith("audio/pcm")
-        it = r.iter_bytes(4800)
-        first = next(it)
-        assert len(first) == 4800, "first sentence arrives on its own"
-        assert stream.second_started.wait(5)
-        stream.gate.set()
-        rest = b"".join(it)
-        assert len(rest) == 4800
+    with live_server(app) as base:
+        started = time.monotonic()
+        with httpx.stream("POST", f"{base}/v1/audio/speech",
+                          json={"input": "One. Two.", "voice": "one-one.mp3", "response_format": "pcm"},
+                          timeout=10) as r:
+            assert r.status_code == 200
+            assert r.headers["content-type"].startswith("audio/pcm")
+            raw = r.iter_raw()
+            first = b""
+            while len(first) < 4800:
+                first += next(raw)
+            elapsed = time.monotonic() - started
+            assert elapsed < 2.0, f"first chunk arrived after {elapsed:.2f}s -- delivery is not incremental"
+            assert stream.second_started.wait(5)
+            assert not stream.gate.is_set()
+            stream.gate.set()
+            rest = first[4800:] + b"".join(raw)
+            first = first[:4800]
+            assert len(rest) == 4800
     assert np.frombuffer(first, dtype=np.int16)[0] == 8191
 
 
