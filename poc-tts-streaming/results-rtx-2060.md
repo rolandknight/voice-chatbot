@@ -398,17 +398,59 @@ vocoders.
 So the trailing-audio complaint is a **T3 budget-exhaustion bug affecting both
 engines**, and what it produces is a long silent tail. Whether that is what
 the user heard is unresolved; nothing in 160 paired runs produced trailing
-*speech* on either path. Two follow-ups are open and neither belongs to the
+*speech* on either path. Two follow-ups were opened and neither belonged to the
 streaming spike: cap or trim the unterminated budget (it changes the
 flag-off path too), and decide whether the RNG re-roll noted under "Prosody"
-should be fenced off with `torch.random.fork_rng`.
+should be fenced off with `torch.random.fork_rng`. The first is now done — see
+the next subsection; the second is still open.
 
 Regression cover added:
 `tests/test_blockstream.py::test_generate_blocks_stops_at_the_eos_block`
 (no block is emitted after the EOS block; the result carries no stop token)
 and `::test_streamed_samples_match_trimmed_tokens` (three bench sentences,
-chunked as they ship). The first was verified to fail when the early return
-is removed from the copied loop.
+chunked as they ship; since the silence trim landed it pins the *vocoded*
+length at `trimmed_tokens × 960` and the *emitted* length at exactly a
+whole-chunk `trim_edge_silence` of it). The first was verified to fail when the
+early return is removed from the copied loop.
+
+### Chunk-edge silence trim (2026-08-24) — the fix for the long pauses
+
+Both defects above are silence at a chunk's edges, so both are fixed in one
+place: `audio.trim_edge_silence` / `audio.TrailingSilenceGate`, cutting each
+chunk back to **120 ms of natural pause per edge** at a **−45 dBFS** floor
+(`engine.trim_silence` in config.yaml; set it false to stream the raw draw).
+
+The sentence engine trims each chunk before it yields. The block engine
+cannot — a runaway silent tail spans many windows that have already gone out
+by the time the chunk ends — so it runs one `TrailingSilenceGate` per chunk on
+the emission path: a window's speech goes out immediately, silence after it is
+buffered and released in full the moment more speech arrives (a real mid-chunk
+pause survives), and whatever is still buffered at chunk end is cut to 120 ms.
+The gate never alters a sample, so cross-fade continuity between emitted
+windows is untouched, and what it emits is byte-for-byte
+`trim_edge_silence` of that chunk's concatenation.
+
+Measured, `Sure, the kitchen light is on.` at config.yaml's knobs, on the
+captured budget-exhaustion seeds (200-seed scan, 2/400 chunk-renders hit the
+300-token ceiling — the 1–2 % rate above):
+
+| engine | seed | before | after | speech span |
+|---|---:|---:|---:|---:|
+| sentence | 8 | 12.00 s | **1.75 s** | 1.60 s |
+| blockstream | 15 | 12.00 s | **2.85 s** | 2.64 s |
+
+Ordinary (non-runaway) renders of the same sentence lose 0.15–0.64 s each,
+which is the per-join stacking: seeds 0–4, sentence 2.56→2.24, 2.28→1.95,
+2.44→2.00, 2.52→2.08, 1.92→1.77 s; blockstream 2.28→1.85, 2.44→2.08,
+2.44→2.10, 2.48→1.84, 2.64→2.39 s.
+
+On the two-chunk `long` bench sentence, four seeds each: sentence
+16.92→16.65, 17.96→16.69, **25.52→17.54** (a runaway in the *middle* of the
+utterance — the user's mid-passage pause), 18.00→17.75 s; blockstream
+18.08→17.24, 18.48→18.30, 18.08→17.54, 18.68→17.11 s.
+
+`reports/spike-wavs/trim-runaway-{sentence,blockstream}-{before,after}.wav`
+are those two seeds rendered both ways.
 
 ### Verdict
 
@@ -426,6 +468,9 @@ is removed from the copied loop.
   consumes RNG while vocoding, so the *draw* differs from the sentence path —
   distributionally the same, not the same utterance. ✅ with the qualification
   under "Prosody is preserved by construction".
+- Chunk-edge silence: trimmed to 120 ms per edge on both engines
+  (2026-08-24). Runaway chunks go from 12.00 s to 1.75 s / 2.85 s, and every
+  ordinary chunk join sheds 0.15–0.6 s. ✅
 - Post-EOS hallucination: investigated 2026-08-24 and **not reproduced** —
   streamed samples equal `trimmed_tokens × 960` on 160/160 runs. The real
   defect found is a 1–2 % T3 budget-exhaustion runaway that affects both

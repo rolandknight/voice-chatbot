@@ -21,6 +21,16 @@ engine:
   # with a logged notice, so this stays true across machines without
   # per-machine overrides. See results-rtx-2060.md for the go/no-go.
   block_streaming: true
+  # Chunk-edge silence. Every generate() draw opens and closes with its own
+  # silence, and neighbouring chunks stack theirs at the join; on top of that
+  # ~1-2 % of draws never emit the stop token and pad the whole token budget
+  # (a 300-token / 12 s floor for short text) with digital silence, on both
+  # engines. Trimming each chunk back to trim_keep_ms of natural pause per edge
+  # is the fix for both -- see poc_tts_streaming/audio.py for why -45 dBFS and
+  # 120 ms. Set trim_silence: false to stream the raw draw.
+  trim_silence: true
+  trim_threshold_db: -45.0
+  trim_keep_ms: 120
 
 generation:
   # Lowered from the paper default of 0.6 to reduce per-chunk variance/

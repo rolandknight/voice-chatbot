@@ -182,7 +182,12 @@ def test_blockstream_engine_end_to_end(loaded):
 
     _engine, _model, config = loaded
     engine = bs.BlockStreamEngine(
-        engine_cfg=config.get("engine", {}),
+        # trim_silence off: this test is about the *vocoder* tiling the token
+        # stream exactly, and the silence gate deliberately drops edge samples
+        # on the way out, which would make the 960-multiple arithmetic below
+        # meaningless. The gate's own arithmetic is
+        # test_streamed_samples_match_trimmed_tokens.
+        engine_cfg={**config.get("engine", {}), "trim_silence": False},
         generation_cfg=config.get("generation", {}),
         voice_paths=voice_paths(config),
     )
@@ -252,17 +257,28 @@ def test_generate_blocks_stops_at_the_eos_block(loaded):
 
 @gpu
 def test_streamed_samples_match_trimmed_tokens(loaded, monkeypatch):
-    """Streamed audio is exactly 960 x the tokens that survive _trim_to_eos.
+    """Two exact properties, measured on one render:
 
-    test_blockstream_engine_end_to_end only checks the total is a whole number
-    of tokens; that would still pass if the stream vocoded the post-EOS budget.
-    This ties the sample count to the token count the non-streaming path would
-    have vocoded, which is the property the EOS contract is really about.
+    1. the audio the vocoder produces is exactly 960 x the tokens that survive
+       ``_trim_to_eos`` -- the EOS contract this test has always pinned. It
+       would still pass if the stream vocoded the post-EOS budget, which is
+       what test_blockstream_engine_end_to_end cannot tell you; and
+    2. what the engine *emits* is exactly ``trim_edge_silence`` applied to that
+       vocoded audio -- the silence gate removes edge silence and nothing else.
+
+    Property (1) used to be asserted on the emitted samples. Those are no
+    longer the same number: the gate drops leading/trailing silence on the way
+    out. Rather than relax it to ``<=`` with a hand-waved bound, it is moved
+    onto the un-gated vocoder output (still exact, same meaning) and (2) pins
+    the entire difference -- a strictly stronger pair than before. The un-gated
+    stream is captured from the same render by spying on ``_MelWindow.push``,
+    so nothing depends on two renders drawing the same tokens.
 
     Driven one chunk per call (``split_text=False`` over a pre-chunked text) so
     the last ``_trim_to_eos`` call is unambiguously that chunk's tail push.
     """
     from poc_tts_streaming import engine_blockstream as bs
+    from poc_tts_streaming.audio import trim_edge_silence
     from poc_tts_streaming.config import voice_paths
     from poc_tts_streaming.engine_flash import chunk_text
 
@@ -274,6 +290,7 @@ def test_streamed_samples_match_trimmed_tokens(loaded, monkeypatch):
         voice_paths=voice_paths(config),
     )
     engine._model = model            # reuse the fixture's weights, don't reload
+    assert engine.trim_silence, "the shipping config must leave the gate on"
     voice = config.get("bench", {}).get("voice", "one-one.mp3")
 
     original = model._trim_to_eos
@@ -286,15 +303,92 @@ def test_streamed_samples_match_trimmed_tokens(loaded, monkeypatch):
 
     monkeypatch.setattr(model, "_trim_to_eos", spy)
 
+    vocoded: list[np.ndarray] = []
+    window_push = bs._MelWindow.push
+
+    def push_spy(self, tokens, *, finalize):
+        pcm = window_push(self, tokens, finalize=finalize)
+        vocoded.append(pcm)
+        return pcm
+
+    monkeypatch.setattr(bs._MelWindow, "push", push_spy)
+
     for seed, text in enumerate(_bench_sentences()):
         for chunk in chunk_text(text, int(gen.get("chunk_size", 120))):
             trimmed_lengths.clear()
+            vocoded.clear()
             torch.manual_seed(seed)
             windows = list(engine.synthesize_stream(chunk, voice, split_text=False))
-            total = sum(len(pcm) for _, pcm in windows)
             n_tokens = trimmed_lengths[-1]
-            assert total == n_tokens * bs.SAMPLES_PER_TOKEN, (
-                f"{chunk!r}: streamed {total} samples for {n_tokens} trimmed "
+            raw = np.concatenate(vocoded)
+            assert len(raw) == n_tokens * bs.SAMPLES_PER_TOKEN, (
+                f"{chunk!r}: vocoded {len(raw)} samples for {n_tokens} trimmed "
                 f"tokens; expected {n_tokens * bs.SAMPLES_PER_TOKEN} "
-                f"({(total - n_tokens * bs.SAMPLES_PER_TOKEN) / bs.SAMPLES_PER_TOKEN:+.2f} tokens)"
+                f"({(len(raw) - n_tokens * bs.SAMPLES_PER_TOKEN) / bs.SAMPLES_PER_TOKEN:+.2f} tokens)"
             )
+            emitted = np.concatenate([pcm for _, pcm in windows])
+            assert np.array_equal(emitted, trim_edge_silence(raw, engine.sr)), (
+                f"{chunk!r}: the gate emitted {len(emitted)} samples; a whole-chunk "
+                f"trim of the same audio gives {len(trim_edge_silence(raw, engine.sr))} "
+                f"(vocoded {len(raw)}) -- the gate must remove edge silence and "
+                "nothing else"
+            )
+
+
+@gpu
+def test_the_chunk_label_rides_the_first_piece_emitted(loaded, monkeypatch):
+    """A chunk whose first window is silence still delivers its text.
+
+    The gate holds a silent opening window back, so the chunk's label cannot be
+    attached at vocode time -- it has to travel with the first PCM that
+    actually reaches the caller. ``realtime.session._run_response`` skips
+    empty-text deltas and ``bench_stream``'s ``first_chunk_chars`` reads the
+    first yield, so a label stranded on a swallowed window is a sentence
+    missing from the transcript.
+    """
+    from poc_tts_streaming import engine_blockstream as bs
+    from poc_tts_streaming.audio import TRIM_THRESHOLD_DB
+    from poc_tts_streaming.config import voice_paths
+
+    _engine, model, config = loaded
+    engine = bs.BlockStreamEngine(
+        engine_cfg=config.get("engine", {}),
+        generation_cfg=config.get("generation", {}),
+        voice_paths=voice_paths(config),
+    )
+    engine._model = model
+    voice = config.get("bench", {}).get("voice", "one-one.mp3")
+    text = "Sure, the kitchen light is on."
+
+    calls = {"n": 0}
+    window_push = bs._MelWindow.push
+
+    def push_spy(self, tokens, *, finalize):
+        pcm = window_push(self, tokens, finalize=finalize)
+        calls["n"] += 1
+        if calls["n"] == 1 and pcm.size:
+            # A full second of digital silence where the first window's audio
+            # would be: the state of the real _MelWindow is untouched, only
+            # what the gate sees changes.
+            return np.zeros(engine.sr, dtype=np.float32)
+        return pcm
+
+    monkeypatch.setattr(bs._MelWindow, "push", push_spy)
+
+    torch.manual_seed(3)
+    windows = list(engine.synthesize_stream(text, voice, split_text=False))
+
+    assert windows, "the chunk emitted nothing at all"
+    labels = [label for label, _ in windows]
+    assert labels[0] == text, f"the chunk label was lost: {labels[:3]}"
+    assert all(label == "" for label in labels[1:]), (
+        f"the chunk text was repeated across windows: {labels}"
+    )
+
+    keep = int(engine.sr * engine.trim_keep_ms / 1000)
+    loud = np.flatnonzero(np.abs(windows[0][1]) > 10 ** (TRIM_THRESHOLD_DB / 20))
+    assert loud.size, "the first emitted piece is silent -- the opener leaked"
+    assert int(loud[0]) <= keep, (
+        f"{int(loud[0])} silent samples before the first speech; the 24000-sample "
+        f"silent opener must be cut to at most {keep}"
+    )

@@ -19,6 +19,13 @@ import numpy as np
 import torch
 from chatterbox_flash import ChatterboxFlashTTS
 
+from poc_tts_streaming.audio import (
+    TRIM_KEEP_MS,
+    TRIM_THRESHOLD_DB,
+    TrailingSilenceGate,
+    trim_edge_silence,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -294,6 +301,39 @@ class FlashEngine:
         self.drf_block_size = int(engine_cfg.get("drf_block_size", 16))
         self.sr = 24000
 
+        # Chunk-edge silence. Each generate() draw opens and closes with its own
+        # silence, and those stack at every chunk join; on top of that ~1-2 % of
+        # draws never emit the stop token and pad the whole token budget (12 s
+        # for short text) with digital silence. See audio.trim_edge_silence for
+        # why -45 dBFS / 120 ms. Off (trim_silence: false) streams the raw draw,
+        # which is what the sample-count identity tests need.
+        self.trim_silence = bool(engine_cfg.get("trim_silence", True))
+        self.trim_threshold_db = float(
+            engine_cfg.get("trim_threshold_db", TRIM_THRESHOLD_DB)
+        )
+        self.trim_keep_ms = int(engine_cfg.get("trim_keep_ms", TRIM_KEEP_MS))
+
+    def _trim_chunk(self, pcm: np.ndarray) -> np.ndarray:
+        """Trim one finished chunk's edge silence (sentence path)."""
+        if not self.trim_silence:
+            return pcm
+        return trim_edge_silence(
+            pcm, self.sr,
+            threshold_db=self.trim_threshold_db, keep_ms=self.trim_keep_ms,
+        )
+
+    def _silence_gate(self) -> TrailingSilenceGate | None:
+        """One gate per chunk for engines that emit a chunk in pieces, or None
+        when trimming is off. Used by BlockStreamEngine, which cannot wait for
+        the whole chunk before emitting."""
+        if not self.trim_silence:
+            return None
+        return TrailingSilenceGate(
+            sr=self.sr,
+            threshold_db=self.trim_threshold_db,
+            keep_ms=self.trim_keep_ms,
+        )
+
     @property
     def loaded(self) -> bool:
         return self._model is not None
@@ -360,6 +400,12 @@ class FlashEngine:
     ) -> Iterator[tuple[str, np.ndarray]]:
         """Yield (chunk_text, mono float32 pcm) per sentence chunk, in order.
 
+        Each chunk's leading and trailing silence is cut back to
+        ``trim_keep_ms`` before it is yielded, so the natural silence two
+        neighbouring draws bring to their shared join does not stack, and a
+        draw that ran its whole token budget contributes a breath rather than
+        a nine-second gap.
+
         Validation (voice, text) happens before the first yield so callers
         can fail fast. Cancellation is checked between chunks: a chunk
         already inside generate() finishes (~1 s tuned) and is discarded by
@@ -397,7 +443,9 @@ class FlashEngine:
                 raise OutOfMemoryError(
                     f"ran out of VRAM during generation. {_vram_report()}"
                 ) from exc
-            yield chunk, wav.detach().float().cpu().numpy().reshape(-1)
+            yield chunk, self._trim_chunk(
+                wav.detach().float().cpu().numpy().reshape(-1)
+            )
 
     def synthesize(
         self,

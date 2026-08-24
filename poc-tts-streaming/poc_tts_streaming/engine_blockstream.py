@@ -454,15 +454,28 @@ class BlockStreamEngine(FlashEngine):
     float32 at ``self.sr`` -- but a chunk now arrives as several windows
     instead of one, each covering only the tokens T3 finalised in that block.
 
+    **Edge silence is gated, not trimmed.** The parent can trim a finished
+    chunk because it holds the whole thing; here a runaway silent tail is
+    spread over many windows that have already been handed to the caller by
+    the time the chunk ends. So one ``audio.TrailingSilenceGate`` per chunk
+    sits on the emission path: it releases each window's speech immediately,
+    buffers silence until it knows whether more speech follows, and at chunk
+    end keeps only ``trim_keep_ms`` of what is left. It runs on already
+    cross-faded PCM and never alters a sample, so window continuity is
+    untouched -- and what it emits for a chunk is byte-identical to
+    ``trim_edge_silence`` over that chunk's concatenation.
+
     **The text field is not per-window.** The parent yields the chunk's text
     with the chunk's audio, and every consumer treats that string as new
     transcript: ``realtime.session._run_response`` appends it to the response
     transcript and sends it as an ``output_audio_transcript.delta``. Repeating
     the chunk text on each of its windows would repeat the sentence four to six
-    times in the transcript. So the contract here is: **the first window of a
-    chunk carries that chunk's text, every later window of the same chunk
-    carries ``""``**. Consumers must treat an empty string as "same text, more
-    audio" -- see the ``if chunk_text:`` guard in ``_run_response``. Total
+    times in the transcript. So the contract here is: **the first piece a
+    chunk actually emits carries that chunk's text, every later piece of the
+    same chunk carries ``""``** -- "first emitted", not "first vocoded",
+    because the silence gate above may swallow an opening window whole.
+    Consumers must treat an empty string as "same text, more audio" -- see the
+    ``if chunk_text:`` guard in ``_run_response``. Total
     yielded text over an utterance is therefore identical between the two
     engines, which is what keeps ``bench_stream``'s ``chars`` honest.
     """
@@ -538,16 +551,33 @@ class BlockStreamEngine(FlashEngine):
         max_tokens = _speech_len_for_text_tokens(n_text)
         window = _MelWindow(model.s3gen, model.conds.gen, n_cfm, max_tokens)
 
+        gate = self._silence_gate()
+
         out: "queue.Queue[tuple[str, np.ndarray] | None | BaseException]" = queue.Queue()
         state = {"emitted": 0}
 
-        def emit(pcm: np.ndarray) -> None:
-            """Queue a window, labelling only the first one of this chunk."""
+        def put(pcm: np.ndarray) -> None:
+            """Queue one piece, labelling only the first this chunk emits.
+
+            The label rides the first PCM that actually reaches the caller, not
+            the first window vocoded -- the gate may hold an opening window back
+            (a chunk that starts with silence) and the chunk's text has to
+            travel with whatever comes out first, or the transcript loses a
+            sentence. Later pieces carry "" ("same text, more audio").
+            """
             if not pcm.size:
                 return
             first = state["emitted"] == 0
             state["emitted"] += 1
             out.put((chunk if first else "", pcm))
+
+        def emit(pcm: np.ndarray) -> None:
+            """Send a vocoded window through this chunk's silence gate."""
+            if gate is None:
+                put(pcm)
+                return
+            for piece in gate.push(pcm):
+                put(piece)
 
         def on_block(tokens: Tensor) -> None:
             if cancel is not None and cancel.is_set():
@@ -575,6 +605,11 @@ class BlockStreamEngine(FlashEngine):
                 trimmed = model._trim_to_eos(final[0])
                 if trimmed.numel():
                     emit(window.push(trimmed.to(self.device), finalize=True))
+                # Chunk over: the gate now knows its buffered silence is
+                # trailing, not a pause, and gives back at most keep_ms of it.
+                if gate is not None:
+                    for piece in gate.flush():
+                        put(piece)
             except _Cancelled:
                 pass
             except torch.cuda.OutOfMemoryError as exc:
