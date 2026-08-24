@@ -3,7 +3,7 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Date:** 2026-08-24
-**Status:** Draft — written autonomously; decisions marked **[assumption]** are the author's calls and can be overridden before Task 1 starts.
+**Status:** Implemented 2026-08-24 (branch `poc-qwen3-tts`, directory `poc-qwen/`). Results in `poc-qwen/bench-m4-max.md`. Decisions marked **[assumption]** were the author's calls.
 **Machine:** Mac Studio, Apple M4 Max, 14 cores, 36 GB unified memory, macOS 25.4 (Darwin).
 **Research:** `docs/research/streamable-tts-mac/02-chinese-llm-tts.md` (Qwen3-TTS section) — read it first; this plan does not repeat it.
 
@@ -47,10 +47,10 @@
 
 **Files:** `poc-qwen/{Makefile,requirements.txt,setup.sh,config.yaml,.gitignore,README.md,poc_qwen/__init__.py,tests/__init__.py}`; modify root `Makefile`.
 
-- [ ] `setup.sh` (idempotent): fail with a clear message if `mise` missing; `mise install`; `mise exec -- python -m venv .venv` if absent; `pip install -r requirements.txt`; write `reports/env_probe.json` with `platform.mac_ver()`, `mlx.__version__`, `mlx_audio.__version__`, `mlx.core.metal.device_info()` (chip name, memory). Never fail setup on the probe.
-- [ ] `requirements.txt`: `mlx-audio>=0.5.0,<0.6`, `gradio>=5.0,<6`, `soundfile`, `pyyaml`, `numpy`, `mlx-whisper`, `pytest`, `httpx`. Pin exact versions after the first successful install (record them in the README).
-- [ ] `Makefile` mirroring `poc-tts/Makefile`: `run` (default), `setup` (stamp file), `bench`, `test`, `smoke`, `clean`, `help`. `smoke` runs `python -m poc_qwen.smoke` — a 10-line script that loads 0.6B-Base, clones `voices/one-one.mp3` with a hardcoded transcript, writes `reports/smoke.wav`, prints wall time. **This is the go/no-go gate for the whole plan**: if mlx-audio's Qwen3-TTS path does not produce intelligible audio on this box, stop and reassess (fallback: official `qwen-tts` on MPS/CPU with the cached torch weights).
-- [ ] `config.yaml`:
+- [x] `setup.sh` (idempotent): fail with a clear message if `mise` missing; `mise install`; `mise exec -- python -m venv .venv` if absent; `pip install -r requirements.txt`; write `reports/env_probe.json` with `platform.mac_ver()`, `mlx.__version__`, `mlx_audio.__version__`, `mlx.core.metal.device_info()` (chip name, memory). Never fail setup on the probe.
+- [x] `requirements.txt`: `mlx-audio>=0.5.0,<0.6`, `gradio>=5.0,<6`, `soundfile`, `pyyaml`, `numpy`, `mlx-whisper`, `pytest`, `httpx`. Pin exact versions after the first successful install (record them in the README).
+- [x] `Makefile` mirroring `poc-tts/Makefile`: `run` (default), `setup` (stamp file), `bench`, `test`, `smoke`, `clean`, `help`. `smoke` runs `python -m poc_qwen.smoke` — a 10-line script that loads 0.6B-Base, clones `voices/one-one.mp3` with a hardcoded transcript, writes `reports/smoke.wav`, prints wall time. **This is the go/no-go gate for the whole plan**: if mlx-audio's Qwen3-TTS path does not produce intelligible audio on this box, stop and reassess (fallback: official `qwen-tts` on MPS/CPU with the cached torch weights).
+- [x] `config.yaml`:
   ```yaml
   server: { host: 127.0.0.1, port: 8007 }
   models:
@@ -63,9 +63,9 @@
   transcribe: { model: mlx-community/whisper-base.en-mlx, enabled: true }
   bench: { voice: one-one.mp3, repeats: 3 }
   ```
-- [ ] Root `Makefile`: `poc-qwen`, `poc-qwen3-tts-setup`, `poc-qwen3-tts-bench`, `poc-qwen3-tts-test`, each `@$(MAKE) -C poc-qwen <target>`; add to `.PHONY` and `help`.
-- [ ] `.gitignore`: `.venv/`, `__pycache__/`, `reports/*.wav`, `.env`.
-- [ ] Commit: `feat(poc-qwen3-tts): skeleton, mise toolchain, MLX smoke test`.
+- [x] Root `Makefile`: `poc-qwen`, `poc-qwen3-tts-setup`, `poc-qwen3-tts-bench`, `poc-qwen3-tts-test`, each `@$(MAKE) -C poc-qwen <target>`; add to `.PHONY` and `help`.
+- [x] `.gitignore`: `.venv/`, `__pycache__/`, `reports/*.wav`, `.env`.
+- [x] Commit: `feat(poc-qwen3-tts): skeleton, mise toolchain, MLX smoke test`.
 
 **Verify:** `make smoke` produces `reports/smoke.wav` that sounds like the one-one clip. Record wall time and model download size in the README.
 
@@ -73,9 +73,9 @@
 
 **Files:** `poc_qwen/config.py`, `tests/test_config.py`.
 
-- [ ] Port `poc-tts/poc_tts/config.py` (dataclass sections + `POC_QWEN_*` env overrides + type coercion). Reuse its tests' shape (`poc-tts/tests/test_config_overrides.py`).
-- [ ] Resolve `voices.paths` relative to the config file; tolerate missing directories.
-- [ ] Commit.
+- [x] Port `poc-tts/poc_tts/config.py` (dataclass sections + `POC_QWEN_*` env overrides + type coercion). Reuse its tests' shape (`poc-tts/tests/test_config_overrides.py`).
+- [x] Resolve `voices.paths` relative to the config file; tolerate missing directories.
+- [x] Commit.
 
 ### Task 3: Engine — lazy model registry and synthesis
 
@@ -97,22 +97,22 @@ class Qwen3Engine:
 class Result: audio: np.ndarray; sample_rate: int; timings: dict  # load_s, prefill_s?, gen_s, audio_s, rtf
 ```
 
-- [ ] Model registry keyed by HF id; `load_model()` from `mlx_audio.tts.utils` on first use only; `mx.clear_cache()` and drop the reference on `unload()`. **[assumption]** Keep at most two models resident (LRU) so a demo that hops between tabs stays under ~10 GB and leaves room for an LLM.
-- [ ] `clone()` calls `model.generate(text=..., ref_audio=..., ref_text=..., lang_code/language=...)` — confirm the exact kwarg names against the installed mlx-audio version's `qwen3_tts` README on day 1 and pin them in one adapter function. `xvector_only=True` passes `ref_text=None` (the Base model supports x-vector-only conditioning; if mlx-audio doesn't expose it, the checkbox is disabled with a tooltip, not faked).
-- [ ] Reference-audio cache: hash the reference file → keep the computed ICL prompt/x-vector if mlx-audio exposes it (v0.4.4 added an "ICL cache"); otherwise just cache the loaded, resampled waveform. Measure whether repeat clones of the same voice get faster; record in README.
-- [ ] Timings: `time.perf_counter()` around load and generate; `mx.eval` before stopping the clock so lazy evaluation doesn't fake fast numbers. `rtf = gen_s / audio_s`.
-- [ ] Warm-up: after each first load, run a 5-word generation so Metal kernel compilation is not charged to the first demo utterance. Log both cold and warm numbers in `model_info()`.
-- [ ] Tests with `mlx_audio` mocked via a fake `load_model` returning an object whose `generate` yields a fixed 24 kHz sine: registry LRU, kwarg mapping, timings, xvector path.
-- [ ] Commit.
+- [x] Model registry keyed by HF id; `load_model()` from `mlx_audio.tts.utils` on first use only; `mx.clear_cache()` and drop the reference on `unload()`. **[assumption]** Keep at most two models resident (LRU) so a demo that hops between tabs stays under ~10 GB and leaves room for an LLM.
+- [x] `clone()` calls `model.generate(text=..., ref_audio=..., ref_text=..., lang_code/language=...)` — confirm the exact kwarg names against the installed mlx-audio version's `qwen3_tts` README on day 1 and pin them in one adapter function. `xvector_only=True` passes `ref_text=None` (the Base model supports x-vector-only conditioning; if mlx-audio doesn't expose it, the checkbox is disabled with a tooltip, not faked).
+- [x] Reference-audio cache: hash the reference file → keep the computed ICL prompt/x-vector if mlx-audio exposes it (v0.4.4 added an "ICL cache"); otherwise just cache the loaded, resampled waveform. Measure whether repeat clones of the same voice get faster; record in README.
+- [x] Timings: `time.perf_counter()` around load and generate; `mx.eval` before stopping the clock so lazy evaluation doesn't fake fast numbers. `rtf = gen_s / audio_s`.
+- [x] Warm-up: after each first load, run a 5-word generation so Metal kernel compilation is not charged to the first demo utterance. Log both cold and warm numbers in `model_info()`.
+- [x] Tests with `mlx_audio` mocked via a fake `load_model` returning an object whose `generate` yields a fixed 24 kHz sine: registry LRU, kwarg mapping, timings, xvector path.
+- [x] Commit.
 
 ### Task 4: Text chunking and long-input safety
 
 **Files:** `poc_qwen/text.py`, `tests/test_text.py`.
 
-- [ ] Sentence splitter (port `chunk_text` from `poc-tts-streaming/poc_tts_streaming/audio.py` if it's engine-agnostic) with `max_chunk_chars` from config; never split inside a number/abbreviation.
-- [ ] Engine generates chunk-by-chunk with the **same** reference, concatenates with a 20 ms crossfade at seams, sums timings. This keeps every Metal call short of the watchdog and is also the shape iteration 2 pipelines.
-- [ ] Test: 900-char paragraph → ≥3 chunks, total audio length = sum of parts minus overlaps.
-- [ ] Commit.
+- [x] Sentence splitter (port `chunk_text` from `poc-tts-streaming/poc_tts_streaming/audio.py` if it's engine-agnostic) with `max_chunk_chars` from config; never split inside a number/abbreviation.
+- [x] Engine generates chunk-by-chunk with the **same** reference, concatenates with a 20 ms crossfade at seams, sums timings. This keeps every Metal call short of the watchdog and is also the shape iteration 2 pipelines.
+- [x] Test: 900-char paragraph → ≥3 chunks, total audio length = sum of parts minus overlaps.
+- [x] Commit.
 
 ### Task 5: Gradio app — three tabs matching the Space
 
@@ -120,39 +120,39 @@ class Result: audio: np.ndarray; sample_rate: int; timings: dict  # load_s, pref
 
 Reproduce the Space's layout and labels (from its `app.py`), tab order as in the Space:
 
-- [ ] **Voice Design** tab: `Text to Synthesize`, `Language` dropdown (Auto + 10 languages), `Voice Description`, `Generate` button → `Generated Audio` + status Markdown (model, gen time, RTF). Example row with the Space's example ("It's in the top drawer... wait, it's empty?").
-- [ ] **Voice Clone** tab: `Reference Audio` (`gr.Audio(sources=["upload","microphone"], type="filepath")`), a **`Preset voice`** dropdown listing `voices/*.{wav,mp3}` that fills the audio component when chosen (our addition), `Reference Text` textbox with an `Auto-transcribe` button (mlx-whisper; also fired automatically when a preset is chosen and its `<name>.txt` sidecar exists in `voices/`), `Use x-vector only` checkbox, `Target Text`, `Language`, `Model Size` radio (0.6B / 1.7B), `Generate`. Output as above.
-- [ ] **TTS (CustomVoice)** tab: `Text to Synthesize`, `Language`, `Speaker` dropdown populated from `engine.speakers()`, `Style Instruction (Optional)`, `Model Size`, `Generate`.
-- [ ] Shared: a header line with `model_info()` (chip, mlx-audio version, resident models, memory) and a `Unload models` button. Every handler catches exceptions and returns them in the status box; nothing crashes the server.
-- [ ] Each generation appends a row to `reports/ui_runs.jsonl` (tab, model, chars, gen_s, audio_s, rtf) — cheap telemetry for the demo day.
-- [ ] `python -m poc_qwen.app` → `demo.queue().launch(server_name=cfg.server.host, server_port=8007)`.
-- [ ] Tests: build the Blocks with a fake engine, call each handler function directly (not through HTTP) and assert the returned `(sample_rate, ndarray)` and status text; assert the preset dropdown lists `one-one`, `babel`, `marvin`.
-- [ ] Commit.
+- [x] **Voice Design** tab: `Text to Synthesize`, `Language` dropdown (Auto + 10 languages), `Voice Description`, `Generate` button → `Generated Audio` + status Markdown (model, gen time, RTF). Example row with the Space's example ("It's in the top drawer... wait, it's empty?").
+- [x] **Voice Clone** tab: `Reference Audio` (`gr.Audio(sources=["upload","microphone"], type="filepath")`), a **`Preset voice`** dropdown listing `voices/*.{wav,mp3}` that fills the audio component when chosen (our addition), `Reference Text` textbox with an `Auto-transcribe` button (mlx-whisper; also fired automatically when a preset is chosen and its `<name>.txt` sidecar exists in `voices/`), `Use x-vector only` checkbox, `Target Text`, `Language`, `Model Size` radio (0.6B / 1.7B), `Generate`. Output as above.
+- [x] **TTS (CustomVoice)** tab: `Text to Synthesize`, `Language`, `Speaker` dropdown populated from `engine.speakers()`, `Style Instruction (Optional)`, `Model Size`, `Generate`.
+- [x] Shared: a header line with `model_info()` (chip, mlx-audio version, resident models, memory) and a `Unload models` button. Every handler catches exceptions and returns them in the status box; nothing crashes the server.
+- [x] Each generation appends a row to `reports/ui_runs.jsonl` (tab, model, chars, gen_s, audio_s, rtf) — cheap telemetry for the demo day.
+- [x] `python -m poc_qwen.app` → `demo.queue().launch(server_name=cfg.server.host, server_port=8007)`.
+- [x] Tests: build the Blocks with a fake engine, call each handler function directly (not through HTTP) and assert the returned `(sample_rate, ndarray)` and status text; assert the preset dropdown lists `one-one`, `babel`, `marvin`.
+- [x] Commit.
 
 ### Task 6: Reference transcripts for the repo voices
 
 **Files:** `voices/{one-one,babel,marvin}.txt`, update `voices/README.md`.
 
-- [ ] Run `engine.transcribe()` on each clip, correct by ear, save as sidecar `.txt` (Qwen3-TTS clone quality depends on an accurate transcript; whisper-base is not accurate enough to trust blindly).
-- [ ] README: document the sidecar convention (Chatterbox ignores it; Qwen3-TTS requires it).
-- [ ] Commit.
+- [x] Run `engine.transcribe()` on each clip, correct by ear, save as sidecar `.txt` (Qwen3-TTS clone quality depends on an accurate transcript; whisper-base is not accurate enough to trust blindly).
+- [x] README: document the sidecar convention (Chatterbox ignores it; Qwen3-TTS requires it).
+- [x] Commit.
 
 ### Task 7: Bench
 
 **Files:** `poc_qwen/bench.py`, `tests/test_bench.py`, `reports/runs.jsonl`, `bench-m4-max.md`.
 
-- [ ] Same three sentences as `poc-tts/poc_tts/bench.py:39`, `voices/one-one.mp3` reference, `repeats: 3`, discard the first (cold) run. Matrix: `{0.6B, 1.7B} × {bf16}`; add `mlx-community/…-6bit` variants if they exist for Base (they exist for 1.7B-CustomVoice; check HF).
-- [ ] Row schema compatible with `poc-tts/reports/runs.jsonl` plus `model`, `ref_cache_hit`, `peak_mem_gb` (`mx.metal.get_peak_memory()`).
-- [ ] `bench-m4-max.md`: table of Qwen3-TTS 0.6B / 1.7B vs Chatterbox Flash MLX fp16 (0.92 / 1.37 / 4.20 s) on the same rows; a paragraph on subjective clone quality of the three repo voices vs Chatterbox (accent, prosody, transcript sensitivity); memory; and the go/no-go for iteration 2. Success bar for this iteration: **1.7B whole-utterance medium sentence ≤ 1.5 s warm, RTF ≤ 0.6, clone clearly recognizable.**
-- [ ] Commit.
+- [x] Same three sentences as `poc-tts/poc_tts/bench.py:39`, `voices/one-one.mp3` reference, `repeats: 3`, discard the first (cold) run. Matrix: `{0.6B, 1.7B} × {bf16}`; add `mlx-community/…-6bit` variants if they exist for Base (they exist for 1.7B-CustomVoice; check HF).
+- [x] Row schema compatible with `poc-tts/reports/runs.jsonl` plus `model`, `ref_cache_hit`, `peak_mem_gb` (`mx.metal.get_peak_memory()`).
+- [x] `bench-m4-max.md`: table of Qwen3-TTS 0.6B / 1.7B vs Chatterbox Flash MLX fp16 (0.92 / 1.37 / 4.20 s) on the same rows; a paragraph on subjective clone quality of the three repo voices vs Chatterbox (accent, prosody, transcript sensitivity); memory; and the go/no-go for iteration 2. Success bar for this iteration: **1.7B whole-utterance medium sentence ≤ 1.5 s warm, RTF ≤ 0.6, clone clearly recognizable.**
+- [x] Commit.
 
 ### Task 8: Streaming spike (time-boxed, 30 min, read-only for iteration 2)
 
 **Files:** `poc_qwen/spike_stream.py`, `reports/stream_spike.jsonl`.
 
-- [ ] Call `model.generate(..., stream=True, streaming_interval=0.32)` for the medium sentence, 1.7B and 0.6B, and log time-to-first-chunk, chunk cadence, and whether chunks concatenate seamlessly (save the wav). Do not wire into the UI.
-- [ ] Add the numbers and a "what iteration 2 needs" section to `bench-m4-max.md`: expected TTFA, whether mlx-audio's chunk boundaries click, and how `Result` + chunk generator maps onto `poc-tts-streaming/poc_tts_streaming/realtime/session.py`'s audio push.
-- [ ] Commit. Open PR `poc-qwen` → `main`.
+- [x] Call `model.generate(..., stream=True, streaming_interval=0.32)` for the medium sentence, 1.7B and 0.6B, and log time-to-first-chunk, chunk cadence, and whether chunks concatenate seamlessly (save the wav). Do not wire into the UI.
+- [x] Add the numbers and a "what iteration 2 needs" section to `bench-m4-max.md`: expected TTFA, whether mlx-audio's chunk boundaries click, and how `Result` + chunk generator maps onto `poc-tts-streaming/poc_tts_streaming/realtime/session.py`'s audio push.
+- [x] Commit. Open PR `poc-qwen` → `main`.
 
 ---
 
