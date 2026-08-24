@@ -17,7 +17,7 @@ engine:
   # engine_blockstream.BlockStreamEngine, which vocodes each finished T3 block
   # instead of waiting for the whole sentence. See results-rtx-2060.md for the
   # go/no-go; nothing on the reviewed paths changes while this is false.
-  block_streaming: false
+  block_streaming: true
 
 generation:
   temperature: 0.6
