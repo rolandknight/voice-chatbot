@@ -323,8 +323,19 @@ OVERLAP_SAMPLES = OVERLAP_MEL * SAMPLES_PER_MEL
 # it by a `mask` built from the UNtruncated `h_lengths`, so the call dies with
 #     RuntimeError: The size of tensor a (558) must match the size of tensor b
 #     (564) at non-singleton dimension 2
-# `finalize` gates nothing else in that method, so we pass finalize=True and do
-# the truncation ourselves. Identical result, minus the crash.
+# So we pass finalize=True and drop the trailing frames from the OUTPUT instead.
+#
+# That is NOT the same computation, and the difference is in our favour.
+# Upstream truncates `h` *before* encoder_proj and the CFM decoder, so the
+# lookahead positions never enter `mu` and cannot condition the frames that are
+# kept. We leave them in, let the CFM denoise the full length, and discard
+# output frames -- so our retained frames see more right context, not less.
+# Measured (`spike_analysis lookahead`): ours vs an upstream-equivalent
+# truncation differs by 0.77 % rel RMS against a 0.64 % floor (the CFM redraws
+# prompt-region noise every call), and the per-frame profile localises it --
+# the last ~5 frames differ by 3-7x the control while earlier frames sit at the
+# control level. Right context reaching the window's tail is exactly what one
+# would expect to change, and it is a small effect.
 LOOKAHEAD_MEL = 6
 
 # A non-final window must survive the lookahead truncation AND leave a full
@@ -435,11 +446,21 @@ class _MelWindow:
 class BlockStreamEngine(FlashEngine):
     """FlashEngine whose ``synthesize_stream`` emits sub-sentence windows.
 
-    Yields ``(label, pcm)`` like the parent, but ``label`` is
-    ``"<chunk text> [block N]"`` and each ``pcm`` covers only the tokens T3
-    finalised in that block. The parent's contract (ordered, non-overlapping
-    mono float32 at ``self.sr``) is unchanged, so ``bench_stream.measure`` and
-    the server's synthesizer adapter work against either class.
+    Yields ``(text, pcm)`` like the parent -- ordered, non-overlapping mono
+    float32 at ``self.sr`` -- but a chunk now arrives as several windows
+    instead of one, each covering only the tokens T3 finalised in that block.
+
+    **The text field is not per-window.** The parent yields the chunk's text
+    with the chunk's audio, and every consumer treats that string as new
+    transcript: ``realtime.session._run_response`` appends it to the response
+    transcript and sends it as an ``output_audio_transcript.delta``. Repeating
+    the chunk text on each of its windows would repeat the sentence four to six
+    times in the transcript. So the contract here is: **the first window of a
+    chunk carries that chunk's text, every later window of the same chunk
+    carries ``""``**. Consumers must treat an empty string as "same text, more
+    audio" -- see the ``if chunk_text:`` guard in ``_run_response``. Total
+    yielded text over an utterance is therefore identical between the two
+    engines, which is what keeps ``bench_stream``'s ``chars`` honest.
     """
 
     def synthesize_stream(
@@ -514,17 +535,21 @@ class BlockStreamEngine(FlashEngine):
         window = _MelWindow(model.s3gen, model.conds.gen, n_cfm, max_tokens)
 
         out: "queue.Queue[tuple[str, np.ndarray] | None | BaseException]" = queue.Queue()
-        state = {"n": 0}
+        state = {"emitted": 0}
+
+        def emit(pcm: np.ndarray) -> None:
+            """Queue a window, labelling only the first one of this chunk."""
+            if not pcm.size:
+                return
+            first = state["emitted"] == 0
+            state["emitted"] += 1
+            out.put((chunk if first else "", pcm))
 
         def on_block(tokens: Tensor) -> None:
             if cancel is not None and cancel.is_set():
                 raise _Cancelled()
-            i = state["n"]
-            state["n"] = i + 1
             trimmed = model._trim_to_eos(tokens[0])
-            pcm = window.push(trimmed.to(self.device), finalize=False)
-            if pcm.size:
-                out.put((f"{chunk} [block {i}]", pcm))
+            emit(window.push(trimmed.to(self.device), finalize=False))
 
         def produce() -> None:
             try:
@@ -545,9 +570,7 @@ class BlockStreamEngine(FlashEngine):
                 # finalize=False call withholds actually get vocoded.
                 trimmed = model._trim_to_eos(final[0])
                 if trimmed.numel():
-                    pcm = window.push(trimmed.to(self.device), finalize=True)
-                    if pcm.size:
-                        out.put((f"{chunk} [tail]", pcm))
+                    emit(window.push(trimmed.to(self.device), finalize=True))
             except _Cancelled:
                 pass
             except torch.cuda.OutOfMemoryError as exc:

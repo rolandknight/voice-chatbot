@@ -404,3 +404,34 @@ def test_worker_stream_yields_earlier_items_then_raises_producer_error():
         assert got == [1]
         assert str(exc.value.cause) == "boom"
     run(main())
+
+
+class MultiWindowSynth:
+    """One chunk of audio delivered as two windows, the second unlabelled.
+
+    This is the block-streaming engine's contract (engine_blockstream
+    .BlockStreamEngine): the first window of a chunk carries the chunk text,
+    every later window of the same chunk carries "".
+    """
+    def __call__(self, text, voice, knobs, cancel):
+        yield "Hello.", np.full(100, 0.1, dtype=np.float32)
+        yield "", np.full(100, 0.2, dtype=np.float32)
+
+
+def test_unlabelled_window_adds_audio_without_a_transcript_delta():
+    async def main():
+        sink = FakeSink()
+        session, sent, _ = make_session(MultiWindowSynth(), sink)
+        await session.open()
+        await session.handle(json.dumps({"type": "conversation.item.create", "item": {
+            "type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": "Hello."}]}}))
+        await session.handle(json.dumps({"type": "response.create", "event_id": "evt_r"}))
+        await until(sent, "output_audio_buffer.stopped")
+        deltas = [e["delta"] for e in sent if e["type"] == "response.output_audio_transcript.delta"]
+        assert deltas == ["Hello. "], "the unlabelled window must not send a delta"
+        assert len(sink.pushed) == 2, "both windows' audio must reach the sink"
+        done = [e for e in sent if e["type"] == "response.done"][0]["response"]
+        assert done["output"][0]["content"][0] == {"type": "audio", "transcript": "Hello. "}
+        assert types(sent).count("output_audio_buffer.started") == 1
+    run(main())

@@ -379,10 +379,16 @@ class RealtimeSession:
             ):
                 if resp.closed:
                     continue  # cancelled: discard whatever the worker still produces
-                delta = chunk_text + " "
-                resp.transcript += delta
-                self._send(server_event(E.AUDIO_TRANSCRIPT_DELTA, response_id=resp.id, item_id=resp.item_id,
-                                        output_index=0, content_index=0, delta=delta))
+                # An empty text field means "same text, more audio": the
+                # block-streaming engine splits one chunk's audio across several
+                # windows and labels only the first (engine_blockstream
+                # .BlockStreamEngine). Sending a delta per window would repeat
+                # the sentence in the transcript. Audio is unconditional.
+                if chunk_text:
+                    delta = chunk_text + " "
+                    resp.transcript += delta
+                    self._send(server_event(E.AUDIO_TRANSCRIPT_DELTA, response_id=resp.id, item_id=resp.item_id,
+                                            output_index=0, content_index=0, delta=delta))
                 self._sink.push(pcm)
                 if not resp.started:
                     resp.started = True
