@@ -60,6 +60,10 @@ async def _scenario(app):
                             headers={"content-type": "application/sdp", "authorization": f"Bearer {token}"})
         assert r.status_code == 201, r.text
         await pc.setRemoteDescription(RTCSessionDescription(sdp=r.text, type="answer"))
+        assert "typ srflx" not in pc.localDescription.sdp and "typ relay" not in pc.localDescription.sdp, \
+            "client ICE must be host-only (no STUN/TURN)"
+        assert "typ srflx" not in r.text and "typ relay" not in r.text, \
+            "server ICE must be host-only (no STUN/TURN)"
 
         async def wait_for(type_, timeout=10):
             while True:
@@ -102,4 +106,4 @@ async def _scenario(app):
 def test_realtime_loopback_end_to_end(tmp_path):
     started = time.monotonic()
     asyncio.run(_scenario(make_app(tmp_path)))
-    assert time.monotonic() - started < 8, "loopback ICE must not touch the network"
+    assert time.monotonic() - started < 30, "loopback scenario must finish well inside the wait_for budget"
