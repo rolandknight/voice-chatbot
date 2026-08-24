@@ -315,3 +315,59 @@ def test_knobs_merge_validates_ranges():
     assert exc.value.param == "session.x_chatterbox.temperature"
     assert KNOBS.merged({"chunk_size": 200}, param_prefix="x").chunk_size == 200
     assert KNOBS.as_engine_kwargs()["cfg_scale"] == 1.0
+
+
+async def until_count(sent, type_, n, timeout=5):
+    for _ in range(int(timeout * 100)):
+        if sum(1 for e in sent if e["type"] == type_) >= n:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"never saw {n}x {type_}; got {types(sent)}")
+
+
+def test_stopped_is_sent_for_each_response_even_when_the_next_finishes_first():
+    async def main():
+        class SlowSink(FakeSink):
+            def __init__(self):
+                super().__init__()
+                self.release = asyncio.Event()
+            async def drained(self):
+                await self.release.wait()
+        sink = SlowSink()
+        session, sent, _ = make_session(sink=sink)
+        await session.open()
+        for n, text in enumerate(("A.", "B."), start=1):
+            await session.handle(json.dumps({"type": "conversation.item.create", "item": {
+                "type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}}))
+            await session.handle(json.dumps({"type": "response.create"}))
+            await until_count(sent, "response.done", n)
+        assert types(sent).count("output_audio_buffer.stopped") == 0
+        sink.release.set()
+        await until_count(sent, "output_audio_buffer.stopped", 2)
+        done_ids = [e["response"]["id"] for e in sent if e["type"] == "response.done"]
+        stopped_ids = [e["response_id"] for e in sent if e["type"] == "output_audio_buffer.stopped"]
+        assert sorted(stopped_ids) == sorted(done_ids)
+    run(main())
+
+
+def test_send_failure_mid_response_marks_it_failed_and_frees_the_session():
+    async def main():
+        sent, state = [], {"raised": False}
+        def flaky_send(ev):
+            sent.append(ev)
+            if ev["type"] == "response.output_audio_transcript.delta" and not state["raised"]:
+                state["raised"] = True
+                raise ConnectionError("channel closed")
+        session = RealtimeSession(
+            send=flaky_send, synthesizer=FakeSynth(), sink=FakeSink(), worker=SynthWorker(),
+            voices=lambda: ["one-one.mp3"], voice="one-one.mp3", knobs=KNOBS)
+        await session.open()
+        for n in (1, 2):
+            await session.handle(json.dumps({"type": "conversation.item.create", "item": {
+                "type": "message", "role": "user", "content": [{"type": "input_text", "text": "Hi."}]}}))
+            await session.handle(json.dumps({"type": "response.create"}))
+            await until_count(sent, "response.done", n)
+        statuses = [e["response"]["status"] for e in sent if e["type"] == "response.done"]
+        assert statuses == ["failed", "completed"]
+        assert "error" not in types(sent), "the second response.create must not be rejected"
+    run(main())

@@ -152,9 +152,16 @@ class RealtimeSession:
         self._items: list[dict] = []
         self._unspoken: list[str] = []
         self._active: _Response | None = None
-        self._playout_token = 0
+        self._clear_token = 0
+        self._tasks: set[asyncio.Task] = set()
         if session_patch:
             self.apply_session_patch(session_patch)
+
+    def _spawn(self, coro) -> asyncio.Task:
+        task = asyncio.ensure_future(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return task
 
     # ---- session object -----------------------------------------------------
 
@@ -226,7 +233,7 @@ class RealtimeSession:
             elif isinstance(event, ResponseCancel):
                 await self._on_response_cancel()
             elif isinstance(event, OutputAudioBufferClear):
-                self._playout_token += 1
+                self._clear_token += 1
                 self._sink.clear()
                 self._send(server_event(E.OUTPUT_AUDIO_BUFFER_CLEARED,
                                         response_id=self._active.id if self._active else None))
@@ -320,7 +327,7 @@ class RealtimeSession:
                                 item=self._assistant_item(resp, done=False)))
         self._send(server_event(E.CONTENT_PART_ADDED, response_id=resp.id, item_id=resp.item_id,
                                 output_index=0, content_index=0, part={"type": "audio", "transcript": ""}))
-        asyncio.ensure_future(self._run_response(resp, text, voice, knobs))
+        self._spawn(self._run_response(resp, text, voice, knobs))
 
     async def _run_response(self, resp: _Response, text: str, voice: str, knobs: ChatterboxKnobs) -> None:
         loop = asyncio.get_running_loop()
@@ -335,34 +342,55 @@ class RealtimeSession:
             finally:
                 loop.call_soon_threadsafe(queue.put_nowait, _DONE)
 
-        self._worker.submit(produce)
-        while True:
-            item = await queue.get()
-            if item is _DONE:
-                break
-            if resp.closed:
-                continue  # cancelled: discard whatever the worker still produces
-            if isinstance(item, Exception):
-                logger.error("response %s failed: %s", resp.id, item)
-                resp.error = {"type": "server_error", "code": "synthesis_failed", "message": str(item)}
-                await self._finish(resp, "failed")
-                continue
-            chunk_text, pcm = item
-            delta = chunk_text + " "
-            resp.transcript += delta
-            self._send(server_event(E.AUDIO_TRANSCRIPT_DELTA, response_id=resp.id, item_id=resp.item_id,
-                                    output_index=0, content_index=0, delta=delta))
-            self._sink.push(pcm)
-            if not resp.started:
-                resp.started = True
-                self._send(server_event(E.OUTPUT_AUDIO_BUFFER_STARTED, response_id=resp.id))
-        if not resp.closed:
-            await self._finish(resp, "completed")
+        def _on_worker_done(f: concurrent.futures.Future) -> None:
+            # A produce() that never ran (e.g. SynthWorker.shutdown(cancel_futures=True)
+            # cancelling a still-queued job) never reaches its own `finally`, so the
+            # consumer below would await queue.get() forever without this nudge.
+            if f.cancelled():
+                try:
+                    loop.call_soon_threadsafe(queue.put_nowait, _DONE)
+                except RuntimeError:
+                    pass
+
+        fut = self._worker.submit(produce)
+        fut.add_done_callback(_on_worker_done)
+        try:
+            while True:
+                item = await queue.get()
+                if item is _DONE:
+                    break
+                if resp.closed:
+                    continue  # cancelled: discard whatever the worker still produces
+                if isinstance(item, Exception):
+                    logger.error("response %s failed: %s", resp.id, item)
+                    resp.error = {"type": "server_error", "code": "synthesis_failed", "message": str(item)}
+                    await self._finish(resp, "failed")
+                    continue
+                chunk_text, pcm = item
+                delta = chunk_text + " "
+                resp.transcript += delta
+                self._send(server_event(E.AUDIO_TRANSCRIPT_DELTA, response_id=resp.id, item_id=resp.item_id,
+                                        output_index=0, content_index=0, delta=delta))
+                self._sink.push(pcm)
+                if not resp.started:
+                    resp.started = True
+                    self._send(server_event(E.OUTPUT_AUDIO_BUFFER_STARTED, response_id=resp.id))
+            if not resp.closed:
+                await self._finish(resp, "completed")
+        except Exception as exc:  # noqa: BLE001 -- e.g. a dead transport mid-response
+            logger.error("response %s aborted: %s", resp.id, exc)
+            resp.error = {"type": "server_error", "code": "response_aborted", "message": str(exc)}
+            resp.cancel.set()
+            await self._finish(resp, "failed")
 
     async def _finish(self, resp: _Response, status: str) -> None:
         if resp.closed:
             return
+        # Set before any send: a send failure below must not leave the session
+        # permanently convinced a response is still active.
         resp.closed, resp.status = True, status
+        if self._active is resp:
+            self._active = None
         self._sink.flush()
         common = dict(response_id=resp.id, item_id=resp.item_id, output_index=0, content_index=0)
         self._send(server_event(E.AUDIO_TRANSCRIPT_DONE, transcript=resp.transcript, **common))
@@ -373,16 +401,16 @@ class RealtimeSession:
         self._items.append(item)
         self._send(server_event(E.OUTPUT_ITEM_DONE, response_id=resp.id, output_index=0, item=item))
         self._send(server_event(E.RESPONSE_DONE, response=self._response_object(resp, [item])))
-        if self._active is resp:
-            self._active = None
         if resp.started:
-            self._playout_token += 1
-            asyncio.ensure_future(self._after_playout(resp.id, self._playout_token))
+            self._spawn(self._after_playout(resp.id, self._clear_token))
 
     async def _after_playout(self, response_id: str, token: int) -> None:
-        await self._sink.drained()
-        if token == self._playout_token:
-            self._send(server_event(E.OUTPUT_AUDIO_BUFFER_STOPPED, response_id=response_id))
+        try:
+            await self._sink.drained()
+            if token == self._clear_token:
+                self._send(server_event(E.OUTPUT_AUDIO_BUFFER_STOPPED, response_id=response_id))
+        except Exception as exc:  # noqa: BLE001 -- dead transport after close, etc.
+            logger.error("after_playout for response %s failed: %s", response_id, exc)
 
     async def _on_response_cancel(self) -> None:
         resp = self._active
