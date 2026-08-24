@@ -6,13 +6,15 @@ so tests can inject a mock and run without a GPU.
 
 from __future__ import annotations
 
+import json
 import logging
 import secrets
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Callable
 
 import yaml
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 
 from poc_tts_streaming.config import load_config, voice_paths as configured_voice_paths
@@ -20,6 +22,7 @@ from poc_tts_streaming.engine_flash import OutOfMemoryError, discover_voices
 from poc_tts_streaming.realtime import ids
 from poc_tts_streaming.realtime.events import EventError
 from poc_tts_streaming.realtime.session import ChatterboxKnobs, RealtimeSession, SynthWorker
+from poc_tts_streaming.realtime.webrtc import CallRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -136,8 +139,15 @@ def _voice_record(name: str) -> dict:
 
 def create_app(engine, config: dict, voice_paths: list[Path], *,
                worker: SynthWorker | None = None) -> FastAPI:
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        yield
+        await app.state.calls.close_all()
+        app.state.worker.shutdown()
+
     app = FastAPI(
-        title="poc-tts-streaming: Chatterbox Flash over Realtime/WebRTC", version="0.1.0"
+        title="poc-tts-streaming: Chatterbox Flash over Realtime/WebRTC", version="0.1.0",
+        lifespan=lifespan,
     )
     realtime_cfg = {"model": "chatterbox-flash", "default_voice": "one-one.mp3",
                     "client_secret_ttl_s": 600, **config.get("realtime", {})}
@@ -153,6 +163,8 @@ def create_app(engine, config: dict, voice_paths: list[Path], *,
             knobs=app.state.knobs, model=realtime_cfg["model"], session_patch=session_patch,
         )
     app.state.build_session = build_session
+    app.state.engine = engine
+    app.state.calls = CallRegistry()
 
     # Round-tripped to the UI as config.ui_state so preset/text choices stick.
     settings_store: dict = {}
@@ -226,6 +238,42 @@ def create_app(engine, config: dict, voice_paths: list[Path], *,
                 patch, session_factory=lambda p: build_session(lambda _e: None, _NullSink(), p))
         except EventError as err:
             return openai_error(400, err.message, code=err.code, param=err.param)
+
+    @app.post("/v1/realtime/calls")
+    async def realtime_calls(request: Request):
+        if not app.state.secrets.verify(bearer_token(request)):
+            return openai_error(401, "missing or expired ephemeral key; POST /v1/realtime/client_secrets first",
+                                code="invalid_api_key")
+        ctype = request.headers.get("content-type", "")
+        session_patch = None
+        if ctype.startswith("application/sdp"):
+            offer = (await request.body()).decode()
+        elif ctype.startswith("multipart/form-data"):
+            form = await request.form()
+            offer = form.get("sdp")
+            if isinstance(form.get("session"), str):
+                try:
+                    session_patch = json.loads(form["session"])
+                except json.JSONDecodeError:
+                    return openai_error(400, "session must be JSON", param="session")
+            if not isinstance(offer, str):
+                return openai_error(400, "multipart body needs an sdp field", param="sdp")
+        else:
+            return openai_error(415, "send the SDP offer as application/sdp", code="unsupported_media_type")
+        if not app.state.engine.loaded:
+            return openai_error(503, "Flash model is not loaded", type_="server_error", code="model_not_loaded")
+        try:
+            call_id, answer = await app.state.calls.create(offer, build_session, session_patch=session_patch)
+        except EventError as err:
+            return openai_error(400, err.message, code=err.code, param=err.param)
+        return Response(content=answer, status_code=201, media_type="application/sdp",
+                        headers={"Location": f"/v1/realtime/calls/{call_id}"})
+
+    @app.delete("/v1/realtime/calls/{call_id}")
+    async def realtime_hangup(call_id: str):
+        if not await app.state.calls.hangup(call_id):
+            return openai_error(404, f"no call {call_id!r}", code="not_found", param="call_id")
+        return {"ok": True}
 
     @app.post("/save_settings")
     async def save_settings(payload: dict):
