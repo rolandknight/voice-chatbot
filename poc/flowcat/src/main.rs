@@ -264,7 +264,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .join("../poc-qwen-streaming/config.flowcat.yaml")
                 .to_string_lossy(),
         ),
-        qwen_voice: env_or("POC_QWEN_VOICE", "marvin"),
+        qwen_voice: env_or("POC_QWEN_VOICE", "babel"),
         qwen_size: env_or("POC_QWEN_SIZE", "1.7B"),
         qwen_interval_s: env_or("POC_QWEN_INTERVAL_S", "0.32")
             .parse::<f64>()

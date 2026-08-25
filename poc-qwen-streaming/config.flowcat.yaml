@@ -44,7 +44,7 @@ voices:
 preload:
   enabled: true
   models: [clone_default]
-  voices: all          # or a list of preset names
+  voices: all          # babel (FlowCat default), marvin, one-one
   size: "1.7B"
 
 transcribe:

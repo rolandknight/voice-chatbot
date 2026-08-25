@@ -83,7 +83,7 @@ run time.
 |---|---|---|---|
 | `kokoro` (default) | `stubs/kokoro_shim.py` sidecar on :8880 | after each whole sentence is synthesized (~0.4 s) | CPU ONNX; no GPU memory |
 | `chatterbox` | external Chatterbox-TTS-Server on :8004 | whole sentence (1–3 s) | cloned Marvin voice; started outside `run_poc.sh` |
-| `qwen` | **in-process** Qwen3-TTS via poc-qwen-streaming's PyO3 mlx-audio engine (Cargo feature `qwen-tts`) | **streamed**: ~0.2 s to the first chunk, then chunk-by-chunk | Apple Silicon; clones `voices/<POC_QWEN_VOICE>` (marvin); 4.3 GB active / 6.4 GB peak measured |
+| `qwen` | **in-process** Qwen3-TTS via poc-qwen-streaming's PyO3 mlx-audio engine (Cargo feature `qwen-tts`) | **streamed**: ~0.2 s to the first chunk, then chunk-by-chunk | Apple Silicon; clones `voices/<POC_QWEN_VOICE>` (babel by default); 4.3 GB active / 6.4 GB peak measured |
 
 `qwen` must be compiled in: `POC_TTS_BACKEND=qwen make build` links against
 poc-qwen's venv interpreter (`make setup` creates it when the backend is qwen)
