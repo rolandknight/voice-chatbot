@@ -125,9 +125,14 @@ frames are display-only: FlowCat sends exactly one final transcription to
 Claude Haiku after the existing Silero VAD endpoint. Selecting Moonshine does
 not run Whisper in shadow mode or decode each utterance twice.
 
-NVIDIA Nemotron Speech Streaming English 0.6B is the GPU-streaming option. A
-pinned NeMo-Speech.cpp sidecar keeps the Q8 model resident and exposes only a
-localhost WebSocket to Rust. FlowCat still owns VAD and turn boundaries:
+NVIDIA Nemotron Speech Streaming English 0.6B is the GPU-streaming option.
+`POC_STT_BACKEND=nemotron` loads the pinned NeMo-Speech.cpp Q8 model
+**in-process** through its C library (`flowcat/src/nemotron_native.rs`, Cargo
+feature `nemotron-native`, enabled by `make build` when the runtime from
+`setup_nemotron.sh` is present): one recognizer per process, one native stream
+per call on its own worker thread, no sidecar, no session limit. The earlier
+localhost WebSocket sidecar remains available as `nemotron-sidecar` (it accepts
+two concurrent sessions). FlowCat still owns VAD and turn boundaries:
 partials update the playground, while the VAD-triggered commit produces the
 single final transcript that can reach Haiku and tools. The default 560 ms
 cache window is the accuracy/latency operating point; set

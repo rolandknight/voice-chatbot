@@ -61,6 +61,10 @@ cuda = ["whisper-rs/cuda"]
 # POC_TTS_BACKEND=qwen: `POC_TTS_BACKEND=qwen make build` (platform.sh sets
 # PYO3_PYTHON to poc-qwen's venv interpreter and enables this feature).
 qwen-tts = ["dep:poc-qwen-streaming"]
+# In-process Nemotron STT through NeMo-Speech.cpp's C ABI (src/nemotron_native.rs);
+# links poc/.deps/nemo-speech/v0.1.0/lib (setup_nemotron.sh). Enabled by
+# platform.sh for POC_STT_BACKEND=nemotron when that runtime is installed.
+nemotron-native = []
 
 # Full-duplex support is upstream as of FlowCat PR #61. Keep flowcat-core
 # patched to the vendored copy only for Babel's extra input-processor seam,

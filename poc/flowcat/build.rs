@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 fn main() {
     println!("cargo:rerun-if-env-changed=MOONSHINE_LIB_DIR");
     qwen_tts_rpath();
+    nemotron_native_link();
 
     // Keep the existing Whisper-only build independent of Moonshine's native
     // artifacts. Cargo exposes enabled features to build scripts this way.
@@ -87,4 +88,36 @@ fn qwen_tts_rpath() {
             println!("cargo:rustc-link-arg=-Wl,-rpath,{libdir}");
         }
     }
+}
+
+/// `nemotron-native`: link NeMo-Speech.cpp's C library (prebuilt dylibs from
+/// setup_nemotron.sh) and add its directory to the rpath — the ggml backend
+/// dylibs it depends on live beside it.
+fn nemotron_native_link() {
+    println!("cargo:rerun-if-env-changed=NEMO_SPEECH_LIB_DIR");
+    if env::var_os("CARGO_FEATURE_NEMOTRON_NATIVE").is_none() {
+        return;
+    }
+    let manifest_dir = PathBuf::from(
+        env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set by Cargo"),
+    );
+    let lib_dir = env::var_os("NEMO_SPEECH_LIB_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| manifest_dir.join("../.deps/nemo-speech/v0.1.0/lib"));
+    let lib_dir = lib_dir.canonicalize().unwrap_or_else(|error| {
+        panic!(
+            "nemotron-native enabled but {} is unavailable: {error}. Run ./scripts/setup_nemotron.sh or set NEMO_SPEECH_LIB_DIR.",
+            lib_dir.display()
+        )
+    });
+    let target_os = env::var("CARGO_CFG_TARGET_OS").expect("target OS set by Cargo");
+    let lib_name = match target_os.as_str() {
+        "macos" => "libnemo_speech_asr_c.dylib",
+        "linux" => "libnemo_speech_asr_c.so",
+        other => panic!("nemotron-native supports macOS and Linux, not {other}"),
+    };
+    require_file(&lib_dir, lib_name);
+    println!("cargo:rustc-link-search=native={}", lib_dir.display());
+    println!("cargo:rustc-link-lib=dylib=nemo_speech_asr_c");
+    println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib_dir.display());
 }

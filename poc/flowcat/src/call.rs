@@ -263,6 +263,13 @@ pub async fn offer(
             cfg.nemotron_url.clone(),
             cfg.nemotron_speech_contexts.clone(),
         )),
+        #[cfg(feature = "nemotron-native")]
+        LoadedStt::NemotronNative(engine) => Box::new(
+            crate::nemotron_native::NemotronNativeStt::from_engine(
+                engine.clone(),
+                cfg.nemotron_speech_contexts.clone(),
+            ),
+        ),
     };
     let inner = match cfg.llm_provider.as_str() {
         // ADR-0007 Layer 1: native /api/chat — keep_alive, num_ctx and

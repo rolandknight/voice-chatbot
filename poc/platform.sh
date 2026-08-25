@@ -73,7 +73,7 @@ detect_accelerator() {
         ACCELERATOR_REASON="Moonshine native CPU runtime"
         return
         ;;
-    nemotron | nvidia)
+    nemotron | nvidia | nemotron-sidecar)
         case "$NEMOTRON_DEVICE" in
         auto)
             case "$PLATFORM" in
@@ -114,7 +114,7 @@ detect_accelerator() {
         esac
         return
         ;;
-    *) fail "invalid POC_STT_BACKEND '$STT_BACKEND' (expected whisper, moonshine, or nemotron)" ;;
+    *) fail "invalid POC_STT_BACKEND '$STT_BACKEND' (expected whisper, moonshine, nemotron, or nemotron-sidecar)" ;;
     esac
 
     case "$REQUESTED_ACCELERATOR" in
@@ -309,6 +309,14 @@ build() {
     fi
     if [ "$STT_BACKEND" = "whisper" ] && [ "$ACCELERATOR" != "cpu" ]; then
         cargo_features+=("$ACCELERATOR")
+    fi
+    # Nemotron runs in-process through NeMo-Speech.cpp's C library when the
+    # pinned runtime is installed; `nemotron-sidecar` keeps the WebSocket path.
+    if [ "$STT_BACKEND" = "nemotron" ] || [ "$STT_BACKEND" = "nvidia" ]; then
+        [ -s "$NEMOTRON_HOME/lib/libnemo_speech_asr_c.dylib" ] || [ -s "$NEMOTRON_HOME/lib/libnemo_speech_asr_c.so" ] \
+            || fail "Nemotron runtime library missing under $NEMOTRON_HOME/lib; run ./scripts/setup_nemotron.sh"
+        export NEMO_SPEECH_LIB_DIR="$NEMOTRON_HOME/lib"
+        cargo_features+=(nemotron-native)
     fi
     # Qwen3-TTS: link poc-qwen-streaming's PyO3 engine against poc-qwen's venv
     # interpreter. Only for POC_TTS_BACKEND=qwen so other builds stay Python-free.

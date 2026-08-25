@@ -15,6 +15,8 @@ mod ollama_serve;
 #[cfg(feature = "moonshine")]
 mod moonshine;
 mod nemotron;
+#[cfg(feature = "nemotron-native")]
+mod nemotron_native;
 #[cfg(feature = "qwen-tts")]
 mod tts_qwen;
 mod playground;
@@ -41,7 +43,11 @@ use crate::session::StubSession;
 pub enum SttBackend {
     Whisper,
     Moonshine,
+    /// In-process NeMo-Speech.cpp (feature `nemotron-native`); falls back to
+    /// the sidecar when the binary was built without it.
     Nemotron,
+    /// The localhost NeMo-Speech.cpp WebSocket sidecar (`scripts/start_nemotron.sh`).
+    NemotronSidecar,
 }
 
 impl SttBackend {
@@ -49,9 +55,14 @@ impl SttBackend {
         match value.trim().to_ascii_lowercase().as_str() {
             "whisper" => Ok(Self::Whisper),
             "moonshine" => Ok(Self::Moonshine),
-            "nemotron" | "nvidia" => Ok(Self::Nemotron),
+            "nemotron" | "nvidia" => Ok(if cfg!(feature = "nemotron-native") {
+                Self::Nemotron
+            } else {
+                Self::NemotronSidecar
+            }),
+            "nemotron-sidecar" => Ok(Self::NemotronSidecar),
             _ => Err(format!(
-                "unsupported POC_STT_BACKEND {value:?} (expected \"whisper\", \"moonshine\", or \"nemotron\")"
+                "unsupported POC_STT_BACKEND {value:?} (expected \"whisper\", \"moonshine\", \"nemotron\", or \"nemotron-sidecar\")"
             )),
         }
     }
@@ -61,6 +72,7 @@ impl SttBackend {
             Self::Whisper => "whisper",
             Self::Moonshine => "moonshine",
             Self::Nemotron => "nemotron",
+            Self::NemotronSidecar => "nemotron-sidecar",
         }
     }
 }
@@ -72,6 +84,9 @@ pub enum LoadedStt {
     /// NVIDIA's model is held by a local NeMo-Speech.cpp sidecar. Calls create
     /// cheap, isolated realtime WebSocket sessions against that resident model.
     Nemotron,
+    /// The same model loaded in-process; calls create native streams.
+    #[cfg(feature = "nemotron-native")]
+    NemotronNative(nemotron_native::SharedNemotronEngine),
 }
 
 pub struct PocConfig {
@@ -99,6 +114,11 @@ pub struct PocConfig {
     pub moonshine_keyterms: String,
     /// Base URL of the local NeMo-Speech.cpp server (no cloud STT).
     pub nemotron_url: String,
+    /// In-process Nemotron: GGUF path, device (`auto|metal|cpu|cuda:N`), RNNT
+    /// right-context frames (6 = 560 ms window, the sidecar's default).
+    pub nemotron_model: String,
+    pub nemotron_device: String,
+    pub nemotron_right_context: i32,
     /// Comma-separated phrases to bias the RNNT decoder toward local entities.
     pub nemotron_speech_contexts: Vec<String>,
     pub kokoro_url: String,
@@ -241,6 +261,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         moonshine_update_interval_ms,
         moonshine_keyterms: env_or("POC_MOONSHINE_KEYTERMS", ""),
         nemotron_url: env_or("POC_NEMOTRON_URL", "http://127.0.0.1:8178"),
+        nemotron_model: env_or(
+            "POC_NEMOTRON_MODEL",
+            &poc_dir
+                .join("models/nemotron/nvidia/nemotron-speech-streaming-en-0.6b/ebe59e5a817142986528bbbee5dba8db7b38ed50/nemotron-speech-streaming-en-0.6b.q8_0.gguf")
+                .to_string_lossy(),
+        ),
+        nemotron_device: env_or("POC_NEMOTRON_DEVICE", "auto"),
+        nemotron_right_context: env_or("POC_NEMOTRON_RIGHT_CONTEXT", "6")
+            .parse::<i32>()
+            .map_err(|error| format!("invalid POC_NEMOTRON_RIGHT_CONTEXT: {error}"))?,
         nemotron_speech_contexts: env_or("POC_NEMOTRON_SPEECH_CONTEXTS", "")
             .split(',')
             .map(str::trim)
@@ -299,8 +329,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .into());
     }
-    if cfg.stt_backend == SttBackend::Nemotron {
+    if cfg.stt_backend == SttBackend::NemotronSidecar {
         require_nonempty(&cfg.nemotron_url, "POC_NEMOTRON_URL")?;
+    }
+    if cfg.stt_backend == SttBackend::Nemotron && !std::path::Path::new(&cfg.nemotron_model).exists() {
+        return Err(format!(
+            "nemotron model missing: {} (run ./scripts/setup_nemotron.sh)",
+            cfg.nemotron_model
+        )
+        .into());
     }
     if !std::path::Path::new(&cfg.vad_model).exists() {
         return Err(format!("silero vad model missing: {}", cfg.vad_model).into());
@@ -420,6 +457,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         SttBackend::Nemotron => {
+            #[cfg(feature = "nemotron-native")]
+            {
+                let device = nemotron_native::Device::parse(&cfg.nemotron_device)?;
+                LoadedStt::NemotronNative(nemotron_native::load_engine(
+                    &cfg.nemotron_model,
+                    device,
+                    cfg.nemotron_right_context,
+                )?)
+            }
+            #[cfg(not(feature = "nemotron-native"))]
+            {
+                unreachable!("SttBackend::parse maps nemotron to the sidecar without the feature")
+            }
+        }
+        SttBackend::NemotronSidecar => {
             let ready_url = format!("{}/ready", cfg.nemotron_url.trim_end_matches('/'));
             let response = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(10))

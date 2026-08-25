@@ -36,7 +36,7 @@ mkdir -p models logs reports
 
 case "${POC_STT_BACKEND:-whisper}" in
     moonshine) "$REPO_DIR/scripts/setup_moonshine.sh" ;;
-    nemotron | nvidia) "$REPO_DIR/scripts/setup_nemotron.sh" ;;
+    nemotron | nvidia | nemotron-sidecar) "$REPO_DIR/scripts/setup_nemotron.sh" ;;
 esac
 
 # Qwen3-TTS runs in-process through PyO3 against poc-qwen's venv (mlx-audio).

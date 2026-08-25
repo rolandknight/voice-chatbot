@@ -91,9 +91,10 @@ up() {
     mkdir -p "$LOGS"
     case "$STT_BACKEND" in
     whisper | moonshine) ;;
-    nemotron | nvidia) ensure_nemotron ;;
+    nemotron | nvidia) ;; # in-process (nemotron-native feature); no sidecar
+    nemotron-sidecar) ensure_nemotron ;;
     *)
-        echo "ERROR: unsupported POC_STT_BACKEND '$STT_BACKEND' (expected whisper, moonshine, or nemotron)" >&2
+        echo "ERROR: unsupported POC_STT_BACKEND '$STT_BACKEND' (expected whisper, moonshine, nemotron, or nemotron-sidecar)" >&2
         return 1
         ;;
     esac
