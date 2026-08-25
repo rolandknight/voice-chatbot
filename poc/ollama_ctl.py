@@ -62,6 +62,8 @@ def wait_up(root: str, seconds: float) -> None:
 
 
 def start_serve(root: str) -> None:
+    if is_up(root):
+        sys.exit("ERROR: something already answers on 11434; refusing to start a second serve")
     os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
     # Context length bounds the runner's KV budget, which is what Ollama's
     # scheduler counts when deciding whether the resident model still "fits"
@@ -91,6 +93,16 @@ def plain_serve_pids() -> list[int]:
         if cmd.strip() == "ollama serve":
             pids.append(int(pid))
     return pids
+
+
+def app_serve_running() -> bool:
+    """True when the running serve belongs to the Ollama.app bundle."""
+    out = subprocess.run(["pgrep", "-x", "ollama"], capture_output=True, text=True).stdout
+    for pid in out.split():
+        cmd = subprocess.run(["ps", "-o", "command=", "-p", pid], capture_output=True, text=True).stdout
+        if "Ollama.app" in cmd and cmd.strip().endswith("serve"):
+            return True
+    return False
 
 
 def resident(root: str, model: str) -> dict | None:
@@ -169,11 +181,32 @@ def ensure() -> int:
             return 0
         sys.exit("ERROR: keep-alive still not pinned after restart; check logs/ollama.log")
 
+    if app_serve_running():
+        # The menu-bar app supervises its own `ollama serve` and neither passes
+        # launchd env through nor honours AppleScript quit reliably (both
+        # verified). Stop the app and its serve for this session and run our own
+        # serve with the env; the app comes back at next login as usual.
+        print("ollama: Ollama.app-managed serve without our env; stopping the app and starting our own serve")
+        subprocess.run(["pkill", "-x", "Ollama"], check=False)
+        subprocess.run(["pkill", "-f", "Ollama.app/Contents/Resources/ollama"], check=False)
+        deadline = time.time() + 30
+        while (is_up(root) or app_serve_running()) and time.time() < deadline:
+            time.sleep(0.5)
+        if is_up(root):
+            sys.exit("ERROR: could not stop the Ollama.app serve on 11434; quit Ollama from the menu bar and rerun")
+        start_serve(root)
+        secs = warm(base, model)
+        entry = resident(root, model)
+        if pinned(entry) and int(entry.get("context_length") or 0) == want_ctx:
+            print(f"ollama: own serve started; {model} warmed via /v1 in {secs:.1f}s; resident (keep-alive pinned, ctx {want_ctx})")
+            return 0
+        sys.exit("ERROR: keep-alive/context still not applied after starting our own serve; see logs/ollama.log")
+
     print(
-        "WARNING: ollama is running without OLLAMA_KEEP_ALIVE=-1 and is not a plain "
-        "`ollama serve` we can restart (Ollama.app?). The model will unload after 5 idle "
-        "minutes and the next call pays a ~10 s cold start. Fix: "
-        "`launchctl setenv OLLAMA_KEEP_ALIVE -1`, then quit and relaunch Ollama."
+        "WARNING: ollama is running without OLLAMA_KEEP_ALIVE=-1 and is neither a plain "
+        "`ollama serve` nor the Ollama.app, so it cannot be restarted from here. The model "
+        "will unload after 5 idle minutes. Fix: start it with OLLAMA_KEEP_ALIVE=-1 "
+        f"OLLAMA_CONTEXT_LENGTH={want_ctx}."
     )
     return 0
 
