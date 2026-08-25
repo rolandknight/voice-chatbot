@@ -27,10 +27,8 @@ CLIENT_PKG_CONFIG := $(abspath .deps/prefix/lib/pkgconfig)
 FLOWCAT_URL ?= http://127.0.0.1:6210
 LOG_LEVEL ?= info
 POC_MARKER ?= smoke
-# Ollama: read from .env (OPENROUTER_BASE_URL=http://127.0.0.1:11434/v1,
-# POC_LLM_MODEL=gemma4:26b); these are only the fallbacks.
+# Ollama base URL for `make status`; the ollama target itself reads .env.
 OLLAMA_URL ?= http://127.0.0.1:11434
-OLLAMA_MODEL ?= gemma4:26b
 
 .PHONY: run setup build ollama up down restart status client client-devices client-build \
         test test-all doctor logs clean help
@@ -46,22 +44,8 @@ $(STAMP): requirements.txt mise.toml setup.sh $(DOTENV)
 build: setup  ## Build flowcat-poc for the STT backend in .env (platform.sh picks Metal/CPU)
 	@mise exec -- ./platform.sh build
 
-ollama: setup  ## Start `ollama serve` if needed, pull the model if missing, prewarm the FlowCat prefix + pin resident
-	@$(LOAD_ENV) \
-	url="$${OPENROUTER_BASE_URL:-$(OLLAMA_URL)}"; url="$${url%/}"; url="$${url%/v1}"; \
-	model="$${POC_LLM_MODEL:-$(OLLAMA_MODEL)}"; \
-	case "$$url" in *11434*) ;; *) echo "OPENROUTER_BASE_URL=$$url is not Ollama; skipping"; exit 0 ;; esac; \
-	mkdir -p logs; \
-	if ! curl -fsS -m 2 -o /dev/null "$$url/api/tags"; then \
-	  echo "ollama not answering at $$url; starting ollama serve (logs/ollama.log)"; \
-	  (nohup ollama serve >>logs/ollama.log 2>&1 &); \
-	  for i in $$(seq 1 60); do curl -fsS -m 2 -o /dev/null "$$url/api/tags" && break; sleep 1; done; \
-	  curl -fsS -m 2 -o /dev/null "$$url/api/tags" || { echo "ERROR: ollama did not come up"; exit 1; }; \
-	fi; \
-	if ! curl -fsS "$$url/api/tags" | grep -q "\"name\":\"$$model\""; then \
-	  echo "pulling $$model ..."; ollama pull "$$model"; \
-	fi; \
-	$(PY) warm_llm.py
+ollama: setup  ## ollama serve (OLLAMA_KEEP_ALIVE=-1), pull if missing, prewarm the FlowCat prefix via /v1
+	@$(LOAD_ENV) $(PY) ollama_ctl.py ensure
 
 up: setup  ## Start STT sidecar (if nemotron) + stubs + kokoro shim + FlowCat; no-op for parts already running
 	@./run_poc.sh up
@@ -107,7 +91,7 @@ doctor:  ## Verify platform prerequisites for the backend in .env
 	@./platform.sh doctor
 
 logs:  ## Tail the stack logs
-	@tail -n 20 -F logs/flowcat.log logs/nemotron.log logs/stubs.log logs/kokoro.log 2>/dev/null
+	@tail -n 20 -F logs/flowcat.log logs/nemotron.log logs/stubs.log logs/kokoro.log logs/ollama.log 2>/dev/null
 
 clean:  ## Remove the venv and caches. Leaves models/, .deps/, logs/, reports/ and cargo targets.
 	rm -rf $(VENV) .pytest_cache harness/__pycache__ stubs/__pycache__
