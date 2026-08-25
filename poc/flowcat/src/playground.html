@@ -138,6 +138,29 @@
       .bot { color: #16a34a; }
       .tool { color: #9333ea; font-style: italic; }
 
+      /* Time-to-first-audio: per-turn chip on the user line + session stats. */
+      .ttfa {
+        display: inline-block;
+        margin-left: 0.5rem;
+        padding: 0 0.45rem;
+        border-radius: 999px;
+        font-size: 0.78rem;
+        font-style: normal;
+        font-variant-numeric: tabular-nums;
+        color: #fff;
+        background: #6b7280;
+        vertical-align: 1px;
+      }
+      .ttfa.good { background: #16a34a; }
+      .ttfa.warn { background: #d97706; }
+      .ttfa.slow { background: #dc2626; }
+      #ttfa-stats {
+        margin: 0.25rem 0 0;
+        font-size: 0.85rem;
+        font-variant-numeric: tabular-nums;
+        opacity: 0.85;
+      }
+
       @media (max-width: 580px) {
         .device-row {
           align-items: stretch;
@@ -199,6 +222,7 @@
         <button id="stop" type="button" disabled>Hang up</button>
       </div>
       <p id="status" role="status" aria-live="polite">idle</p>
+      <p id="ttfa-stats" aria-label="Time to first audio statistics" hidden></p>
       <div id="log" aria-live="polite" aria-label="Call transcript"></div>
       <audio id="remote-audio" autoplay playsinline></audio>
     </main>
@@ -225,6 +249,28 @@
       let micSender = null;
       let micStream = null;
       let eventsWs = null;
+      // Time-to-first-audio (TTFA): the clock starts at the final user
+      // transcription (the closest client-visible edge to end-of-utterance)
+      // and stops at the first *audible* remote frame, measured with an
+      // AnalyserNode on the remote track so jitter-buffer/playout delay counts.
+      // `rtf-bot-started-speaking` is the fallback when WebAudio can't hear
+      // the remote stream (some browsers deliver a silent MediaStreamSource).
+      const ttfaStatsEl = document.getElementById("ttfa-stats");
+      const TTFA_GOOD_MS = 2000;
+      const TTFA_WARN_MS = 4000;
+      const TTFA_AUDIO_RMS = 0.01;
+      const TTFA_EVENT_FALLBACK_MS = 1500;
+      const ttfa = {
+        t0: null,            // performance.now() at the final user transcription
+        userLine: null,      // transcript element that receives the chip
+        awaiting: false,     // a reply's first audio is being timed
+        samples: [],         // ms per completed turn this call
+        firstDone: false,    // the first turn is the cache-sensitive one; tag it
+        analyser: null,
+        buf: null,
+        raf: null,
+        fallbackTimer: null,
+      };
       let userInterim = null;
       let audioContext = null;
       let meterSource = null;
@@ -268,6 +314,105 @@
         logEl.appendChild(div);
         logEl.scrollTop = logEl.scrollHeight;
         return div;
+      }
+
+      function ttfaReset() {
+        ttfa.t0 = null;
+        ttfa.userLine = null;
+        ttfa.awaiting = false;
+        if (ttfa.fallbackTimer !== null) clearTimeout(ttfa.fallbackTimer);
+        ttfa.fallbackTimer = null;
+      }
+
+      function ttfaNewCall() {
+        ttfaReset();
+        ttfa.samples = [];
+        ttfa.firstDone = false;
+        ttfaStatsEl.hidden = true;
+        ttfaStatsEl.textContent = "";
+      }
+
+      // A user turn just finalized: (re)start the clock. On barge-in the
+      // previous reply's pending measurement is simply superseded, so an
+      // interrupted-before-audio reply never gets a chip.
+      function ttfaArm(userLine) {
+        ttfaReset();
+        ttfa.t0 = performance.now();
+        ttfa.userLine = userLine;
+        ttfa.awaiting = true;
+      }
+
+      function ttfaQuantile(sorted, q) {
+        if (!sorted.length) return 0;
+        const pos = (sorted.length - 1) * q;
+        const lo = Math.floor(pos);
+        const hi = Math.min(sorted.length - 1, lo + 1);
+        return sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo);
+      }
+
+      function ttfaFormat(ms) {
+        return `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)} s`;
+      }
+
+      function ttfaResolve(source) {
+        if (!ttfa.awaiting || ttfa.t0 === null) return;
+        const ms = performance.now() - ttfa.t0;
+        ttfa.awaiting = false;
+        if (ttfa.fallbackTimer !== null) clearTimeout(ttfa.fallbackTimer);
+        ttfa.fallbackTimer = null;
+        const isFirst = !ttfa.firstDone;
+        ttfa.firstDone = true;
+        ttfa.samples.push(ms);
+
+        const chip = document.createElement("span");
+        chip.className =
+          "ttfa " + (ms < TTFA_GOOD_MS ? "good" : ms < TTFA_WARN_MS ? "warn" : "slow");
+        chip.textContent = `⏱ ${ttfaFormat(ms)}${isFirst ? " · first" : ""}`;
+        chip.title =
+          `Time to first audio (${source === "audio" ? "first audible frame" : "bot-started-speaking event"})` +
+          (isFirst ? " — first turn of the call (prompt-cache sensitive)" : "");
+        (ttfa.userLine || logEl.lastElementChild || logEl).appendChild(chip);
+
+        const sorted = ttfa.samples.slice().sort((a, b) => a - b);
+        ttfaStatsEl.textContent =
+          `TTFA last ${ttfaFormat(ms)} · median ${ttfaFormat(ttfaQuantile(sorted, 0.5))}` +
+          ` · p95 ${ttfaFormat(ttfaQuantile(sorted, 0.95))} · n=${sorted.length}`;
+        ttfaStatsEl.hidden = false;
+      }
+
+      function ttfaStopMeter() {
+        if (ttfa.raf !== null) cancelAnimationFrame(ttfa.raf);
+        ttfa.raf = null;
+        ttfa.analyser = null;
+        ttfa.buf = null;
+      }
+
+      // Listen to the remote track (not the mic) for the first audible frame.
+      function ttfaStartMeter(stream, generation) {
+        ttfaStopMeter();
+        const ctx = primeAudioContext();
+        if (!ctx) return;
+        try {
+          const src = ctx.createMediaStreamSource(stream);
+          const analyser = ctx.createAnalyser();
+          analyser.fftSize = 512;
+          src.connect(analyser); // analysis only; the <audio> element plays it
+          ttfa.analyser = analyser;
+          ttfa.buf = new Float32Array(analyser.fftSize);
+        } catch (_) {
+          return; // fall back to the bot-started-speaking event
+        }
+        const tick = () => {
+          if (generation !== lifecycleGeneration || !ttfa.analyser) return;
+          if (ttfa.awaiting) {
+            ttfa.analyser.getFloatTimeDomainData(ttfa.buf);
+            let sum = 0;
+            for (let i = 0; i < ttfa.buf.length; i++) sum += ttfa.buf[i] * ttfa.buf[i];
+            if (Math.sqrt(sum / ttfa.buf.length) > TTFA_AUDIO_RMS) ttfaResolve("audio");
+          }
+          ttfa.raf = requestAnimationFrame(tick);
+        };
+        ttfa.raf = requestAnimationFrame(tick);
       }
 
       function selectedDeviceId() {
@@ -594,7 +739,10 @@
           case "rtf-user-transcription":
             if (!userInterim) userInterim = line("user", "🧑 ");
             userInterim.textContent = `🧑 ${data.text || ""}`;
-            if (data.final) userInterim = null;
+            if (data.final) {
+              ttfaArm(userInterim);
+              userInterim = null;
+            }
             break;
           case "rtf-bot-text":
             line("bot", `🤖 ${data.text || ""}`);
@@ -607,6 +755,22 @@
             break;
           case "rtf-bot-started-speaking":
             setStatus("agent speaking…");
+            if (ttfa.awaiting) {
+              if (!ttfa.analyser) {
+                ttfaResolve("event");
+              } else if (ttfa.fallbackTimer === null) {
+                // The meter should fire within a playout delay; if the remote
+                // source is inaudible to WebAudio, fall back to the event edge.
+                const eventAt = performance.now();
+                ttfa.fallbackTimer = setTimeout(() => {
+                  ttfa.fallbackTimer = null;
+                  if (ttfa.awaiting) {
+                    ttfa.t0 = ttfa.t0 + (performance.now() - eventAt); // credit the wait
+                    ttfaResolve("event");
+                  }
+                }, TTFA_EVENT_FALLBACK_MS);
+              }
+            }
             break;
           case "rtf-bot-stopped-speaking":
             setStatus("connected — listening…");
@@ -637,6 +801,8 @@
           try { oldPeer.close(); } catch (_) {}
         }
         remoteAudio.srcObject = null;
+        ttfaStopMeter();
+        ttfaReset();
         stopMicrophone();
         updateControls();
         setStatus(status);
@@ -656,6 +822,7 @@
 
       async function startCall() {
         if (pc || callStarting) return;
+        ttfaNewCall();
         primeAudioContext();
         const generation = ++lifecycleGeneration;
         const controller = new AbortController();
@@ -683,7 +850,9 @@
 
           peer.ontrack = (event) => {
             if (generation !== lifecycleGeneration || pc !== peer) return;
-            remoteAudio.srcObject = event.streams[0] || new MediaStream([event.track]);
+            const stream = event.streams[0] || new MediaStream([event.track]);
+            remoteAudio.srcObject = stream;
+            ttfaStartMeter(stream, generation);
             playRemoteAudio(generation);
           };
           peer.onconnectionstatechange = () => {
