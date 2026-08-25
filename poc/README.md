@@ -40,7 +40,9 @@ make help
 `make` is idempotent: setup is stamped, `ollama` only starts `ollama serve` /
 pulls when needed, and `up` skips parts already running. The `ollama` step
 prewarms through the same `/v1` endpoint FlowCat uses with the real system
-prompt + tool schemas (`warm_llm.py`), then pins the model resident: without
+prompt + tool schemas (`ollama_ctl.py`), and makes sure `ollama serve` runs with
+`OLLAMA_KEEP_ALIVE=-1` (a per-request pin is overwritten by every `/v1` call, so
+the model would unload after 5 idle minutes): without
 that, the first user turn pays an Ollama runner swap plus a ~2 K-token prefill
 (~8 s measured); with it the first LLM round is ~0.6 s.
 The repo-root `make poc-*` targets still work but assume a system `cargo`.
