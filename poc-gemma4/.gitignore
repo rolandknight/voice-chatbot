@@ -1,0 +1,5 @@
+.venv/
+reports/*.jsonl
+reports/*.log
+__pycache__/
+.pytest_cache/

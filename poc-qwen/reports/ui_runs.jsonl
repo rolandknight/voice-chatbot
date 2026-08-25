@@ -29,3 +29,5 @@
 {"ts": 1787604151.605212, "tab": "Voice Clone", "model": "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16", "load_s": 1.525, "warm_s": 1.06, "gen_s": 1.063, "audio_s": 2.24, "rtf": 0.474, "chunks": 1, "chars": 30, "mode": "icl"}
 {"ts": 1787604193.307592, "tab": "Voice Clone", "model": "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16", "load_s": 1.525, "warm_s": 1.06, "gen_s": 1.355, "audio_s": 2.88, "rtf": 0.47, "chunks": 1, "chars": 30, "mode": "icl"}
 {"ts": 1787604195.5563872, "tab": "TTS", "model": "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-bf16", "load_s": 0.865, "warm_s": 0.462, "gen_s": 0.838, "audio_s": 2.56, "rtf": 0.327, "chunks": 1, "chars": 30}
+{"ts": 1787604552.354357, "tab": "Voice Clone", "model": "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16", "load_s": 2.745, "warm_s": 1.2, "gen_s": 2.778, "audio_s": 5.68, "rtf": 0.489, "chunks": 1, "chars": 104, "mode": "icl"}
+{"ts": 1787604576.105841, "tab": "Voice Clone", "model": "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16", "load_s": 2.745, "warm_s": 1.2, "gen_s": 3.177, "audio_s": 6.24, "rtf": 0.509, "chunks": 1, "chars": 104, "mode": "icl"}

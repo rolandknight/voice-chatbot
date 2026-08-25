@@ -1,0 +1,28 @@
+# poc-gemma4 configuration. Override any scalar with POC_GEMMA4_<SECTION>_<KEY>=value.
+ollama:
+  base_url: http://localhost:11434
+  model: gemma4:26b
+  keep_alive: "-1"
+  # Must exceed prefix + history; Ollama silently truncates (and loses the
+  # prompt cache) when a prompt exceeds num_ctx.
+  num_ctx: 8192
+  temperature: 0.2
+  max_tokens: 512
+
+skills:
+  root: ../skills
+  # Skills whose SKILL.md `enabled_when` points at these config keys are included.
+  enabled:
+    skills.radio.enabled: true
+    skills.shows.enabled: true
+    skills.spotify.enabled: true
+    skills.sfx.enabled: true
+
+gates:
+  # A warm turn's prompt_eval_duration may be at most this fraction of a
+  # measured cache miss (~2.1 s for the ~2.2 K-token prefix on M4 Max).
+  warm_prefill_ratio_max: 0.15
+  warm_ttft_p50_max_s: 0.4
+  warm_ttft_p95_max_s: 0.6
+  decode_tps_min: 40
+  turns: 6

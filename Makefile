@@ -1,4 +1,4 @@
-.PHONY: flowcat-client-build flowcat-client-devices flowcat-client-run flowcat-client-test flowcat-client-check poc-doctor poc-setup poc-moonshine-setup poc-nemotron-setup poc-build poc-chatterbox poc-up poc-down poc-test poc-test-all poc-results poc-tts-setup poc-tts poc-tts-bench poc-tts-test poc-qwen poc-qwen-setup poc-qwen-bench poc-qwen-test help install-server install-server-os install-client install-client-os install-service run run-webrtc-smoke run-webrtc-smoke-lan run-server run-server-lan run-server-local run-server-lan-local run-webrtc-client run-rpi-client-local run-jabra run-wake-test run-wake-client
+.PHONY: flowcat-client-build flowcat-client-devices flowcat-client-run flowcat-client-test flowcat-client-check poc-doctor poc-setup poc-moonshine-setup poc-nemotron-setup poc-build poc-chatterbox poc-up poc-down poc-test poc-test-all poc-results poc-tts-setup poc-tts poc-tts-bench poc-tts-test poc-qwen poc-qwen-setup poc-qwen-bench poc-qwen-test poc-qwen-streaming poc-qwen-streaming-build poc-qwen-streaming-bench poc-qwen-streaming-test poc-gemma4 poc-gemma4-test poc-gemma4-test-live help install-server install-server-os install-client install-client-os install-service run run-webrtc-smoke run-webrtc-smoke-lan run-server run-server-lan run-server-local run-server-lan-local run-webrtc-client run-rpi-client-local run-jabra run-wake-test run-wake-client
 
 # Homebrew packages the server needs (macOS). Keep in sync with install_mac.sh.
 BREW_PKGS := portaudio ffmpeg mpv librespot git cmake pkg-config ollama corelocationcli
@@ -309,6 +309,27 @@ poc-qwen-bench:  ## poc-qwen: latency/RTF sweep -> poc-qwen/reports/runs.jsonl
 
 poc-qwen-test:  ## poc-qwen: GPU-free unit tests
 	@$(MAKE) -C poc-qwen test
+
+poc-qwen-streaming:  ## poc-qwen-streaming: Rust+PyO3 server streaming Qwen3-TTS over WebSocket on :8008
+	@$(MAKE) -C poc-qwen-streaming run
+
+poc-qwen-streaming-build:  ## poc-qwen-streaming: release build against poc-qwen's venv Python
+	@$(MAKE) -C poc-qwen-streaming build
+
+poc-qwen-streaming-bench:  ## poc-qwen-streaming: headless TTFA bench -> poc-qwen-streaming/reports/rs_runs.jsonl
+	@$(MAKE) -C poc-qwen-streaming bench
+
+poc-qwen-streaming-test:  ## poc-qwen-streaming: GPU-free bridge + Rust unit tests
+	@$(MAKE) -C poc-qwen-streaming test
+
+poc-gemma4:  ## poc-gemma4: prefix-cache + TTFT probe of gemma4:26b on Ollama -> poc-gemma4/reports/probe.jsonl
+	@$(MAKE) -C poc-gemma4 run
+
+poc-gemma4-test:  ## poc-gemma4: GPU-free unit tests
+	@$(MAKE) -C poc-gemma4 test
+
+poc-gemma4-test-live:  ## poc-gemma4: live assertions against Ollama + gemma4:26b
+	@$(MAKE) -C poc-gemma4 test-live
 
 poc-tts:    ## poc-tts: run the Chatterbox Flash server + GUI on :8005
 	@$(MAKE) -C poc-tts run
