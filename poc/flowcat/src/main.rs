@@ -125,6 +125,12 @@ pub struct PocConfig {
     /// Host ICE candidate address to advertise (POC_ADVERTISE_IP). None →
     /// the interface that routes back to each caller.
     pub advertise_ip: Option<std::net::IpAddr>,
+    /// Optional HTTPS listener (POC_TLS_BIND + POC_TLS_CERT/KEY): browsers only
+    /// expose getUserMedia on secure origins, so a LAN browser needs this; the
+    /// plain listener stays for the harness and the native client.
+    pub tls_bind: String,
+    pub tls_cert: String,
+    pub tls_key: String,
 }
 
 pub struct PocState {
@@ -263,6 +269,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         qwen_interval_s: env_or("POC_QWEN_INTERVAL_S", "0.32")
             .parse::<f64>()
             .map_err(|error| format!("invalid POC_QWEN_INTERVAL_S: {error}"))?,
+        tls_bind: env_or("POC_TLS_BIND", ""),
+        tls_cert: env_or("POC_TLS_CERT", ""),
+        tls_key: env_or("POC_TLS_KEY", ""),
         advertise_ip: {
             let raw = env_or("POC_ADVERTISE_IP", "");
             if raw.trim().is_empty() {
@@ -467,12 +476,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     // ConnectInfo gives the offer handler the caller's address so it can
     // advertise a reachable ICE candidate (POC_BIND=0.0.0.0:6210 for the LAN).
+    // Optional HTTPS twin of the same router for LAN browsers (secure context).
+    let tls_handle = axum_server::Handle::new();
+    let tls_task = if state.cfg.tls_bind.trim().is_empty() {
+        None
+    } else {
+        let cfg = &state.cfg;
+        if cfg.tls_cert.is_empty() || cfg.tls_key.is_empty() {
+            return Err("POC_TLS_BIND needs POC_TLS_CERT and POC_TLS_KEY (make tls-cert)".into());
+        }
+        let rustls_cfg = axum_server::tls_rustls::RustlsConfig::from_pem_file(&cfg.tls_cert, &cfg.tls_key)
+            .await
+            .map_err(|e| format!("load TLS cert/key ({}, {}): {e}", cfg.tls_cert, cfg.tls_key))?;
+        let addr: std::net::SocketAddr = cfg.tls_bind.parse().map_err(|e| format!("invalid POC_TLS_BIND: {e}"))?;
+        tracing::info!(%addr, cert = %cfg.tls_cert, "flowcat-poc listening (https)");
+        let app = app.clone();
+        let handle = tls_handle.clone();
+        Some(tokio::spawn(async move {
+            axum_server::bind_rustls(addr, rustls_cfg)
+                .handle(handle)
+                .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
+                .await
+        }))
+    };
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
         .with_graceful_shutdown(shutdown_signal())
         .await?;
+    if let Some(task) = tls_task {
+        tls_handle.graceful_shutdown(Some(std::time::Duration::from_secs(2)));
+        let _ = task.await;
+    }
 
     // Shutdown: release the model (its ~17 GB returns), then stop the serve
     // we spawned. A hard exit backstop covers a wedged unload or connection.

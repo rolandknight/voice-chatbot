@@ -31,7 +31,7 @@ POC_MARKER ?= smoke
 OLLAMA_URL ?= http://127.0.0.1:11434
 
 .PHONY: run setup build ollama up down restart status client client-devices client-build \
-        test test-all doctor logs clean help
+        test test-all doctor logs clean help tls-cert up-lan
 
 run: setup build up  ## Install if needed, build, start the stack on :6210 (flowcat brings up Ollama itself)
 
@@ -49,6 +49,12 @@ ollama: build  ## LLM ready: serve (spawned if needed), model pulled, prefix war
 
 up: setup  ## Start STT sidecar (if nemotron) + stubs + kokoro shim + FlowCat; no-op for parts already running
 	@./run_poc.sh up
+
+tls-cert:  ## Self-signed dev cert (SAN: localhost + this Mac's LAN IPs) in ../.certs, for LAN browsers
+	@$(MAKE) -C $(REPO) .certs/cert.pem
+
+up-lan: setup tls-cert  ## Stack reachable from the LAN: http on :6210 for tests/native client, https on :6443 for browsers
+	@POC_BIND=0.0.0.0:6210 POC_TLS_BIND=0.0.0.0:6443 POC_TLS_CERT=$(REPO)/.certs/cert.pem POC_TLS_KEY=$(REPO)/.certs/key.pem ./run_poc.sh up
 
 down:  ## Stop the stack; flowcat unloads the LLM on exit and stops an Ollama it spawned (Chatterbox is left alone)
 	@./run_poc.sh down

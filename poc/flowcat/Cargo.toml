@@ -27,6 +27,8 @@ flowcat-server = { git = "https://github.com/AreevAI/flowcat.git", rev = "4ff03f
 ] }
 
 axum = { version = "0.8", features = ["ws"] }
+# HTTPS listener for browsers on the LAN (getUserMedia needs a secure context).
+axum-server = { version = "0.7", features = ["tls-rustls"] }
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }

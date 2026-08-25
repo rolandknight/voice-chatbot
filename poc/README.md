@@ -61,7 +61,16 @@ candidates only (no STUN/TURN): the server advertises the interface that routes
 back to each caller (loopback for same-machine peers, the LAN interface for
 remote ones; `POC_ADVERTISE_IP` overrides), and the native client binds and
 advertises the interface that routes to `--server-url`. Nothing on the offer
-endpoint is authenticated, so bind to a trusted network only. Verified
+endpoint is authenticated, so bind to a trusted network only.
+
+**Browsers need HTTPS.** `getUserMedia`/`enumerateDevices` exist only on secure
+origins (`https://…` or `localhost`), so a browser on another machine opening
+`http://<ip>:6210` loads the page but has no microphone API ("cannot enumerate
+audio devices"). `make up-lan` adds an HTTPS listener on `:6443` with the repo's
+self-signed dev cert (`make tls-cert`; SAN covers localhost and this Mac's LAN
+IPs): open `https://<server-lan-ip>:6443`, accept the certificate warning once,
+and the playground works (its events WebSocket switches to `wss` by itself). The
+plain `:6210` listener stays for the harness and the native client. Verified
 2026-08-25 with the native client pairing on the Mac's LAN address
 (`local_addr=192.168.0.245`) while the loopback harness kept passing.
 
