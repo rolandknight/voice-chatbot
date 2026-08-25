@@ -317,6 +317,7 @@ async fn run_worker(
 
     let mut transcript = TranscriptState::default();
     let mut pending: Option<PendingRequest> = None;
+    let mut sent_samples: usize = 0;
 
     loop {
         tokio::select! {
@@ -324,6 +325,7 @@ async fn run_worker(
                 let Some(command) = command else { break };
                 match command {
                     WorkerCommand::Audio(pcm) => {
+                        sent_samples += pcm.len() / 2;
                         if pending.is_some() {
                             let _ = updates.send(Err(FlowcatError::Other(
                                 "Nemotron received audio while a stream barrier was pending".into(),
@@ -342,6 +344,11 @@ async fn run_worker(
                             )));
                             continue;
                         }
+                        tracing::debug!(
+                            seconds = sent_samples as f32 / 16_000.0,
+                            "nemotron: committing utterance audio"
+                        );
+                        sent_samples = 0;
                         let event = json!({"type": "input_audio_buffer.commit"});
                         if let Err(error) = socket.send(Message::Text(event.to_string().into())).await {
                             let _ = reply.send(Err(socket_error("commit audio", error)));

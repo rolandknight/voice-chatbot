@@ -15,7 +15,7 @@ use flowcat_core::audio::{SileroVad, VadProcessor};
 use flowcat_core::observer::{FrameObserver, RtviObserver, RtviSink};
 use flowcat_core::pipeline::{build_cascaded_call_duplex, CascadedConfig};
 use flowcat_server::events::RtfSink;
-use flowcat_services::llm::OpenRouterLlm;
+use flowcat_services::llm::OpenAiLlmBuilder;
 use flowcat_services::tts::KokoroTts;
 use flowcat_transports::webrtc::WebRtcTransport;
 
@@ -171,7 +171,12 @@ pub async fn offer(State(state): State<Arc<PocState>>, Json(body): Json<OfferReq
         )),
     };
     let llm = crate::llm::StaticGreetingLlm::new(
-        OpenRouterLlm::with_model(cfg.openrouter_key.clone(), cfg.llm_model.clone()),
+        // OpenAI-compatible chat completions; OPENROUTER_BASE_URL selects
+        // OpenRouter (default) or a local server such as Ollama's /v1.
+        OpenAiLlmBuilder::new(cfg.openrouter_key.clone())
+            .base_url(cfg.llm_base_url.clone())
+            .model(cfg.llm_model.clone())
+            .build(),
         "Ready.",
     );
     let tts = match cfg.tts_backend.as_str() {
