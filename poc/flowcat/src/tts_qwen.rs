@@ -183,7 +183,7 @@ impl Cutter {
 /// Turn the engine's event channel into a frame stream. The receiver lives in
 /// the stream, so dropping the stream cancels the generation.
 pub fn event_stream(
-    mut rx: mpsc::Receiver<StreamEvent>,
+    rx: mpsc::Receiver<StreamEvent>,
     first: StreamEvent,
     context_id: Arc<str>,
 ) -> BoxStream<'static, Frame> {

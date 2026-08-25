@@ -10,6 +10,8 @@
 mod brain;
 mod call;
 mod llm;
+mod llm_ollama;
+mod ollama_serve;
 #[cfg(feature = "moonshine")]
 mod moonshine;
 mod nemotron;
@@ -77,6 +79,15 @@ pub struct PocConfig {
     /// OpenAI-compatible chat-completions base (OpenRouter, or a local /v1).
     pub llm_base_url: String,
     pub llm_model: String,
+    /// `ollama` (native /api/chat; ADR-0007 Layer 1) or `openrouter` (OpenAI-compatible).
+    pub llm_provider: String,
+    /// Context size sent on every native request (and to a spawned serve).
+    pub llm_num_ctx: u32,
+    /// ADR-0007 Layer 2: `auto` | `never` | `always`.
+    pub ollama_supervise: ollama_serve::Supervise,
+    pub ollama_bin: String,
+    /// Release the model on exit (`keep_alive: 0`) so its memory returns.
+    pub ollama_unload_on_exit: bool,
     pub stt_backend: SttBackend,
     pub whisper_model: String,
     /// CPU workers used by whisper.cpp for each utterance.
@@ -178,13 +189,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let cfg = PocConfig {
-        openrouter_key: std::env::var("OPENROUTER_API_KEY")
-            .map_err(|_| "OPENROUTER_API_KEY not set (see poc/.env)")?,
+        openrouter_key: env_or("OPENROUTER_API_KEY", ""),
         llm_base_url: env_or(
             "OPENROUTER_BASE_URL",
             "https://openrouter.ai/api/v1",
         ),
         llm_model: env_or("POC_LLM_MODEL", "anthropic/claude-haiku-4.5"),
+        llm_provider: {
+            let base = env_or("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1");
+            env_or(
+                "POC_LLM_PROVIDER",
+                if base.contains(":11434") { "ollama" } else { "openrouter" },
+            )
+        },
+        llm_num_ctx: env_or("POC_LLM_NUM_CTX", "8192")
+            .parse::<u32>()
+            .map_err(|error| format!("invalid POC_LLM_NUM_CTX: {error}"))?,
+        ollama_supervise: ollama_serve::Supervise::parse(&env_or("POC_OLLAMA_SUPERVISE", "auto"))?,
+        ollama_bin: env_or("POC_OLLAMA_BIN", "ollama"),
+        ollama_unload_on_exit: env_or("POC_OLLAMA_UNLOAD_ON_EXIT", "true")
+            .parse::<bool>()
+            .map_err(|error| format!("invalid POC_OLLAMA_UNLOAD_ON_EXIT: {error}"))?,
         stt_backend,
         whisper_model: env_or(
             "POC_WHISPER_MODEL",
@@ -255,9 +280,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !std::path::Path::new(&cfg.vad_model).exists() {
         return Err(format!("silero vad model missing: {}", cfg.vad_model).into());
     }
-    require_nonempty(&cfg.openrouter_key, "OPENROUTER_API_KEY")?;
     require_nonempty(&cfg.llm_model, "POC_LLM_MODEL")?;
     require_nonempty(&cfg.llm_base_url, "OPENROUTER_BASE_URL")?;
+    match cfg.llm_provider.as_str() {
+        "openrouter" => require_nonempty(&cfg.openrouter_key, "OPENROUTER_API_KEY")?,
+        "ollama" => {
+            if cfg.llm_num_ctx < 2048 {
+                return Err("POC_LLM_NUM_CTX must be >= 2048".into());
+            }
+        }
+        other => {
+            return Err(format!(
+                "unsupported POC_LLM_PROVIDER {other:?} (expected \"ollama\" or \"openrouter\")"
+            )
+            .into())
+        }
+    }
     match cfg.tts_backend.as_str() {
         "kokoro" => {}
         "chatterbox" => {
@@ -291,6 +329,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         env_or("POC_STUBS_URL", "http://127.0.0.1:8790"),
         poc_dir.join("logs/artifacts"),
     )?;
+
+    // ADR-0007: the chatbot owns its LLM's lifecycle. Ensure a serve, pull the
+    // model if missing, warm the exact prefix, verify residency — before the
+    // audio engines load, so `--warm-only` (make ollama) is quick.
+    let warm_only = std::env::args().any(|a| a == "--warm-only");
+    let ollama_serve = if cfg.llm_provider == "ollama" {
+        Some(start_ollama(&cfg, &session, poc_dir).await?)
+    } else {
+        None
+    };
+    if warm_only {
+        tracing::info!("--warm-only: LLM warm and resident; exiting");
+        if let Some(serve) = ollama_serve {
+            // A serve we spawned must outlive this short-lived process so the
+            // stack that follows finds it: detach it instead of killing it.
+            serve.detach();
+        }
+        return Ok(());
+    }
 
     // `run_poc.sh up` creates this with a real synthesis after Chatterbox is
     // warm. Reuse it for the fixed connect greeting; direct binary launches
@@ -393,12 +450,121 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/healthz", get(healthz))
         .route("/webrtc/offer", post(call::offer))
         .route("/webrtc/events/{pc_id}", get(events_ws))
-        .with_state(state);
+        .with_state(state.clone());
 
     tracing::info!(%bind, "flowcat-poc listening");
     let listener = tokio::net::TcpListener::bind(&bind).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+
+    // Shutdown: release the model (its ~17 GB returns), then stop the serve
+    // we spawned. A hard exit backstop covers a wedged unload or connection.
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+        tracing::warn!("shutdown backstop: exiting");
+        std::process::exit(0);
+    });
+    if state.cfg.llm_provider == "ollama" && state.cfg.ollama_unload_on_exit {
+        let llm = llm_ollama::OllamaLlm::new(state.cfg.llm_base_url.clone(), state.cfg.llm_model.clone());
+        match llm.unload().await {
+            Ok(()) => tracing::info!(model = %state.cfg.llm_model, "ollama: model unloaded"),
+            Err(error) => tracing::warn!(%error, "ollama: unload failed"),
+        }
+    }
+    if let Some(serve) = ollama_serve {
+        serve.shutdown().await;
+    }
     Ok(())
+}
+
+/// SIGTERM (`run_poc.sh down`) or ctrl-c.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    let term = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut s) => {
+                s.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = term => {},
+    }
+    tracing::info!("shutdown signal received");
+}
+
+/// ADR-0007 Layers 1+2 at start-up: a serve (ours or existing), the model
+/// pulled, the exact prefix warmed, residency verified. Returns the supervisor
+/// handle so shutdown can stop what we started.
+async fn start_ollama(
+    cfg: &PocConfig,
+    session: &StubSession,
+    poc_dir: &std::path::Path,
+) -> Result<ollama_serve::OllamaServe, Box<dyn std::error::Error>> {
+    use flowcat_core::SessionSource;
+
+    let started = std::time::Instant::now();
+    let serve = ollama_serve::OllamaServe::ensure(
+        &cfg.llm_base_url,
+        cfg.ollama_supervise,
+        &cfg.ollama_bin,
+        cfg.llm_num_ctx,
+        &poc_dir.join("logs/ollama.log"),
+    )
+    .await?;
+    let llm = llm_ollama::OllamaLlm::new(serve.base_url(), cfg.llm_model.clone())
+        .num_ctx(cfg.llm_num_ctx);
+    match llm.version().await {
+        Ok(v) => {
+            let minor = v.split('.').nth(1).and_then(|m| m.parse::<u32>().ok());
+            if minor.map(|m| m < 32).unwrap_or(false) {
+                tracing::warn!(version = %v, "ollama older than 0.32: prompt-cache accounting differs");
+            } else {
+                tracing::info!(version = %v, "ollama serve");
+            }
+        }
+        Err(error) => tracing::warn!(%error, "ollama: version check failed"),
+    }
+    if !llm.has_model().await? {
+        tracing::info!(model = %cfg.llm_model, "ollama: pulling model");
+        let status = tokio::process::Command::new(&cfg.ollama_bin)
+            .args(["pull", &cfg.llm_model])
+            .env("OLLAMA_HOST", serve.base_url())
+            .status()
+            .await?;
+        if !status.success() {
+            return Err(format!("`ollama pull {}` failed: {status}", cfg.llm_model).into());
+        }
+    }
+    // The prefix every call sends: the brain's system prompt + the session's
+    // advertised tools (name-sorted inside the service).
+    let tools = session.node_tools(0, "poc", "babel").await?;
+    let report = llm.warm(&cfg.system_prompt, &tools).await?;
+    match llm.residency().await? {
+        Some(r) if r.pinned && r.context_length == u64::from(cfg.llm_num_ctx) => {
+            tracing::info!(
+                model = %cfg.llm_model, load_ms = report.load_ms, prompt_eval_ms = report.prompt_eval_ms,
+                prompt_tokens = report.prompt_tokens, total_ms = report.total_ms,
+                size_vram_mb = r.size_vram / (1 << 20), elapsed_s = started.elapsed().as_secs_f32(),
+                "ollama: model warm and resident (pinned, ctx verified)"
+            );
+        }
+        Some(r) => {
+            return Err(format!(
+                "ollama: model resident but not as requested (pinned={}, context_length={}, want {}): \
+                 the serve overrides native request options; check its OLLAMA_* env and version",
+                r.pinned, r.context_length, cfg.llm_num_ctx
+            )
+            .into())
+        }
+        None => return Err(format!("ollama: {} not resident after warm", cfg.llm_model).into()),
+    }
+    Ok(serve)
 }
 
 async fn healthz(State(state): State<Arc<PocState>>) -> Json<serde_json::Value> {

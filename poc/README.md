@@ -37,15 +37,19 @@ make down
 make help
 ```
 
-`make` is idempotent: setup is stamped, `ollama` only starts `ollama serve` /
-pulls when needed, and `up` skips parts already running. The `ollama` step
-prewarms through the same `/v1` endpoint FlowCat uses with the real system
-prompt + tool schemas (`ollama_ctl.py`), and makes sure `ollama serve` runs with
-`OLLAMA_KEEP_ALIVE=-1` (a per-request pin is overwritten by every `/v1` call, so
-the model would unload after 5 idle minutes): without
-that, the first user turn pays an Ollama runner swap plus a ~2 K-token prefill
-(~8 s measured); with it the first LLM round is ~0.6 s.
-The repo-root `make poc-*` targets still work but assume a system `cargo`.
+`make` is idempotent: setup is stamped and `up` skips parts already running.
+The LLM lifecycle is the chatbot's own (ADR-0007): at start-up `flowcat-poc`
+spawns `ollama serve` if nothing answers on the base URL (`POC_OLLAMA_SUPERVISE`),
+pulls the model if missing, warms the exact system-prompt + sorted-tools prefix
+so the first turn hits the prompt cache, and verifies the model is pinned with
+the requested context. Every turn goes through Ollama's native `/api/chat`
+with `keep_alive: -1`, `num_ctx` and `think: false` on the request, so residency
+no longer depends on how `serve` was started (the `/v1` endpoint resets
+keep-alive to 5 min on each request — the cause of the old ~10 s first turns).
+On exit (`make down` → SIGTERM) it unloads the model so its ~17 GB returns and
+stops a serve it spawned. `make ollama` runs the same start-up path and exits
+(`--warm-only`). `POC_OLLAMA_UNLOAD_ON_EXIT=false` keeps the model across dev
+restarts.
 
 ## TTS backends
 

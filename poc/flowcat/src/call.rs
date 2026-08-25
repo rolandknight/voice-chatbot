@@ -15,7 +15,7 @@ use flowcat_core::audio::{SileroVad, VadProcessor};
 use flowcat_core::observer::{FrameObserver, RtviObserver, RtviSink};
 use flowcat_core::pipeline::{build_cascaded_call_duplex, CascadedConfig};
 use flowcat_server::events::RtfSink;
-use flowcat_services::llm::OpenAiLlmBuilder;
+use flowcat_services::llm::{OpenAiLlm, OpenAiLlmBuilder};
 use flowcat_services::tts::KokoroTts;
 use flowcat_transports::webrtc::WebRtcTransport;
 
@@ -84,6 +84,48 @@ impl flowcat_core::service::TtsService for PocTts {
             PocTts::Chatterbox(t) => t.run_tts_stream(text).await,
             #[cfg(feature = "qwen-tts")]
             PocTts::Qwen(t) => t.run_tts_stream(text).await,
+        }
+    }
+}
+
+/// Static LLM provider selection (same reason as `PocTts`).
+enum PocLlm {
+    Ollama(crate::llm_ollama::OllamaLlm),
+    OpenAi(OpenAiLlm),
+}
+
+#[async_trait::async_trait]
+impl flowcat_core::service::LlmService for PocLlm {
+    fn name(&self) -> &str {
+        match self {
+            PocLlm::Ollama(l) => l.name(),
+            PocLlm::OpenAi(l) => l.name(),
+        }
+    }
+    async fn start(
+        &mut self,
+        params: &flowcat_core::processor::frame::StartParams,
+    ) -> flowcat_core::Result<()> {
+        match self {
+            PocLlm::Ollama(l) => l.start(params).await,
+            PocLlm::OpenAi(l) => l.start(params).await,
+        }
+    }
+    async fn run_llm<'a>(
+        &'a mut self,
+        ctx: &'a flowcat_core::processor::frame::LlmContext,
+    ) -> flowcat_core::Result<
+        futures::stream::BoxStream<'a, flowcat_core::processor::frame::Frame>,
+    > {
+        match self {
+            PocLlm::Ollama(l) => l.run_llm(ctx).await,
+            PocLlm::OpenAi(l) => l.run_llm(ctx).await,
+        }
+    }
+    fn set_tools(&mut self, tools: Vec<flowcat_core::service::Tool>) {
+        match self {
+            PocLlm::Ollama(l) => l.set_tools(tools),
+            PocLlm::OpenAi(l) => l.set_tools(tools),
         }
     }
 }
@@ -193,15 +235,22 @@ pub async fn offer(State(state): State<Arc<PocState>>, Json(body): Json<OfferReq
             cfg.nemotron_speech_contexts.clone(),
         )),
     };
-    let llm = crate::llm::StaticGreetingLlm::new(
-        // OpenAI-compatible chat completions; OPENROUTER_BASE_URL selects
-        // OpenRouter (default) or a local server such as Ollama's /v1.
-        OpenAiLlmBuilder::new(cfg.openrouter_key.clone())
-            .base_url(cfg.llm_base_url.clone())
-            .model(cfg.llm_model.clone())
-            .build(),
-        "Ready.",
-    );
+    let inner = match cfg.llm_provider.as_str() {
+        // ADR-0007 Layer 1: native /api/chat — keep_alive, num_ctx and
+        // think=false on every request; prompt-cache evidence in the metrics.
+        "ollama" => PocLlm::Ollama(
+            crate::llm_ollama::OllamaLlm::new(cfg.llm_base_url.clone(), cfg.llm_model.clone())
+                .num_ctx(cfg.llm_num_ctx),
+        ),
+        // OpenAI-compatible chat completions (the OpenRouter cloud profile).
+        _ => PocLlm::OpenAi(
+            OpenAiLlmBuilder::new(cfg.openrouter_key.clone())
+                .base_url(cfg.llm_base_url.clone())
+                .model(cfg.llm_model.clone())
+                .build(),
+        ),
+    };
+    let llm = crate::llm::StaticGreetingLlm::new(inner, "Ready.");
     let tts = match cfg.tts_backend.as_str() {
         "chatterbox" => PocTts::Chatterbox(
             crate::tts_chatterbox::ChatterboxTts::new(
