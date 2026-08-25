@@ -56,6 +56,21 @@ impl ServerEndpoints {
         })
     }
 
+    /// Host and port of the server (for choosing the interface that reaches it).
+    pub fn host_port(&self) -> Result<(String, u16)> {
+        let host = self
+            .health
+            .host_str()
+            .ok_or_else(|| anyhow::anyhow!("server URL has no host"))?
+            .trim_matches(|c| c == '[' || c == ']')
+            .to_string();
+        let port = self
+            .health
+            .port_or_known_default()
+            .ok_or_else(|| anyhow::anyhow!("server URL has no port"))?;
+        Ok((host, port))
+    }
+
     pub fn health_url(&self) -> &Url {
         &self.health
     }

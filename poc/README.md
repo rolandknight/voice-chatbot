@@ -29,6 +29,7 @@ Kokoro TTS shim.
 cd poc
 make                # setup (venv, models, Nemotron runtime) -> build -> ollama serve + model resident -> stack up on :6210
 make client         # native mic/speaker call; INPUT_DEVICE='Jabra' OUTPUT_DEVICE='Jabra' to pick devices
+                    # from another machine: POC_BIND=0.0.0.0:6210 make up, then make client FLOWCAT_URL=http://<server-lan-ip>:6210
 make client-devices # list CoreAudio devices
 make status         # listeners, Ollama resident model, flowcat healthz
 make restart        # after `make build` or editing .env
@@ -50,6 +51,19 @@ On exit (`make down` → SIGTERM) it unloads the model so its ~17 GB returns and
 stops a serve it spawned. `make ollama` runs the same start-up path and exits
 (`--warm-only`). `POC_OLLAMA_UNLOAD_ON_EXIT=false` keeps the model across dev
 restarts.
+
+## Remote callers (LAN)
+
+The server binds `127.0.0.1:6210` by default. For a browser or the native
+client on another machine, bind the LAN (`POC_BIND=0.0.0.0:6210`, or a specific
+interface) — the media socket is already wildcard-bound. ICE uses host
+candidates only (no STUN/TURN): the server advertises the interface that routes
+back to each caller (loopback for same-machine peers, the LAN interface for
+remote ones; `POC_ADVERTISE_IP` overrides), and the native client binds and
+advertises the interface that routes to `--server-url`. Nothing on the offer
+endpoint is authenticated, so bind to a trusted network only. Verified
+2026-08-25 with the native client pairing on the Mac's LAN address
+(`local_addr=192.168.0.245`) while the loopback harness kept passing.
 
 ## TTS backends
 

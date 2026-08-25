@@ -119,7 +119,16 @@ async fn run_call(
         output_device.name, output_device.id, output_device.config
     );
 
-    let pending = PendingPeer::create().await?;
+    // Bind and advertise on the interface that reaches the server, so
+    // `--server-url http://<lan-ip>:6210` pairs across machines (no STUN needed
+    // on a LAN); a loopback URL still yields a loopback candidate.
+    let (host, port) = endpoints.host_port()?;
+    let server_addr = tokio::net::lookup_host((host.as_str(), port))
+        .await
+        .with_context(|| format!("resolve server host {host}:{port}"))?
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("server host {host} resolved to no address"))?;
+    let pending = PendingPeer::create_toward(server_addr).await?;
     let response = exchange_offer(&http, &endpoints, pending.offer_sdp()).await?;
     let peer = pending.accept_answer(&response.sdp)?;
 

@@ -5,8 +5,15 @@ captures directly from a selected operating-system audio input, sends 20 ms
 Opus frames over WebRTC, decodes the returned Opus stream, and plays it through
 a selected output device. The browser and Python audio clients are not involved.
 
-The current FlowCat server advertises loopback ICE only, so client and server
-must run on the same machine.
+Client and server may be on different machines on the same LAN: the client
+binds and advertises the interface that routes to `--server-url`, and the
+server advertises the interface that routes back to the caller (host ICE
+candidates only, no STUN/TURN). Start the server with `POC_BIND=0.0.0.0:6210`
+(and `POC_ADVERTISE_IP` if auto-detection picks the wrong interface), then:
+
+```sh
+make client FLOWCAT_URL=http://<server-lan-ip>:6210
+```
 
 ## Prerequisites
 

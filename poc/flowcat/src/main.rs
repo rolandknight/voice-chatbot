@@ -122,6 +122,9 @@ pub struct PocConfig {
     pub qwen_voice: String,
     pub qwen_size: String,
     pub qwen_interval_s: f64,
+    /// Host ICE candidate address to advertise (POC_ADVERTISE_IP). None →
+    /// the interface that routes back to each caller.
+    pub advertise_ip: Option<std::net::IpAddr>,
 }
 
 pub struct PocState {
@@ -260,6 +263,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         qwen_interval_s: env_or("POC_QWEN_INTERVAL_S", "0.32")
             .parse::<f64>()
             .map_err(|error| format!("invalid POC_QWEN_INTERVAL_S: {error}"))?,
+        advertise_ip: {
+            let raw = env_or("POC_ADVERTISE_IP", "");
+            if raw.trim().is_empty() {
+                None
+            } else {
+                Some(raw.trim().parse::<std::net::IpAddr>().map_err(|error| format!("invalid POC_ADVERTISE_IP: {error}"))?)
+            }
+        },
     };
     if cfg.stt_backend == SttBackend::Whisper && !std::path::Path::new(&cfg.whisper_model).exists()
     {
@@ -454,7 +465,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!(%bind, "flowcat-poc listening");
     let listener = tokio::net::TcpListener::bind(&bind).await?;
-    axum::serve(listener, app)
+    // ConnectInfo gives the offer handler the caller's address so it can
+    // advertise a reachable ICE candidate (POC_BIND=0.0.0.0:6210 for the LAN).
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
         .with_graceful_shutdown(shutdown_signal())
         .await?;
 

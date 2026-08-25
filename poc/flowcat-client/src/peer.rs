@@ -7,7 +7,7 @@
 
 use std::collections::VecDeque;
 use std::future::Future;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::mpsc::{SyncSender, TrySendError};
 use std::time::{Duration, Instant};
 
@@ -48,12 +48,39 @@ pub struct PendingPeer {
     actions: VecDeque<DrainedAction>,
 }
 
+/// The local interface address that routes to `server` — a connected UDP
+/// socket's local address; no packet is sent. Loopback servers yield
+/// 127.0.0.1, LAN servers the LAN interface, so the ICE host candidate we
+/// advertise is one the server can actually reach.
+pub fn local_ip_toward(server: SocketAddr) -> Result<IpAddr> {
+    let probe = std::net::UdpSocket::bind(match server {
+        SocketAddr::V4(_) => SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)),
+        SocketAddr::V6(_) => SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 0)),
+    })
+    .context("bind route-probe UDP socket")?;
+    probe
+        .connect(server)
+        .with_context(|| format!("no route to WebRTC server {server}"))?;
+    Ok(probe.local_addr().context("read route-probe address")?.ip())
+}
+
 impl PendingPeer {
-    /// Bind a loopback UDP socket and build an Opus-only, send/receive offer.
+    /// Bind a loopback UDP socket and build an Opus-only, send/receive offer
+    /// (same-machine server; kept for tests and the default URL).
     pub async fn create() -> Result<Self> {
-        let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+        Self::create_on(IpAddr::V4(Ipv4Addr::LOCALHOST)).await
+    }
+
+    /// Bind on the interface that routes to `server` and advertise it as the
+    /// host ICE candidate, so a server on another machine can pair with us.
+    pub async fn create_toward(server: SocketAddr) -> Result<Self> {
+        Self::create_on(local_ip_toward(server)?).await
+    }
+
+    async fn create_on(ip: IpAddr) -> Result<Self> {
+        let socket = UdpSocket::bind((ip, 0))
             .await
-            .context("bind WebRTC loopback UDP socket")?;
+            .with_context(|| format!("bind WebRTC UDP socket on {ip}"))?;
         let local_addr = socket
             .local_addr()
             .context("read WebRTC UDP socket address")?;
@@ -65,12 +92,12 @@ impl PendingPeer {
         let mut actions = VecDeque::new();
 
         let candidate = Candidate::host(local_addr, "udp")
-            .context("construct WebRTC loopback ICE candidate")?;
+            .context("construct WebRTC host ICE candidate")?;
         let candidate_added = rtc.add_local_candidate(candidate).is_some();
         // add_local_candidate is a mutation, even when it rejects a candidate.
         let candidate_drain = drain_rtc(&mut rtc, &mut actions);
         if !candidate_added {
-            bail!("str0m rejected the WebRTC loopback ICE candidate");
+            bail!("str0m rejected the WebRTC host ICE candidate {local_addr}");
         }
         let _ = candidate_drain?;
 

@@ -5,7 +5,7 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
@@ -23,6 +23,23 @@ use crate::{LoadedStt, PocState};
 
 /// str0m carrier rate — matches flowcat-server's webrtc playground.
 const CARRIER_RATE: u32 = 16_000;
+
+/// The local interface address that routes to `peer` (connected-UDP probe, no
+/// packet sent); loopback peers get 127.0.0.1. Falls back to loopback when
+/// there is no route, which keeps the same-machine case working.
+pub fn advertise_ip_toward(peer: std::net::IpAddr) -> std::net::IpAddr {
+    if peer.is_loopback() {
+        return std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+    }
+    let bind: std::net::SocketAddr = match peer {
+        std::net::IpAddr::V4(_) => (std::net::Ipv4Addr::UNSPECIFIED, 0).into(),
+        std::net::IpAddr::V6(_) => (std::net::Ipv6Addr::UNSPECIFIED, 0).into(),
+    };
+    std::net::UdpSocket::bind(bind)
+        .and_then(|s| s.connect((peer, 9)).and_then(|_| s.local_addr()))
+        .map(|a| a.ip())
+        .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
+}
 
 /// Static TTS backend selection (the duplex builder is generic over the
 /// concrete `TtsService`; this avoids duplicating the whole build call).
@@ -141,7 +158,11 @@ pub struct OfferResponse {
     pub pc_id: String,
 }
 
-pub async fn offer(State(state): State<Arc<PocState>>, Json(body): Json<OfferRequest>) -> Response {
+pub async fn offer(
+    State(state): State<Arc<PocState>>,
+    ConnectInfo(remote): ConnectInfo<std::net::SocketAddr>,
+    Json(body): Json<OfferRequest>,
+) -> Response {
     let offer_started = std::time::Instant::now();
     let run_id = state.next_run.fetch_add(1, Ordering::Relaxed);
     let pc_id = format!("pc-{run_id}");
@@ -149,9 +170,9 @@ pub async fn offer(State(state): State<Arc<PocState>>, Json(body): Json<OfferReq
     // Register the event stream BEFORE answering so pre-subscribe events buffer.
     let (events, guard) = state.registry.register(&pc_id);
 
-    // Bind wildcard, advertise loopback: aiortc sends its ICE checks from
-    // per-interface sockets (docker bridges, LAN IP), and a 127.0.0.1-bound
-    // socket cannot reply to those sources (EINVAL os error 22, observed live).
+    // Bind wildcard (aiortc sends its ICE checks from per-interface sockets —
+    // docker bridges, LAN IP — and a 127.0.0.1-bound socket cannot reply to
+    // those sources: EINVAL os error 22, observed live) and advertise below.
     let socket = match tokio::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)).await {
         Ok(s) => s,
         Err(e) => {
@@ -162,7 +183,15 @@ pub async fn offer(State(state): State<Arc<PocState>>, Json(body): Json<OfferReq
                 .into_response()
         }
     };
-    let advertise = Some(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+    // Advertise an address the caller can reach: an explicit POC_ADVERTISE_IP,
+    // else the local interface that routes back to the caller (loopback for a
+    // same-machine peer, the LAN interface for a remote one). No STUN/TURN: the
+    // PoC serves a LAN, and host candidates pair directly there.
+    let advertise = Some(match state.cfg.advertise_ip {
+        Some(ip) => ip,
+        None => advertise_ip_toward(remote.ip()),
+    });
+    tracing::info!(%pc_id, %remote, advertise = %advertise.unwrap(), "webrtc offer");
     let (transport, answer) =
         match WebRtcTransport::accept_offer(&body.sdp, socket, advertise, CARRIER_RATE) {
             Ok(t) => t,
