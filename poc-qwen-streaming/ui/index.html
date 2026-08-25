@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Qwen3-TTS — poc-qwen-streaming</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header>
+    <h1>Qwen3-TTS on Apple Silicon (mlx-audio) — streamed from Rust</h1>
+    <div class="infobar">
+      <span id="info">loading…</span>
+      <button id="unload" class="sm">Unload models</button>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab active" data-tab="design">Voice Design</button>
+    <button class="tab" data-tab="clone">Voice Clone</button>
+    <button class="tab" data-tab="custom">TTS (CustomVoice)</button>
+  </nav>
+
+  <main>
+    <!-- Voice Design -->
+    <section class="panel active" id="panel-design">
+      <label>Text to Synthesize
+        <textarea id="d_text" rows="3">It's in the top drawer... wait, it's empty?</textarea></label>
+      <label>Language <select id="d_lang" class="lang"></select></label>
+      <label>Voice Description
+        <textarea id="d_instruct" rows="2">A cheerful young female voice with high pitch and energetic tone.</textarea></label>
+      <button class="primary generate" data-tab="design">Generate</button>
+    </section>
+
+    <!-- Voice Clone -->
+    <section class="panel" id="panel-clone">
+      <div class="cols">
+        <div>
+          <label>Preset voice <select id="c_preset"><option value="">—</option></select></label>
+          <label>Reference Audio</label>
+          <div class="row">
+            <input type="file" id="c_file" accept="audio/*">
+            <button id="c_rec" class="sm">● Record</button>
+          </div>
+          <audio id="c_ref_player" controls></audio>
+          <div class="hint" id="c_ref_hint">No reference selected.</div>
+          <label>Reference Text
+            <textarea id="c_ref_text" rows="3" placeholder="Transcript of the reference clip (required unless x-vector only)"></textarea></label>
+          <div class="row">
+            <button id="c_transcribe" class="sm">Auto-transcribe</button>
+            <label class="inline"><input type="checkbox" id="c_xvec"> Use x-vector only</label>
+          </div>
+        </div>
+        <div>
+          <label>Target Text
+            <textarea id="c_text" rows="4">I checked the calendar for tomorrow and you have three meetings, the first one starting at nine fifteen.</textarea></label>
+          <label>Language <select id="c_lang" class="lang"></select></label>
+          <label>Model Size <span id="c_size" class="radios"></span></label>
+          <button class="primary generate" data-tab="clone">Generate</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- TTS (CustomVoice) -->
+    <section class="panel" id="panel-custom">
+      <label>Text to Synthesize
+        <textarea id="t_text" rows="3">Sure, the kitchen light is on.</textarea></label>
+      <label>Language <select id="t_lang" class="lang"></select></label>
+      <label>Speaker <select id="t_speaker"></select></label>
+      <label>Style Instruction (Optional) <input id="t_instruct" placeholder="Very happy and excited."></label>
+      <label>Model Size <select id="t_size"></select></label>
+      <button class="primary generate" data-tab="custom">Generate</button>
+    </section>
+
+    <section class="output">
+      <div class="row">
+        <button id="cancel" class="sm" disabled>Stop</button>
+        <span id="status" class="status">Ready.</span>
+      </div>
+      <label>Generated Audio (streamed; replay below when done)</label>
+      <audio id="out" controls></audio>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

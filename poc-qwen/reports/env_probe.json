@@ -1,0 +1,14 @@
+{
+  "macos": "26.4",
+  "python": "3.12.14",
+  "mlx": "0.32.1",
+  "metal": {
+    "device_name": "Apple M4 Max",
+    "max_recommended_working_set_size": 30150672384,
+    "memory_size": 38654705664,
+    "architecture": "applegpu_g16s",
+    "max_buffer_length": 22613000192,
+    "resource_limit": 499000
+  },
+  "mlx_audio": "0.5.0"
+}

@@ -5,7 +5,18 @@
 - `babel.mp3` — the `babel` persona (wake word "hey babel").
 - `marvin.mp3` — the `marvin` persona (wake word "hey marvin").
 - `one-one.mp3` — the default/bench reference clip used by
-  `poc-tts-streaming`'s `bench.voice` and `realtime.default_voice`.
+  `poc-tts-streaming`'s `bench.voice` and `realtime.default_voice`, and by
+  `poc-qwen`'s bench.
+
+## Transcript sidecars (`<name>.txt`)
+
+Qwen3-TTS (`poc-qwen`) clones by in-context learning and **requires the
+transcript of the reference clip**; Chatterbox ignores it. A `<name>.txt`
+next to each clip is picked up automatically by the poc-qwen Voice Clone tab.
+The current sidecars were produced with `mlx-community/whisper-base.en-mlx`
+on 2026-08-24; `marvin.txt` matches the known source quote, `babel.txt` reads
+cleanly, and the tail of `one-one.txt` ("Ah, ah, here you go") has not been
+verified by ear — correct it if the clone echoes it.
 
 This is a curated list, deliberately kept short; poc-tts-streaming's
 `config.yaml` only searches this directory (`voices.paths: [../voices]`) so

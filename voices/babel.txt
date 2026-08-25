@@ -1,0 +1,1 @@
+Hi, I'm Babel. I can set timers, play the radio, check the weather, and answer your questions. Just say hey, Babel, then tell me what you need and I'll take it from there.
