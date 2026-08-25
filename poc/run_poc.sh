@@ -124,16 +124,37 @@ up() {
 }
 
 down() {
+    local pids=()
     for pidfile in "$LOGS"/*.pid; do
         [ -f "$pidfile" ] || continue
         local_name="$(basename "$pidfile" .pid)"
         pid="$(cat "$pidfile")"
         if kill -0 "$pid" 2>/dev/null; then
             kill "$pid" 2>/dev/null || true
+            pids+=("$pid")
             echo "stopped $local_name (pid $pid)"
         fi
         rm -f "$pidfile"
     done
+    # Wait for the processes to actually exit. A sidecar that is still
+    # shutting down answers /ready for a moment, so an immediate `up`
+    # (make restart) would skip relaunching it and FlowCat would then fail
+    # its startup readiness check against a dead port.
+    local i=0
+    while [ "${#pids[@]}" -gt 0 ] && [ "$i" -lt 100 ]; do
+        local alive=()
+        for pid in "${pids[@]}"; do
+            kill -0 "$pid" 2>/dev/null && alive+=("$pid")
+        done
+        [ "${#alive[@]}" -gt 0 ] || break
+        pids=("${alive[@]}")
+        i=$((i + 1))
+        sleep 0.1
+    done
+    if [ "${#pids[@]}" -gt 0 ] && [ "$i" -ge 100 ]; then
+        echo "WARNING: still running after 10s: ${pids[*]} (SIGKILL)" >&2
+        kill -9 "${pids[@]}" 2>/dev/null || true
+    fi
 }
 
 run_tests() {
