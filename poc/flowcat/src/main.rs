@@ -13,6 +13,8 @@ mod llm;
 #[cfg(feature = "moonshine")]
 mod moonshine;
 mod nemotron;
+#[cfg(feature = "qwen-tts")]
+mod tts_qwen;
 mod playground;
 mod session;
 mod stt;
@@ -103,6 +105,12 @@ pub struct PocConfig {
     pub tts_backend: String,
     pub chatterbox_url: String,
     pub chatterbox_voice: String,
+    /// Qwen3-TTS (`qwen`): engine profile (poc-qwen-streaming config), preset
+    /// voice name, model size, streamed-chunk interval.
+    pub qwen_config: String,
+    pub qwen_voice: String,
+    pub qwen_size: String,
+    pub qwen_interval_s: f64,
 }
 
 pub struct PocState {
@@ -112,6 +120,9 @@ pub struct PocState {
     pub stt: LoadedStt,
     pub ready_pcm: Option<Arc<[i16]>>,
     pub next_run: AtomicI64,
+    /// Shared Qwen engine + voice when `POC_TTS_BACKEND=qwen`.
+    #[cfg(feature = "qwen-tts")]
+    pub qwen: Option<tts_qwen::QwenShared>,
 }
 
 fn env_or(key: &str, default: &str) -> String {
@@ -213,6 +224,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tts_backend: env_or("POC_TTS_BACKEND", "kokoro"),
         chatterbox_url: env_or("POC_CHATTERBOX_URL", "http://127.0.0.1:8004"),
         chatterbox_voice: env_or("POC_CHATTERBOX_VOICE", "marvin.wav"),
+        qwen_config: env_or(
+            "POC_QWEN_CONFIG",
+            &poc_dir
+                .join("../poc-qwen-streaming/config.flowcat.yaml")
+                .to_string_lossy(),
+        ),
+        qwen_voice: env_or("POC_QWEN_VOICE", "marvin"),
+        qwen_size: env_or("POC_QWEN_SIZE", "1.7B"),
+        qwen_interval_s: env_or("POC_QWEN_INTERVAL_S", "0.32")
+            .parse::<f64>()
+            .map_err(|error| format!("invalid POC_QWEN_INTERVAL_S: {error}"))?,
     };
     if cfg.stt_backend == SttBackend::Whisper && !std::path::Path::new(&cfg.whisper_model).exists()
     {
@@ -242,9 +264,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             require_nonempty(&cfg.chatterbox_url, "POC_CHATTERBOX_URL")?;
             require_nonempty(&cfg.chatterbox_voice, "POC_CHATTERBOX_VOICE")?;
         }
+        "qwen" => {
+            if !cfg!(feature = "qwen-tts") {
+                return Err("POC_TTS_BACKEND=qwen needs the qwen-tts build: POC_TTS_BACKEND=qwen make build".into());
+            }
+            require_nonempty(&cfg.qwen_config, "POC_QWEN_CONFIG")?;
+            require_nonempty(&cfg.qwen_voice, "POC_QWEN_VOICE")?;
+            if !std::path::Path::new(&cfg.qwen_config).exists() {
+                return Err(format!("qwen engine config missing: {}", cfg.qwen_config).into());
+            }
+        }
         other => {
             return Err(format!(
-                "unsupported POC_TTS_BACKEND {other:?} (expected \"kokoro\" or \"chatterbox\")"
+                "unsupported POC_TTS_BACKEND {other:?} (expected \"kokoro\", \"chatterbox\", or \"qwen\")"
             )
             .into())
         }
@@ -333,6 +365,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "STT model preloaded"
     );
 
+    // Qwen3-TTS: start the in-process engine, preload the clone model + voice,
+    // and synthesize the fixed greeting once so reconnects never wait on TTS.
+    #[cfg(feature = "qwen-tts")]
+    let (qwen, ready_pcm) = if cfg.tts_backend == "qwen" {
+        let shared = start_qwen(&cfg).await?;
+        let pcm = shared.ready_pcm.clone();
+        (Some(shared), pcm)
+    } else {
+        (None, ready_pcm)
+    };
+
     let state = Arc::new(PocState {
         cfg,
         registry: Arc::new(EventRegistry::new()),
@@ -340,6 +383,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         stt: loaded_stt,
         ready_pcm,
         next_run: AtomicI64::new(1),
+        #[cfg(feature = "qwen-tts")]
+        qwen,
     });
 
     let bind = env_or("POC_BIND", "127.0.0.1:6210");
@@ -390,4 +435,65 @@ mod tests {
         let error = SttBackend::parse("cloud").expect_err("cloud STT is unsupported");
         assert!(error.contains("POC_STT_BACKEND"));
     }
+}
+
+/// Start poc-qwen-streaming's engine in-process, wait for its preload (model
+/// load + warm-up + preset voice priming, ~11 s), resolve the configured voice
+/// from the engine catalog, and cache the `Ready.` greeting.
+#[cfg(feature = "qwen-tts")]
+async fn start_qwen(cfg: &PocConfig) -> Result<tts_qwen::QwenShared, Box<dyn std::error::Error>> {
+    use poc_qwen_streaming::config::Config as QwenConfig;
+    use poc_qwen_streaming::engine::Engine;
+
+    let started = std::time::Instant::now();
+    let qcfg = QwenConfig::load(std::path::Path::new(&cfg.qwen_config))
+        .map_err(|e| format!("qwen config: {e}"))?;
+    // Engine::start blocks until the Python bridge is constructed.
+    let engine = tokio::task::spawn_blocking(move || Engine::start(&qcfg))
+        .await?
+        .map_err(|e| format!("qwen engine: {e}"))?;
+    engine.preload().await.map_err(|e| format!("qwen preload: {e}"))?;
+    loop {
+        let info = engine.info().await.map_err(|e| format!("qwen info: {e}"))?;
+        let state = info["preload"]["state"].as_str().unwrap_or("");
+        if state == "done" {
+            let errors = &info["preload"]["errors"];
+            if errors.as_array().map(|a| !a.is_empty()).unwrap_or(false) {
+                tracing::warn!(%errors, "qwen preload reported errors");
+            }
+            tracing::info!(
+                active_gb = %info["active_gb"], peak_gb = %info["peak_gb"],
+                elapsed_s = started.elapsed().as_secs_f32(), "qwen engine preloaded"
+            );
+            break;
+        }
+        if started.elapsed() > std::time::Duration::from_secs(900) {
+            return Err("qwen preload did not finish within 900 s".into());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    let catalog = engine.catalog().await.map_err(|e| format!("qwen catalog: {e}"))?;
+    let entry = catalog["voices"]
+        .as_array()
+        .and_then(|vs| vs.iter().find(|v| v["name"] == cfg.qwen_voice.as_str()))
+        .ok_or_else(|| format!("POC_QWEN_VOICE {:?} not in the engine's voices/ catalog", cfg.qwen_voice))?;
+    let ref_text = entry["transcript"].as_str().unwrap_or("").trim().to_string();
+    if ref_text.is_empty() {
+        return Err(format!("voice {:?} has no sidecar transcript (voices/<name>.txt)", cfg.qwen_voice).into());
+    }
+    let voice = tts_qwen::QwenVoice {
+        name: cfg.qwen_voice.clone(),
+        ref_audio: entry["path"].as_str().unwrap_or("").to_string(),
+        ref_text,
+        size: cfg.qwen_size.clone(),
+        language: "English".to_string(),
+        interval_s: cfg.qwen_interval_s,
+    };
+    let greeting = tts_qwen::synthesize_pcm(&engine, &voice, "Ready.").await?;
+    tracing::info!(samples = greeting.len(), voice = %voice.name, "qwen greeting cached");
+    Ok(tts_qwen::QwenShared {
+        engine,
+        voice: Arc::new(voice),
+        ready_pcm: (!greeting.is_empty()).then(|| Arc::from(greeting.into_boxed_slice())),
+    })
 }

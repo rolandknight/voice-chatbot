@@ -39,6 +39,11 @@ case "${POC_STT_BACKEND:-whisper}" in
     nemotron | nvidia) "$REPO_DIR/scripts/setup_nemotron.sh" ;;
 esac
 
+# Qwen3-TTS runs in-process through PyO3 against poc-qwen's venv (mlx-audio).
+if [ "${POC_TTS_BACKEND:-kokoro}" = "qwen" ]; then
+    make -C "$REPO_DIR/poc-qwen" setup
+fi
+
 ./.venv/bin/python -m harness.make_fixtures
 
 ./.venv/bin/python - <<'PY' > reports/env_probe.json || true

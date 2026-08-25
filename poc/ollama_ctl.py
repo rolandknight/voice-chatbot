@@ -63,8 +63,15 @@ def wait_up(root: str, seconds: float) -> None:
 
 def start_serve(root: str) -> None:
     os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
-    env = dict(os.environ, OLLAMA_KEEP_ALIVE="-1")
-    print("ollama: starting `ollama serve` with OLLAMA_KEEP_ALIVE=-1 (logs/ollama.log)")
+    # Context length bounds the runner's KV budget, which is what Ollama's
+    # scheduler counts when deciding whether the resident model still "fits"
+    # once another Metal user (Qwen3-TTS in-process, ~4.3 GB) appears. 32K
+    # (the model default) predicted 18.0 GB and got the resident 26b evicted
+    # and reloaded mid-call; the PoC prompt is ~2-3 K tokens, so 8192 keeps
+    # the prompt cache (memory: never let Ollama truncate) with ~1.1 GB less.
+    num_ctx = os.environ.get("POC_OLLAMA_NUM_CTX", "8192")
+    env = dict(os.environ, OLLAMA_KEEP_ALIVE="-1", OLLAMA_CONTEXT_LENGTH=num_ctx)
+    print(f"ollama: starting `ollama serve` with OLLAMA_KEEP_ALIVE=-1 OLLAMA_CONTEXT_LENGTH={num_ctx} (logs/ollama.log)")
     subprocess.Popen(
         ["ollama", "serve"],
         stdout=open(LOG_PATH, "ab"),
@@ -135,14 +142,20 @@ def ensure() -> int:
         subprocess.run(["ollama", "pull", model], check=True)
 
     secs = warm(base, model)
-    if pinned(resident(root, model)):
-        print(f"ollama: {model} warmed via /v1 in {secs:.1f}s; resident (keep-alive pinned)")
+    entry = resident(root, model)
+    want_ctx = int(os.environ.get("POC_OLLAMA_NUM_CTX", "8192"))
+    ctx_ok = entry is not None and int(entry.get("context_length") or 0) == want_ctx
+    if pinned(entry) and ctx_ok:
+        print(f"ollama: {model} warmed via /v1 in {secs:.1f}s; resident (keep-alive pinned, ctx {want_ctx})")
         return 0
+    if entry is not None and not ctx_ok:
+        print(f"ollama: resident context_length is {entry.get('context_length')}, want {want_ctx}")
 
-    # The /v1 request set a finite expiry: the serve process lacks OLLAMA_KEEP_ALIVE=-1.
+    # Either the serve process lacks OLLAMA_KEEP_ALIVE=-1 (the /v1 request set a
+    # finite expiry) or its context length differs: restart it with our env.
     pids = plain_serve_pids()
     if pids:
-        print(f"ollama: keep-alive not pinned (pid {pids}); restarting serve with OLLAMA_KEEP_ALIVE=-1")
+        print(f"ollama: restarting serve (pid {pids}) with OLLAMA_KEEP_ALIVE=-1 OLLAMA_CONTEXT_LENGTH={want_ctx}")
         for pid in pids:
             subprocess.run(["kill", str(pid)])
         deadline = time.time() + 30
@@ -150,8 +163,9 @@ def ensure() -> int:
             time.sleep(0.5)
         start_serve(root)
         secs = warm(base, model)
-        if pinned(resident(root, model)):
-            print(f"ollama: restarted; {model} warmed via /v1 in {secs:.1f}s; resident (keep-alive pinned)")
+        entry = resident(root, model)
+        if pinned(entry) and int(entry.get("context_length") or 0) == want_ctx:
+            print(f"ollama: restarted; {model} warmed via /v1 in {secs:.1f}s; resident (keep-alive pinned, ctx {want_ctx})")
             return 0
         sys.exit("ERROR: keep-alive still not pinned after restart; check logs/ollama.log")
 

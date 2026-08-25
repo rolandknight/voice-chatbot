@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 fn main() {
     println!("cargo:rerun-if-env-changed=MOONSHINE_LIB_DIR");
+    qwen_tts_rpath();
 
     // Keep the existing Whisper-only build independent of Moonshine's native
     // artifacts. Cargo exposes enabled features to build scripts this way.
@@ -64,4 +65,26 @@ fn require_file(dir: &Path, name: &str) {
         );
     }
     println!("cargo:rerun-if-changed={}", path.display());
+}
+
+/// `qwen-tts`: the binary embeds Python (poc-qwen-streaming's PyO3 engine).
+/// pyo3 links against the interpreter named by PYO3_PYTHON but emits no rpath,
+/// and a dependency's `cargo:rustc-link-arg` is not transitive, so add
+/// libpython's directory to this package's link line (binary and tests) here —
+/// mirrors poc-qwen-streaming/build.rs. Other builds emit nothing.
+fn qwen_tts_rpath() {
+    println!("cargo:rerun-if-env-changed=PYO3_PYTHON");
+    if env::var_os("CARGO_FEATURE_QWEN_TTS").is_none() {
+        return;
+    }
+    let python = env::var("PYO3_PYTHON").unwrap_or_else(|_| "python3".into());
+    let out = std::process::Command::new(&python)
+        .args(["-c", "import sysconfig;print(sysconfig.get_config_var('LIBDIR') or '')"])
+        .output();
+    if let Ok(out) = out {
+        let libdir = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !libdir.is_empty() {
+            println!("cargo:rustc-link-arg=-Wl,-rpath,{libdir}");
+        }
+    }
 }

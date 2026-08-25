@@ -1753,7 +1753,7 @@ where
             end_tx.clone(),
         )),
         Box::new(AssistantContextAggregator::new(ctx.clone()).with_transcript_state(state.clone())),
-        Box::new(TtsProcessor::new(tts)),
+        Box::new(TtsProcessor::new(tts).with_interrupt_flag(interrupt_flag.clone())),
         Box::new(
             CascadedTransportOutput::new(
                 shared.clone(),

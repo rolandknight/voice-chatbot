@@ -28,6 +28,8 @@ MOONSHINE_MODEL_OVERRIDE_SET="${POC_MOONSHINE_MODEL+set}"
 MOONSHINE_MODEL_OVERRIDE="${POC_MOONSHINE_MODEL-}"
 NEMOTRON_DEVICE_OVERRIDE_SET="${POC_NEMOTRON_DEVICE+set}"
 NEMOTRON_DEVICE_OVERRIDE="${POC_NEMOTRON_DEVICE-}"
+TTS_BACKEND_OVERRIDE_SET="${POC_TTS_BACKEND+set}"
+TTS_BACKEND_OVERRIDE="${POC_TTS_BACKEND-}"
 if [ -f "$POC_DIR/.env" ]; then
     set -a
     . "$POC_DIR/.env"
@@ -38,6 +40,7 @@ fi
 [ -n "$MOONSHINE_HOME_OVERRIDE_SET" ] && POC_MOONSHINE_HOME="$MOONSHINE_HOME_OVERRIDE"
 [ -n "$MOONSHINE_MODEL_OVERRIDE_SET" ] && POC_MOONSHINE_MODEL="$MOONSHINE_MODEL_OVERRIDE"
 [ -n "$NEMOTRON_DEVICE_OVERRIDE_SET" ] && POC_NEMOTRON_DEVICE="$NEMOTRON_DEVICE_OVERRIDE"
+[ -n "$TTS_BACKEND_OVERRIDE_SET" ] && POC_TTS_BACKEND="$TTS_BACKEND_OVERRIDE"
 PLATFORM="${POC_PLATFORM_OVERRIDE:-$(uname -s)}"
 ARCH="$(uname -m)"
 STT_BACKEND="${POC_STT_BACKEND:-whisper}"
@@ -211,6 +214,7 @@ print_plan() {
     echo "STT backend:       $STT_BACKEND"
     echo "STT accelerator:   $ACCELERATOR ($ACCELERATOR_REASON)"
     echo "Opus:              $OPUS_SOURCE"
+    echo "TTS backend:       ${POC_TTS_BACKEND:-kokoro}"
 }
 
 moonshine_runtime_ready() {
@@ -305,6 +309,14 @@ build() {
     fi
     if [ "$STT_BACKEND" = "whisper" ] && [ "$ACCELERATOR" != "cpu" ]; then
         cargo_features+=("$ACCELERATOR")
+    fi
+    # Qwen3-TTS: link poc-qwen-streaming's PyO3 engine against poc-qwen's venv
+    # interpreter. Only for POC_TTS_BACKEND=qwen so other builds stay Python-free.
+    if [ "${POC_TTS_BACKEND:-kokoro}" = "qwen" ]; then
+        local qwen_python="$REPO_DIR/poc-qwen/.venv/bin/python"
+        [ -x "$qwen_python" ] || fail "POC_TTS_BACKEND=qwen needs poc-qwen's venv; run: make -C poc-qwen setup"
+        export PYO3_PYTHON="$qwen_python"
+        cargo_features+=(qwen-tts)
     fi
     if [ "${#cargo_features[@]}" -gt 0 ]; then
         local features_csv

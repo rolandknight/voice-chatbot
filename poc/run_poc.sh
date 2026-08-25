@@ -100,8 +100,9 @@ up() {
     case "$TTS_BACKEND" in
     kokoro) ;;
     chatterbox) check_chatterbox ;;
+    qwen) ;; # in-process (flowcat-poc built with the qwen-tts feature); no sidecar
     *)
-        echo "ERROR: unsupported POC_TTS_BACKEND '$TTS_BACKEND' (expected kokoro or chatterbox)" >&2
+        echo "ERROR: unsupported POC_TTS_BACKEND '$TTS_BACKEND' (expected kokoro, chatterbox, or qwen)" >&2
         return 1
         ;;
     esac
@@ -119,7 +120,13 @@ up() {
         wait_health kokoro http://127.0.0.1:8880/health 600 # first start downloads ~350 MB of models
     fi
     if [ -x "$FLOWCAT_BIN" ]; then
-        wait_health flowcat http://127.0.0.1:6210/healthz 60
+        # qwen: FlowCat loads + warms the TTS model before binding (~11 s warm cache,
+        # minutes on a first-ever model download).
+        if [ "$TTS_BACKEND" = "qwen" ]; then
+            wait_health flowcat http://127.0.0.1:6210/healthz 900
+        else
+            wait_health flowcat http://127.0.0.1:6210/healthz 60
+        fi
     fi
 }
 

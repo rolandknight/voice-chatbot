@@ -29,6 +29,8 @@ const CARRIER_RATE: u32 = 16_000;
 enum PocTts {
     Kokoro(KokoroTts),
     Chatterbox(crate::tts_chatterbox::ChatterboxTts),
+    #[cfg(feature = "qwen-tts")]
+    Qwen(crate::tts_qwen::QwenTts),
 }
 
 #[async_trait::async_trait]
@@ -37,12 +39,16 @@ impl flowcat_core::service::TtsService for PocTts {
         match self {
             PocTts::Kokoro(t) => t.name(),
             PocTts::Chatterbox(t) => t.name(),
+            #[cfg(feature = "qwen-tts")]
+            PocTts::Qwen(t) => t.name(),
         }
     }
     fn sample_rate(&self) -> u32 {
         match self {
             PocTts::Kokoro(t) => t.sample_rate(),
             PocTts::Chatterbox(t) => t.sample_rate(),
+            #[cfg(feature = "qwen-tts")]
+            PocTts::Qwen(t) => t.sample_rate(),
         }
     }
     async fn start(
@@ -52,6 +58,8 @@ impl flowcat_core::service::TtsService for PocTts {
         match self {
             PocTts::Kokoro(t) => t.start(params).await,
             PocTts::Chatterbox(t) => t.start(params).await,
+            #[cfg(feature = "qwen-tts")]
+            PocTts::Qwen(t) => t.start(params).await,
         }
     }
     async fn run_tts(
@@ -61,6 +69,21 @@ impl flowcat_core::service::TtsService for PocTts {
         match self {
             PocTts::Kokoro(t) => t.run_tts(text).await,
             PocTts::Chatterbox(t) => t.run_tts(text).await,
+            #[cfg(feature = "qwen-tts")]
+            PocTts::Qwen(t) => t.run_tts(text).await,
+        }
+    }
+    async fn run_tts_stream<'a>(
+        &'a mut self,
+        text: &'a str,
+    ) -> flowcat_core::Result<
+        futures::stream::BoxStream<'a, flowcat_core::processor::frame::Frame>,
+    > {
+        match self {
+            PocTts::Kokoro(t) => t.run_tts_stream(text).await,
+            PocTts::Chatterbox(t) => t.run_tts_stream(text).await,
+            #[cfg(feature = "qwen-tts")]
+            PocTts::Qwen(t) => t.run_tts_stream(text).await,
         }
     }
 }
@@ -190,6 +213,10 @@ pub async fn offer(State(state): State<Arc<PocState>>, Json(body): Json<OfferReq
         "kokoro" => PocTts::Kokoro(
             KokoroTts::new("", cfg.kokoro_voice.clone()).with_base_url(cfg.kokoro_url.clone()),
         ),
+        #[cfg(feature = "qwen-tts")]
+        "qwen" => PocTts::Qwen(crate::tts_qwen::QwenTts::new(
+            state.qwen.clone().expect("qwen engine started at startup"),
+        )),
         _ => unreachable!("validated at startup"),
     };
     let brain = crate::brain::BabelBrain::new(cfg.system_prompt.clone());

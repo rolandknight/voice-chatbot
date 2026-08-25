@@ -47,6 +47,28 @@ that, the first user turn pays an Ollama runner swap plus a ~2 K-token prefill
 (~8 s measured); with it the first LLM round is ~0.6 s.
 The repo-root `make poc-*` targets still work but assume a system `cargo`.
 
+## TTS backends
+
+`POC_TTS_BACKEND` selects one of three; the other two cost nothing at build or
+run time.
+
+| backend | what runs | first audio | notes |
+|---|---|---|---|
+| `kokoro` (default) | `stubs/kokoro_shim.py` sidecar on :8880 | after each whole sentence is synthesized (~0.4 s) | CPU ONNX; no GPU memory |
+| `chatterbox` | external Chatterbox-TTS-Server on :8004 | whole sentence (1–3 s) | cloned Marvin voice; started outside `run_poc.sh` |
+| `qwen` | **in-process** Qwen3-TTS via poc-qwen-streaming's PyO3 mlx-audio engine (Cargo feature `qwen-tts`) | **streamed**: ~0.2 s to the first chunk, then chunk-by-chunk | Apple Silicon; clones `voices/<POC_QWEN_VOICE>` (marvin); 4.3 GB active / 6.4 GB peak measured |
+
+`qwen` must be compiled in: `POC_TTS_BACKEND=qwen make build` links against
+poc-qwen's venv interpreter (`make setup` creates it when the backend is qwen)
+and enables the feature; a kokoro build carries no libpython. FlowCat loads and
+warms the model before binding (~11 s from a warm HF cache, minutes on the first
+download) and caches the `Ready.` greeting. Streaming reaches the caller through
+`TtsService::run_tts_stream` in the vendored flowcat-core: the TTS processor
+forwards frames as the engine yields them and drops the stream on barge-in,
+which stops generation after the current chunk. Tunables: `POC_QWEN_SIZE`
+(`1.7B`/`0.6B`), `POC_QWEN_INTERVAL_S` (chunk length), `POC_QWEN_CONFIG`
+(engine profile, default `poc-qwen-streaming/config.flowcat.yaml`).
+
 ## Cross-platform profile
 
 The supported validation profile uses local STT, OpenRouter Claude Haiku 4.5,

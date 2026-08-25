@@ -6,6 +6,7 @@ name = "flowcat-poc"
 version = "0.1.0"
 edition = "2021"
 publish = false
+build = "build.rs"
 
 [dependencies]
 flowcat-core = { git = "https://github.com/AreevAI/flowcat.git", rev = "4ff03f3ef8e179d988a20c6f46498dfb9419c1c1", features = ["vad-ort"] }
@@ -36,6 +37,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
 dotenvy = "0.15"
 futures = "0.3"
+# Qwen3-TTS streaming backend (src/tts_qwen.rs): poc-qwen-streaming's
+# PyO3-embedded mlx-audio engine, in-process. Optional so a kokoro/chatterbox
+# build links no libpython and needs no poc-qwen venv.
+poc-qwen-streaming = { path = "../../poc-qwen-streaming", optional = true }
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 
 # Phase 1 GPU STT (optional): unify CUDA into the whisper-rs flowcat links.
@@ -51,6 +56,9 @@ moonshine = []
 #   --features cuda needs the CUDA toolkit (nvcc)
 metal = ["whisper-rs/metal"]
 cuda = ["whisper-rs/cuda"]
+# POC_TTS_BACKEND=qwen: `POC_TTS_BACKEND=qwen make build` (platform.sh sets
+# PYO3_PYTHON to poc-qwen's venv interpreter and enables this feature).
+qwen-tts = ["dep:poc-qwen-streaming"]
 
 # Full-duplex support is upstream as of FlowCat PR #61. Keep flowcat-core
 # patched to the vendored copy only for Babel's extra input-processor seam,

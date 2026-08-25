@@ -66,6 +66,15 @@ pub trait TtsService: Send {
     fn sample_rate(&self) -> u32;
     async fn start(&mut self, params: &StartParams) -> Result<()>;
     async fn run_tts(&mut self, text: &str) -> Result<Vec<Frame>>;
+    /// Streaming synthesis: yield `TtsStarted`, `TtsAudio`*, `TtsStopped` as the
+    /// engine produces them so the caller hears the first chunk before the
+    /// utterance is finished. The default wraps [`run_tts`](Self::run_tts) —
+    /// whole-utterance providers stay unchanged; streaming providers override.
+    /// Dropping the stream must cancel the synthesis (barge-in).
+    async fn run_tts_stream<'a>(&'a mut self, text: &'a str) -> Result<BoxStream<'a, Frame>> {
+        let frames = self.run_tts(text).await?;
+        Ok(futures::stream::iter(frames).boxed())
+    }
 }
 
 /// Context-driven LLM. Consumes `LlmContext`/`LlmRun`, emits `LlmResponseStart`,
@@ -123,6 +132,9 @@ impl TtsService for Box<dyn TtsService> {
     }
     async fn run_tts(&mut self, text: &str) -> Result<Vec<Frame>> {
         (**self).run_tts(text).await
+    }
+    async fn run_tts_stream<'a>(&'a mut self, text: &'a str) -> Result<BoxStream<'a, Frame>> {
+        (**self).run_tts_stream(text).await
     }
 }
 
