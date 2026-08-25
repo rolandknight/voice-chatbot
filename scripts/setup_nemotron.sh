@@ -46,7 +46,7 @@ safe_remove_dir() {
 
 cleanup() {
     local path
-    for path in "${CLEANUP_DIRS[@]}"; do
+    for path in ${CLEANUP_DIRS[@]+"${CLEANUP_DIRS[@]}"}; do
         if [ -e "$path" ]; then
             safe_remove_dir "$path"
         fi

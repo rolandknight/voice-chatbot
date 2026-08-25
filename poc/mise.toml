@@ -1,0 +1,4 @@
+[tools]
+python = "3.12"
+# Match the hermit toolchain version at repo bin/ so the cargo cache stays valid.
+rust = "1.97.1"

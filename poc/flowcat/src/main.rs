@@ -72,6 +72,8 @@ pub enum LoadedStt {
 
 pub struct PocConfig {
     pub openrouter_key: String,
+    /// OpenAI-compatible chat-completions base (OpenRouter, or a local /v1).
+    pub llm_base_url: String,
     pub llm_model: String,
     pub stt_backend: SttBackend,
     pub whisper_model: String,
@@ -167,6 +169,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cfg = PocConfig {
         openrouter_key: std::env::var("OPENROUTER_API_KEY")
             .map_err(|_| "OPENROUTER_API_KEY not set (see poc/.env)")?,
+        llm_base_url: env_or(
+            "OPENROUTER_BASE_URL",
+            "https://openrouter.ai/api/v1",
+        ),
         llm_model: env_or("POC_LLM_MODEL", "anthropic/claude-haiku-4.5"),
         stt_backend,
         whisper_model: env_or(
@@ -229,6 +235,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     require_nonempty(&cfg.openrouter_key, "OPENROUTER_API_KEY")?;
     require_nonempty(&cfg.llm_model, "POC_LLM_MODEL")?;
+    require_nonempty(&cfg.llm_base_url, "OPENROUTER_BASE_URL")?;
     match cfg.tts_backend.as_str() {
         "kokoro" => {}
         "chatterbox" => {

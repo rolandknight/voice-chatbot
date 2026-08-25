@@ -422,7 +422,15 @@ impl StaleAudioLatch {
 
 /// Pre-roll retained ahead of a VAD rising edge, so the first phoneme of the
 /// utterance isn't clipped by the detector's own attack time.
-const SPEECH_GATE_PREROLL_MS: usize = 300;
+///
+/// 600 ms, not the VAD attack window alone: a short leading word followed by a
+/// micro-pause ("Stop. …", "I'd …") can hold Silero below its rising edge until
+/// the *next* word, so the edge fires late and a 300 ms ring only reaches back
+/// into the pause — the PoC measured Nemotron finalizing "Stop the radio." as
+/// "The radio." exactly this way. The extra pre-roll is silence-tolerant for
+/// both whisper (batch) and streaming decoders and adds no turn latency (the
+/// ring is re-injected in one push at gate-open).
+const SPEECH_GATE_PREROLL_MS: usize = 600;
 
 /// Sits between the VAD and STT in the duplex chain. Fixed-window batch STT
 /// (whisper.cpp) has no endpointing: fed raw duplex audio it transcribes silence

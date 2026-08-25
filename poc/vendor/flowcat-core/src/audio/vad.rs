@@ -404,10 +404,10 @@ impl<V: VadAnalyzer> VadProcessor<V> {
 
             // Rising edge: Quiet/Starting/Stopping -> Speaking.
             if is_speaking && !was_speaking {
-                let secs = self.window_samples as f32 / self.sample_rate.max(1) as f32;
-                link.push_down(Frame::VadUserStartedSpeaking { start_secs: secs })
-                    .await;
-                link.push_down(Frame::UserStartedSpeaking).await;
+                // Barge-in FIRST (pipecat: StartInterruption precedes
+                // UserStartedSpeaking): the runtime's interruption drain keeps
+                // only frames created after the Interruption marker, so the new
+                // turn's own speaking edge must be stamped later than it.
                 if self.bot_speaking && self.interrupt_on_barge_in {
                     tracing::debug!("barge-in: user speech while bot speaking");
                     if let Some(flag) = &self.interrupt_flag {
@@ -418,6 +418,10 @@ impl<V: VadAnalyzer> VadProcessor<V> {
                     }
                     link.broadcast(Frame::Interruption).await;
                 }
+                let secs = self.window_samples as f32 / self.sample_rate.max(1) as f32;
+                link.push_down(Frame::VadUserStartedSpeaking { start_secs: secs })
+                    .await;
+                link.push_down(Frame::UserStartedSpeaking).await;
             }
             // Falling edge: Speaking/Stopping -> Quiet.
             else if was_speaking && matches!(new_state, VadState::Quiet) {

@@ -142,7 +142,8 @@ pub async fn run_processor(
                 // Drain the normal queue: drop interruptible frames, keep
                 // uninterruptible ones. A kept *downstream terminal* (End/Stop) is
                 // returned rather than blindly forwarded — see below.
-                let kept_terminal = drain_on_interruption(&mut rx, &link).await;
+                let (kept_terminal, fresh) =
+                    drain_on_interruption(&mut rx, &link, env.meta.id).await;
                 // Barge-in hook: the processor reacts (flush playback, reset an
                 // aggregator, repair context) on a queue that is already clean.
                 // `Interruption` never reaches `process_frame` — this is the only
@@ -152,6 +153,17 @@ pub async fn run_processor(
                 }
                 // Forward the interruption in the direction it arrived.
                 link.push(env.meta, env.frame, env.direction).await;
+                // Frames created AFTER the barge-in belong to the interrupting
+                // user's new turn (the VAD emits Interruption before the new
+                // turn's UserStartedSpeaking). They were queued behind a busy
+                // process_frame and must be processed, not discarded — dropping
+                // them here is what ate a barge-in utterance's audio at the
+                // SpeechGate and its LlmContext at the LLM processor.
+                for fresh_env in fresh {
+                    if let Err(e) = p.process_frame(fresh_env, &link).await {
+                        link.push_error(e.to_string(), false).await;
+                    }
+                }
                 // A downstream End/Stop that was buffered when the interruption hit
                 // must go through the normal terminal handling so a `Sink` taps it via
                 // `stop()` (its `next` is `None`, so a raw `link.push` would silently
@@ -215,7 +227,12 @@ pub async fn run_processor(
 /// the next processor. That is intentional and safe: they are exactly the frames
 /// that *survive* an interruption by definition, so the next hop keeps them
 /// regardless of arrival order.
-async fn drain_on_interruption(rx: &mut ProcessorRx, link: &Link) -> Option<Envelope> {
+async fn drain_on_interruption(
+    rx: &mut ProcessorRx,
+    link: &Link,
+    interruption_id: u64,
+) -> (Option<Envelope>, Vec<Envelope>) {
+    let mut fresh = Vec::new();
     // `try_recv` only the frames already queued — do not await new ones.
     while let Ok(env) = rx.normal.try_recv() {
         if env.frame.uninterruptible() {
@@ -223,14 +240,19 @@ async fn drain_on_interruption(rx: &mut ProcessorRx, link: &Link) -> Option<Enve
             // handling (so a Sink taps it via `stop()`); stop draining (nothing
             // queued after a terminal matters — the task is ending).
             if env.direction == Direction::Downstream && env.frame.is_terminal() {
-                return Some(env);
+                return (Some(env), fresh);
             }
             // Other uninterruptible frames forward in their direction.
             link.push(env.meta, env.frame, env.direction).await;
+        } else if env.meta.id > interruption_id {
+            // Created after the barge-in — the interrupting user's new turn
+            // (frame ids are process-monotonic and the VAD stamps Interruption
+            // before the new turn's frames). Keep it for processing.
+            fresh.push(env);
         }
-        // else: drop the interruptible frame.
+        // else: drop the stale interruptible frame.
     }
-    None
+    (None, fresh)
 }
 
 #[cfg(test)]
@@ -314,6 +336,55 @@ mod tests {
         assert!(
             stopped.load(Ordering::Relaxed),
             "the Sink's stop() hook must run for the buffered End (else PipelineTask hangs)"
+        );
+    }
+
+    /// Regression (PoC T5 barge-in): frames created *after* the Interruption —
+    /// the interrupting user's own new turn (UserStartedSpeaking, its audio, its
+    /// LlmContext) — must survive the drain and be processed once the busy
+    /// processor wakes; only frames from before the barge-in are stale. Dropping
+    /// the fresh ones ate the barge-in utterance at the SpeechGate and its
+    /// LlmContext at the LLM processor.
+    #[tokio::test]
+    async fn interruption_drain_keeps_and_processes_frames_created_after_it() {
+        let name: Arc<str> = Arc::from("HookOrderTap");
+        let (tx, rx) = channel(name.clone(), 8);
+        let clock = Clock::new();
+        let setup = ProcessorSetup {
+            clock: clock.clone(),
+            observer: None,
+            cancel: tokio_util::sync::CancellationToken::new(),
+            enable_metrics: false,
+            enable_usage_metrics: false,
+        };
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let p = Box::new(HookOrderTap { log: log.clone() });
+
+        // Creation order fixes the monotonic ids: stale < interruption < fresh.
+        let stale = Envelope::new(Frame::LlmText("stale".into()), Direction::Downstream);
+        let interruption = Envelope::new(Frame::Interruption, Direction::Downstream);
+        // Data-class, like the LlmContext of the interrupting user's turn
+        // (System-class frames ride their own channel and are never drained).
+        let fresh = Envelope::new(Frame::LlmText("fresh".into()), Direction::Downstream);
+
+        // Both data frames are already buffered on the normal channel when the
+        // Interruption (system channel, biased-first) is handled.
+        tx.send(stale).await;
+        tx.send(fresh).await;
+        tx.send(interruption).await;
+        drop(tx);
+
+        let h = tokio::spawn(run_processor(p, rx, sink_link(name, clock), setup));
+        tokio::time::timeout(std::time::Duration::from_secs(2), h)
+            .await
+            .expect("run_processor finished")
+            .expect("no panic");
+
+        let got = log.lock().unwrap().clone();
+        assert_eq!(
+            got,
+            vec!["on_interruption", "LlmText"],
+            "stale frame dropped; post-barge-in frame processed after the hook"
         );
     }
 
