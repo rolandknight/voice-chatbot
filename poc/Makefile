@@ -46,7 +46,7 @@ $(STAMP): requirements.txt mise.toml setup.sh $(DOTENV)
 build: setup  ## Build flowcat-poc for the STT backend in .env (platform.sh picks Metal/CPU)
 	@mise exec -- ./platform.sh build
 
-ollama:  ## Start `ollama serve` if not answering, pull the model if missing, load it resident (keep_alive -1)
+ollama: setup  ## Start `ollama serve` if needed, pull the model if missing, prewarm the FlowCat prefix + pin resident
 	@$(LOAD_ENV) \
 	url="$${OPENROUTER_BASE_URL:-$(OLLAMA_URL)}"; url="$${url%/}"; url="$${url%/v1}"; \
 	model="$${POC_LLM_MODEL:-$(OLLAMA_MODEL)}"; \
@@ -61,13 +61,7 @@ ollama:  ## Start `ollama serve` if not answering, pull the model if missing, lo
 	if ! curl -fsS "$$url/api/tags" | grep -q "\"name\":\"$$model\""; then \
 	  echo "pulling $$model ..."; ollama pull "$$model"; \
 	fi; \
-	if curl -fsS "$$url/api/ps" | grep -q "\"name\":\"$$model\""; then \
-	  echo "ollama: $$model already resident"; \
-	else \
-	  echo "ollama: loading $$model resident (keep_alive -1) ..."; \
-	  curl -fsS -o /dev/null "$$url/api/generate" -d "{\"model\":\"$$model\",\"keep_alive\":-1}" \
-	    && echo "ollama: $$model loaded"; \
-	fi
+	$(PY) warm_llm.py
 
 up: setup  ## Start STT sidecar (if nemotron) + stubs + kokoro shim + FlowCat; no-op for parts already running
 	@./run_poc.sh up
