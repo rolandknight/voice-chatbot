@@ -15,6 +15,32 @@ See `CONTRACT.md` for the fixed integration contract and
 - `harness/` — pytest suite + `FlowCatAdapter` (WebRTC via aiortc,
   events over a side WebSocket) + WAV fixtures.
 
+## Quickstart (this directory, Mac Studio profile)
+
+`poc/` has its own `Makefile` in the `poc-qwen` style: the toolchain is
+mise-pinned (`mise.toml`: python 3.12, rust 1.97.1) and everything is driven
+from the untracked `.env` (`cp .env.example .env`). The Mac profile
+used for the Nemotron test is local end to end: Ollama `gemma4:26b` through its
+OpenAI-compatible `/v1` (the OpenRouter client honors `OPENROUTER_BASE_URL`,
+any non-empty `OPENROUTER_API_KEY` satisfies the check), Nemotron STT on Metal,
+Kokoro TTS shim.
+
+```sh
+cd poc
+make                # setup (venv, models, Nemotron runtime) -> build -> ollama serve + model resident -> stack up on :6210
+make client         # native mic/speaker call; INPUT_DEVICE='Jabra' OUTPUT_DEVICE='Jabra' to pick devices
+make client-devices # list CoreAudio devices
+make status         # listeners, Ollama resident model, flowcat healthz
+make restart        # after `make build` or editing .env
+make test POC_MARKER=smoke
+make down
+make help
+```
+
+`make` is idempotent: setup is stamped, `ollama` only starts `ollama serve` /
+pulls / loads the model when needed, and `up` skips parts already running.
+The repo-root `make poc-*` targets still work but assume a system `cargo`.
+
 ## Cross-platform profile
 
 The supported validation profile uses local STT, OpenRouter Claude Haiku 4.5,
