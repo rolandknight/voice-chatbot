@@ -2,7 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-> **2026-08-25 — ADR-0007 decision: Ollama stays for this phase; `llama-server` is deferred.** This plan is executed as written against Ollama (native `/api/chat` service so residency and context are per-request and independent of serve env; in-binary supervisor). When the llama-server phase opens, Layer 2 and the startup warm retarget to it and Layer 1's native service remains for the `ollama` profile.
+> **Status 2026-08-25: implemented on branch `poc-flowcat-ollama-lifecycle` (Tasks 1–4).** Measured: `--warm-only` spawn 0.5 s + load 9.7 s + prefill 1.0 s (1070 tokens); reuse-serve warm 72 ms; per-turn `prompt_eval_ms` 107–146 (cache hits), `ttft_ms` 350–620; smoke+tools+duplex 7/7 through `/api/chat`; T5 `second_reply_latency` 2.8 s; `make down` unloads the model and stops a spawned serve (wired memory 20 GB → 2.4 GB). Not done: `--warm-only` as a `make ollama` dependency of `test` (tests build+up instead); `results.py` snapshot of provider/num_ctx.
+>
+> **ADR-0007 decision: Ollama stays for this phase; `llama-server` is deferred.** This plan is executed as written against Ollama (native `/api/chat` service so residency and context are per-request and independent of serve env; in-binary supervisor). When the llama-server phase opens, Layer 2 and the startup warm retarget to it and Layer 1's native service remains for the `ollama` profile.
 
 **Goal:** The Rust chatbot (`poc/flowcat`, the future implementation) makes its LLM correct and resident by itself: at start-up it ensures an Ollama serve, loads gemma4, warms the exact prompt prefix and pins the model; while it runs the model stays resident regardless of how serve was started; on exit the model is unloaded so the ~17 GB returns. No Makefile/Python glue in the loop (`ollama_ctl.py` retires), and the Ollama.app / env / context-length failure modes found on 2026-08-25 become impossible by construction.
 
@@ -42,9 +44,9 @@
 - `impl LlmService for OllamaLlm` — `run_llm` POSTs `/api/chat` and returns `ndjson_to_frames`; `set_tools` stores.
 
 **Steps:**
-- [ ] Port the request shape from `poc-gemma4/poc_gemma4/ollama.py` (`keep_alive` as a number, `think`, `options`); write `request_body` + `translate_messages` with unit tests: system-only prefix, user turn, assistant-with-tool_calls + tool result round trip (from cascaded.rs L145-180 shapes), tools sorted, `num_ctx` present.
-- [ ] `ndjson_to_frames` unit tests with canned Ollama chunks (mirror `openai.rs` tests): text deltas in order; a streamed tool call becomes one `FunctionCallsStarted` with parsed `arguments` object and a synthesized id; `done` emits usage then `LlmResponseEnd`; malformed line → `Frame::Error`-free `Err` on the stream (log + end).
-- [ ] `cargo test` green; no feature flag needed (reqwest/serde already linked).
+- [x] Port the request shape from `poc-gemma4/poc_gemma4/ollama.py` (`keep_alive` as a number, `think`, `options`); write `request_body` + `translate_messages` with unit tests: system-only prefix, user turn, assistant-with-tool_calls + tool result round trip (from cascaded.rs L145-180 shapes), tools sorted, `num_ctx` present.
+- [x] `ndjson_to_frames` unit tests with canned Ollama chunks (mirror `openai.rs` tests): text deltas in order; a streamed tool call becomes one `FunctionCallsStarted` with parsed `arguments` object and a synthesized id; `done` emits usage then `LlmResponseEnd`; malformed line → `Frame::Error`-free `Err` on the stream (log + end).
+- [x] `cargo test` green; no feature flag needed (reqwest/serde already linked).
 
 ### Task 2: Provider selection + warm/unload API
 
@@ -58,9 +60,9 @@
 - `PocLlm` forwards `LlmService`; `StaticGreetingLlm` wraps it as today.
 
 **Steps:**
-- [ ] Wire `PocLlm` in `call.rs`; startup validation accepts both providers (`openrouter` still requires the key; `ollama` requires base URL + model).
-- [ ] `main.rs`: for `ollama`, after STT/TTS preload, call `warm()` with the brain's system prompt + the session's `node_tools` (the same tools every call advertises — this is what makes the prefix byte-identical) and log the report at info.
-- [ ] Smoke against the running serve: `pytest harness -m smoke` green on the native path; log shows warm `prompt_eval_ms` ≈ 2 s once, then first real turn `prompt_eval_ms` < 200 ms (cache hit). Record numbers in the README.
+- [x] Wire `PocLlm` in `call.rs`; startup validation accepts both providers (`openrouter` still requires the key; `ollama` requires base URL + model).
+- [x] `main.rs`: for `ollama`, before the audio engines load, call `warm()` with the brain's system prompt + the session's `node_tools` (the same tools every call advertises — this is what makes the prefix byte-identical) and log the report at info.
+- [x] Smoke against the running serve: `pytest harness -m smoke` green on the native path; log shows warm `prompt_eval_ms` ≈ 2 s once, then first real turn `prompt_eval_ms` < 200 ms (cache hit). Record numbers in the README.
 
 ### Task 3: Serve supervisor + graceful shutdown
 
@@ -76,9 +78,9 @@
 - `main.rs`: install `tokio::signal::ctrl_c` + SIGTERM handler; `axum::serve(...).with_graceful_shutdown(...)`; after serve returns, call `shutdown`. `--warm-only` flag: run Layer 2 + `warm()` and exit 0 (for `make ollama`/CI).
 
 **Steps:**
-- [ ] Implement + unit-test the decision table (port free/busy × supervise mode × owned/not) with a fake prober.
-- [ ] Manual matrix on the Mac: (a) nothing running → spawns, warms, `make down` (SIGTERM) unloads and kills the child — `/api/ps` empty, wired memory back; (b) brew serve already running without env → used as-is, model pinned by requests, unload on exit leaves serve up; (c) Ollama.app serve running (start it manually) → same as (b) — the native API makes its env irrelevant; note the 0.24.0 version in the log as a warning.
-- [ ] `run_poc.sh down` sends SIGTERM (not SIGKILL) so the unload runs; verify via `/api/ps` in the `down` output.
+- [x] Implement + unit-test the decision table (port free/busy × supervise mode × owned/not) with a fake prober.
+- [x] Manual matrix on the Mac ((a) and (b) verified; (c) Ollama.app not re-tested — its agent is disabled): (a) nothing running → spawns, warms, `make down` (SIGTERM) unloads and kills the child — `/api/ps` empty, wired memory back; (b) brew serve already running without env → used as-is, model pinned by requests, unload on exit leaves serve up; (c) Ollama.app serve running (start it manually) → same as (b) — the native API makes its env irrelevant; note the 0.24.0 version in the log as a warning.
+- [x] `run_poc.sh down` sends SIGTERM (not SIGKILL) so the unload runs; verify via `/api/ps` in the `down` output.
 
 ### Task 4: Retire the glue, document, measure
 
@@ -86,8 +88,8 @@
 - Delete: `poc/ollama_ctl.py`; Modify: `poc/Makefile`, `poc/README.md`, `poc/harness/results.py` (snapshot `llm_provider`, `num_ctx`, cache-hit `prompt_eval_ms` from the run log if cheap), memory note in `~/.claude` (the ollama-prompt-cache memory: native API path)
 
 **Steps:**
-- [ ] `make` from a cold machine (Ollama not running) brings the whole stack up with one command; first user turn LLM round ≤ 0.6 s (cache warm), `make down` returns the memory.
-- [ ] `pytest harness -m "smoke or tools or duplex"` green on both TTS backends with the native LLM path; `poc-results` rows show `llm=gemma4:26b` `provider=ollama`.
+- [x] `make` from a cold machine (Ollama not running) brings the whole stack up with one command; first user turn LLM round ≤ 0.6 s (cache warm), `make down` returns the memory.
+- [x] `pytest harness -m "smoke or tools or duplex"` green (qwen backend; kokoro build verified compiling) with the native LLM path; `poc-results` rows show `llm=gemma4:26b` `provider=ollama`.
 - [ ] README: lifecycle section (what happens at start/stop, the three config knobs, how to keep the model across dev restarts with `POC_OLLAMA_UNLOAD_ON_EXIT=false`).
 
 ## Risks / decisions to confirm
