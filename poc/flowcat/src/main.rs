@@ -33,7 +33,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::json;
 
-use flowcat_server::events::{stream_events, EventRegistry};
+use flowcat_server::events::EventRegistry;
 
 use crate::session::StubSession;
 
@@ -140,6 +140,11 @@ pub struct PocState {
     pub stt: LoadedStt,
     pub ready_pcm: Option<Arc<[i16]>>,
     pub next_run: AtomicI64,
+    /// Hang-up hooks by pc_id: notified when the call's events WebSocket
+    /// closes, which cancels the pipeline at once instead of waiting for the
+    /// ICE timeout (10–30 s) — long enough to exhaust the Nemotron sidecar's
+    /// two realtime sessions on quick reconnects.
+    pub hangups: std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Notify>>>,
     /// Shared Qwen engine + voice when `POC_TTS_BACKEND=qwen`.
     #[cfg(feature = "qwen-tts")]
     pub qwen: Option<tts_qwen::QwenShared>,
@@ -460,6 +465,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         stt: loaded_stt,
         ready_pcm,
         next_run: AtomicI64::new(1),
+        hangups: std::sync::Mutex::new(std::collections::HashMap::new()),
         #[cfg(feature = "qwen-tts")]
         qwen,
     });
@@ -528,6 +534,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         serve.shutdown().await;
     }
     Ok(())
+}
+
+/// Forward call events to the subscriber and return when either side ends.
+/// Unlike `stream_events`, this also *reads* the socket, so a client that
+/// closes it (browser/native-client hang-up) is noticed immediately rather
+/// than at the next published event.
+async fn stream_events_until_closed(
+    mut socket: axum::extract::ws::WebSocket,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+) {
+    use axum::extract::ws::Message;
+    loop {
+        tokio::select! {
+            frame = rx.recv() => match frame {
+                Some(text) => {
+                    if socket.send(Message::Text(text.into())).await.is_err() {
+                        break;
+                    }
+                }
+                None => break, // call over
+            },
+            incoming = socket.recv() => match incoming {
+                None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,
+                Some(Ok(_)) => {} // pings/pongs/client chatter
+            },
+        }
+    }
 }
 
 /// SIGTERM (`run_poc.sh down`) or ctrl-c.
@@ -632,7 +665,15 @@ async fn events_ws(
     ws: WebSocketUpgrade,
 ) -> Response {
     match state.registry.take_receiver(&pc_id) {
-        Some(rx) => ws.on_upgrade(move |socket| stream_events(socket, rx)),
+        Some(rx) => ws.on_upgrade(move |socket| async move {
+            stream_events_until_closed(socket, rx).await;
+            // Subscriber gone (hang-up) or call over: cancel the call now.
+            let hook = state.hangups.lock().unwrap().remove(&pc_id);
+            if let Some(hook) = hook {
+                tracing::info!(%pc_id, "events socket closed; ending the call");
+                hook.notify_one();
+            }
+        }),
         None => (axum::http::StatusCode::NOT_FOUND, "no such call").into_response(),
     }
 }

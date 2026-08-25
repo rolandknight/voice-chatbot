@@ -303,6 +303,16 @@ pub async fn offer(
     let sink: Arc<dyn RtviSink> = Arc::new(RtfSink::new(events));
     let observers: Vec<Arc<dyn FrameObserver>> = vec![Arc::new(RtviObserver::new(sink))];
 
+    // Hang-up hook: the events WebSocket closing cancels this call.
+    let hangup = Arc::new(tokio::sync::Notify::new());
+    state
+        .hangups
+        .lock()
+        .unwrap()
+        .insert(pc_id.clone(), hangup.clone());
+    let hangups = state.clone();
+    let hook_pc_id = pc_id.clone();
+
     tokio::spawn(async move {
         let _guard = guard; // deregister the event stream when the call ends
         let built = build_cascaded_call_duplex(
@@ -322,14 +332,21 @@ pub async fn offer(
         .await;
         match built {
             Ok(task) => {
+                let token = task.task.cancel_token();
+                let watcher = tokio::spawn(async move {
+                    hangup.notified().await;
+                    token.cancel();
+                });
                 if let Err(e) = task.run().await {
                     tracing::warn!(run_id, error = %e, "call ended with error");
                 } else {
                     tracing::info!(run_id, "call ended");
                 }
+                watcher.abort();
             }
             Err(e) => tracing::error!(run_id, error = %e, "failed to build call"),
         }
+        hangups.hangups.lock().unwrap().remove(&hook_pc_id);
     });
 
     tracing::info!(
