@@ -40,3 +40,4 @@
 {"audio_s":2.64,"cancelled":false,"chars":30,"chunks":10,"gen_s":0.975,"model":"mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-bf16","rtf":0.369,"tab":"custom","ts":1787761005.620632,"ttfa_s":0.173}
 {"audio_s":5.2,"cancelled":false,"chars":104,"chunks":18,"gen_s":1.87,"model":"mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16","rtf":0.36,"tab":"clone","ts":1787785992.053336,"ttfa_s":0.203}
 {"audio_s":5.92,"cancelled":false,"chars":104,"chunks":20,"gen_s":2.094,"model":"mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16","rtf":0.354,"tab":"clone","ts":1787785994.153415,"ttfa_s":0.186}
+{"audio_s":5.84,"cancelled":false,"chars":104,"chunks":20,"gen_s":2.151,"model":"mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16","rtf":0.368,"tab":"clone","ts":1787786428.731236,"ttfa_s":0.225}

@@ -1,18 +1,13 @@
-use crate::config::UnlockConfig;
-use crate::model::{Detection, Model, new_model};
+use crate::model::{Detection, Model};
 use audio_tools::converters::i16_to_f32;
 use hound::{SampleFormat, WavReader};
-use log::{debug, info, warn};
+use log::info;
 use std::env;
 use std::error::Error;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::thread::sleep;
-use std::time::Duration;
-use tokio::sync::broadcast;
-use tokio_util::sync::CancellationToken;
+use std::sync::Arc;
 use tract_core::internal::{RunnableModel, TypedFact, TypedOp};
 
 pub mod config;
@@ -29,13 +24,6 @@ pub struct Models {
 }
 
 impl Models {
-    pub(crate) fn new(model1: Box<dyn Model>, model2: Box<dyn Model>) -> Self {
-        Models { model1, model2 }
-    }
-    pub(crate) fn frame_length(&self) -> usize {
-        self.model1.frame_length() as usize
-    }
-
     pub fn detect1(&mut self, data: Vec<f32>) -> Option<Detection> {
         self.model1.detect(data)
     }
