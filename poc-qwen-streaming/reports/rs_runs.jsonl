@@ -27,3 +27,14 @@
 {"audio_s":5.52,"cancelled":false,"chars":104,"chunks":19,"gen_s":1.991,"model":"mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16","rtf":0.361,"tab":"clone","ts":1787606664.007212,"ttfa_s":0.223}
 {"audio_s":5.6,"cancelled":false,"chars":104,"chunks":19,"gen_s":2.011,"model":"mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16","rtf":0.359,"tab":"clone","ts":1787606675.049919,"ttfa_s":0.218}
 {"audio_s":6.16,"cancelled":false,"chars":104,"chunks":21,"gen_s":2.213,"model":"mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16","rtf":0.359,"tab":"clone","ts":1787606687.55641,"ttfa_s":0.232}
+{"audio_s":5.68,"cancelled":false,"chars":104,"chunks":19,"gen_s":2.05,"model":"mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16","rtf":0.361,"tab":"clone","ts":1787760716.68098,"ttfa_s":0.234}
+{"audio_s":6.0,"cancelled":false,"chars":104,"chunks":20,"gen_s":3.57,"model":"mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16","rtf":0.595,"tab":"clone","ts":1787760739.519168,"ttfa_s":1.876}
+{"audio_s":7.44,"cancelled":false,"chars":104,"chunks":25,"gen_s":2.144,"model":"mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16","rtf":0.288,"tab":"clone","ts":1787760751.513009,"ttfa_s":0.195}
+{"audio_s":6.56,"cancelled":false,"chars":104,"chunks":22,"gen_s":2.537,"model":"mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16","rtf":0.387,"tab":"clone","ts":1787760762.276993,"ttfa_s":0.418}
+{"audio_s":5.44,"cancelled":false,"chars":104,"chunks":18,"gen_s":1.956,"model":"mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16","rtf":0.36,"tab":"clone","ts":1787760774.650661,"ttfa_s":0.217}
+{"audio_s":5.04,"cancelled":false,"chars":104,"chunks":17,"gen_s":1.459,"model":"mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16","rtf":0.29,"tab":"clone","ts":1787760782.181518,"ttfa_s":0.183}
+{"audio_s":5.92,"cancelled":false,"chars":104,"chunks":20,"gen_s":1.655,"model":"mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16","rtf":0.28,"tab":"clone","ts":1787760837.299926,"ttfa_s":0.156}
+{"audio_s":6.08,"cancelled":false,"chars":104,"chunks":20,"gen_s":2.173,"model":"mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16","rtf":0.357,"tab":"clone","ts":1787760846.929565,"ttfa_s":0.217}
+{"audio_s":2.8,"cancelled":false,"chars":30,"chunks":10,"gen_s":2.599,"model":"mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-bf16","rtf":0.928,"tab":"custom","ts":1787760988.405902,"ttfa_s":1.69}
+{"audio_s":2.88,"cancelled":false,"chars":30,"chunks":10,"gen_s":1.051,"model":"mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-bf16","rtf":0.365,"tab":"custom","ts":1787760998.063327,"ttfa_s":0.175}
+{"audio_s":2.64,"cancelled":false,"chars":30,"chunks":10,"gen_s":0.975,"model":"mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-bf16","rtf":0.369,"tab":"custom","ts":1787761005.620632,"ttfa_s":0.173}

@@ -1,0 +1,91 @@
+use crate::model::{Detection, Model};
+use audio_tools::converters::i16_to_f32;
+use hound::{SampleFormat, WavReader};
+use log::info;
+use std::env;
+use std::error::Error;
+use std::fs::File;
+use std::io::BufReader;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tract_core::internal::{RunnableModel, TypedFact, TypedOp};
+
+pub mod config;
+pub mod info;
+mod model;
+pub mod oww;
+mod oww_tests;
+
+type ModelType = Arc<RunnableModel<TypedFact, Box<dyn TypedOp>>>;
+
+pub struct Models {
+    pub(crate) model1: Box<dyn Model>,
+    pub(crate) model2: Box<dyn Model>,
+}
+
+impl Models {
+    pub fn detect1(&mut self, data: Vec<f32>) -> Option<Detection> {
+        self.model1.detect(data)
+    }
+
+    pub fn detect2(&mut self, data: Vec<f32>) -> Option<Detection> {
+        self.model2.detect(data)
+    }
+
+    pub fn detect1_i16(&mut self, data: Vec<i16>) -> Option<Detection> {
+        self.model1.detect_i16(data)
+    }
+
+    pub fn detect2_i16(&mut self, data: Vec<i16>) -> Option<Detection> {
+        self.model2.detect_i16(data)
+    }
+}
+
+/// loads all wav file as Vec<f32> with conversion from Int format as well
+pub fn load_wav(filename: &str) -> Result<Vec<f32>, Box<dyn Error>> {
+    let based_dir = env!("CARGO_MANIFEST_DIR");
+    let path = Path::new(based_dir).join(filename);
+    info!("Reading file {:?}", &path);
+    let reader: WavReader<BufReader<File>> = hound::WavReader::open(path)?;
+
+    match reader.spec().sample_format {
+        SampleFormat::Float => match load_wav_f32(reader) {
+            Ok(d) => Ok(d),
+            Err(e) => Err(e),
+        },
+        SampleFormat::Int => load_wav_i16(reader).map(|d| d.iter().map(i16_to_f32).collect()),
+    }
+}
+
+/// loads all wav file as vec<i16>
+fn load_wav_i16(mut reader: WavReader<BufReader<File>>) -> Result<Vec<i16>, Box<dyn Error>> {
+    let mut data = vec![];
+    for s in reader.samples::<i16>() {
+        data.push(s.unwrap());
+    }
+    Ok(data)
+}
+
+/// loads all wav file as vec<f32>
+fn load_wav_f32(mut reader: WavReader<BufReader<File>>) -> Result<Vec<f32>, Box<dyn Error>> {
+    let mut data = vec![];
+    for s in reader.samples::<f32>() {
+        data.push(s.unwrap());
+    }
+    Ok(data)
+}
+
+pub fn get_exec_dir() -> PathBuf {
+    let exec_dir = match env::current_exe() {
+        Ok(exe) => match exe.parent() {
+            None => {
+                panic!("No exec directory found");
+            }
+            Some(p) => p.to_path_buf(),
+        },
+        Err(e) => {
+            panic!("No exec directory found, error {:?}", e);
+        }
+    };
+    exec_dir
+}

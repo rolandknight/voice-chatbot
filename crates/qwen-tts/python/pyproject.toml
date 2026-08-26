@@ -1,0 +1,20 @@
+[project]
+name = "qwen-tts"
+version = "0.1.0"
+description = "Qwen3-TTS on mlx-audio: the Python half of the qwen-tts crate (embedded via PyO3)"
+requires-python = ">=3.12"
+dependencies = ["mlx-audio>=0.5.0,<0.6", "mlx-whisper", "soundfile", "pyyaml", "numpy"]
+
+[project.optional-dependencies]
+test = ["pytest", "httpx", "websockets"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["qwen_tts"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

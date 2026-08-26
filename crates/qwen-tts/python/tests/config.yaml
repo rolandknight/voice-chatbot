@@ -1,0 +1,38 @@
+# Test profile for the qwen_tts unit tests (fake model, GPU-free): LRU of 2,
+# every tab, transcription on. Not used by the server or the tester.
+server:
+  host: 127.0.0.1
+  port: 8007
+
+models:
+  clone_default: mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16
+  clone_small: mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16
+  custom_voice: mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-bf16
+  voice_design: mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16
+  # Keep at most this many models resident (LRU). Two 1.7B bf16 models ~ 9 GB.
+  max_resident: 2
+
+generation:
+  temperature: 0.9
+  top_p: 0.9
+  # Sentences are grouped into chunks up to this many chars per model call,
+  # keeping each Metal call well under the watchdog (~40 s of audio).
+  max_chunk_chars: 300
+  crossfade_ms: 20
+
+voices:
+  paths: [../../../../voices]
+
+preload:
+  enabled: true
+  models: [clone_default, custom_voice, voice_design]
+  voices: all
+  size: "1.7B"
+
+transcribe:
+  enabled: true
+  model: mlx-community/whisper-base.en-mlx
+
+bench:
+  voice: one-one.mp3
+  repeats: 3

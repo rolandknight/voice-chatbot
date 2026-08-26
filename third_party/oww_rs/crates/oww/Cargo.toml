@@ -1,0 +1,30 @@
+[package]
+name = "oww-rs"
+description = "Minimalistic version of the OpenWakeWord inference in Rust and ONNX runtime"
+keywords = ["stopword", "speech", "alexa", "detection", "onnx"]
+categories = ["multimedia::audio", "science"]
+readme = "README.md"
+version = "0.3.3"
+edition = "2024"
+rust-version = "1.85"
+
+[lib]
+name = "oww_rs"
+crate-type = ["lib"]
+
+[dependencies]
+audio_tools = { path = "../audio_tools" }
+circular-buffer = "1.2"
+env_logger = "0.11"
+hound = "3.5"
+log = "0.4"
+rust-embed = "8.5"
+tokio = "1"
+tokio-util = "0"
+tract-core = "0.23"
+tract-onnx = "0.23"
+
+[dev-dependencies]
+anyhow = "1"
+approx = "0.5"
+rstest = "0.26.1"

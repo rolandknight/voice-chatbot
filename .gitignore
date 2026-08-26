@@ -37,3 +37,10 @@ poc/vendor/oww_rs/**/target/
 # tree so a stray `git add -A` cannot commit one. The toolkit itself installs
 # outside the repo (see poc-tts/.env for the CUDA_HOME pointer).
 cuda_*.run
+
+# Workspace build output (crates/server, crates/client).
+/target/
+
+# Python test/packaging droppings (crates/qwen-tts/python).
+.pytest_cache/
+*.egg-info/

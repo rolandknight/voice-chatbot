@@ -318,11 +318,11 @@ build() {
         export NEMO_SPEECH_LIB_DIR="$NEMOTRON_HOME/lib"
         cargo_features+=(nemotron-native)
     fi
-    # Qwen3-TTS: link poc-qwen-streaming's PyO3 engine against poc-qwen's venv
+    # Qwen3-TTS: link the qwen-tts crate's PyO3 engine against its own venv
     # interpreter. Only for POC_TTS_BACKEND=qwen so other builds stay Python-free.
     if [ "${POC_TTS_BACKEND:-kokoro}" = "qwen" ]; then
-        local qwen_python="$REPO_DIR/poc-qwen/.venv/bin/python"
-        [ -x "$qwen_python" ] || fail "POC_TTS_BACKEND=qwen needs poc-qwen's venv; run: make -C poc-qwen setup"
+        local qwen_python="$REPO_DIR/crates/qwen-tts/.venv/bin/python"
+        [ -x "$qwen_python" ] || fail "POC_TTS_BACKEND=qwen needs the qwen-tts venv; run: make -C crates/qwen-tts setup"
         export PYO3_PYTHON="$qwen_python"
         cargo_features+=(qwen-tts)
     fi

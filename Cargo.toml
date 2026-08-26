@@ -1,0 +1,16 @@
+# voice-chatbot workspace: the production server and native WebRTC client,
+# grown out of the PoCs (poc/flowcat, poc/flowcat-client, poc-qwen-streaming).
+# qwen-tts-tester is the model-testing GUI for crates/qwen-tts (not shipped).
+# The poc-* trees keep their own manifests and are not members here.
+[workspace]
+resolver = "2"
+members = ["crates/server", "crates/client", "crates/qwen-tts", "qwen-tts-tester"]
+exclude = ["third_party", "poc", "poc-qwen-streaming"]
+
+# Vendored flowcat-core carries Babel's extra input-processor seam (wake-word
+# gate ahead of the speech gate); see third_party/flowcat-core/VENDORED.md.
+[patch."https://github.com/AreevAI/flowcat.git"]
+flowcat-core = { path = "third_party/flowcat-core" }
+
+[profile.release]
+debug = 1

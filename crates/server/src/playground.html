@@ -1,0 +1,1011 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Babel FlowCat Playground</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: system-ui, sans-serif;
+      }
+
+      body {
+        max-width: 760px;
+        margin: 2rem auto;
+        padding: 0 1rem 2rem;
+      }
+
+      h1 {
+        margin-bottom: 0.35rem;
+        font-size: 1.45rem;
+      }
+
+      h2 {
+        margin: 0 0 0.8rem;
+        font-size: 1rem;
+      }
+
+      button,
+      select {
+        min-height: 2.4rem;
+        border: 1px solid #8888;
+        border-radius: 8px;
+        padding: 0.45rem 0.7rem;
+        font: inherit;
+      }
+
+      button {
+        cursor: pointer;
+      }
+
+      button[disabled],
+      select[disabled] {
+        cursor: default;
+        opacity: 0.55;
+      }
+
+      select {
+        min-width: 0;
+        flex: 1;
+        background: Canvas;
+      }
+
+      .meta,
+      .hint {
+        color: color-mix(in srgb, CanvasText 68%, transparent);
+        font-size: 0.88rem;
+      }
+
+      .panel {
+        margin: 1rem 0;
+        border: 1px solid #8885;
+        border-radius: 10px;
+        padding: 1rem;
+      }
+
+      .device-row,
+      .call-row,
+      .meter-row {
+        display: flex;
+        align-items: center;
+        gap: 0.65rem;
+      }
+
+      .device-row label {
+        min-width: 6rem;
+        font-weight: 600;
+      }
+
+      .meter-row {
+        margin-top: 0.9rem;
+      }
+
+      .meter-label {
+        min-width: 6rem;
+        font-size: 0.88rem;
+      }
+
+      #meter {
+        height: 0.8rem;
+        flex: 1;
+        overflow: hidden;
+        border: 1px solid #8888;
+        border-radius: 999px;
+        background: #8882;
+      }
+
+      #meter-fill {
+        width: 100%;
+        height: 100%;
+        transform: scaleX(0);
+        transform-origin: left;
+        background: linear-gradient(90deg, #16a34a 0 68%, #eab308 68% 86%, #dc2626 86%);
+        transition: transform 70ms linear;
+      }
+
+      #level-text {
+        width: 5.8rem;
+        font-variant-numeric: tabular-nums;
+        text-align: right;
+      }
+
+      #microphone-status,
+      #status {
+        margin: 0.7rem 0 0;
+        font-size: 0.9rem;
+      }
+
+      .call-row {
+        margin-top: 1rem;
+      }
+
+      #log {
+        margin-top: 1rem;
+        min-height: 12rem;
+        border: 1px solid #8885;
+        border-radius: 10px;
+        padding: 0.8rem;
+      }
+
+      .turn {
+        margin: 0.35rem 0;
+        line-height: 1.4;
+      }
+
+      .user { color: #2563eb; }
+      .bot { color: #16a34a; }
+      .tool { color: #9333ea; font-style: italic; }
+
+      /* Time-to-first-audio: per-turn chip on the user line + session stats. */
+      .ttfa {
+        display: inline-block;
+        margin-left: 0.5rem;
+        padding: 0 0.45rem;
+        border-radius: 999px;
+        font-size: 0.78rem;
+        font-style: normal;
+        font-variant-numeric: tabular-nums;
+        color: #fff;
+        background: #6b7280;
+        vertical-align: 1px;
+      }
+      .ttfa.good { background: #16a34a; }
+      .ttfa.warn { background: #d97706; }
+      .ttfa.slow { background: #dc2626; }
+      #ttfa-stats {
+        margin: 0.25rem 0 0;
+        font-size: 0.85rem;
+        font-variant-numeric: tabular-nums;
+        opacity: 0.85;
+      }
+
+      @media (max-width: 580px) {
+        .device-row {
+          align-items: stretch;
+          flex-direction: column;
+        }
+
+        .device-row label {
+          min-width: 0;
+        }
+
+        .meter-label {
+          min-width: auto;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Babel FlowCat Playground</h1>
+      <p class="meta">
+        Choose and test a microphone before starting the WebRTC call. Device names
+        become available after microphone permission is granted.
+      </p>
+
+      <section class="panel" aria-labelledby="audio-heading">
+        <h2 id="audio-heading">Audio input</h2>
+        <div class="device-row">
+          <label for="microphone">Microphone</label>
+          <select id="microphone" aria-describedby="microphone-help">
+            <option value="">Default microphone</option>
+          </select>
+          <button id="refresh-microphones" type="button">Refresh</button>
+          <button id="test-microphone" type="button">Test microphone</button>
+        </div>
+        <div class="meter-row">
+          <span class="meter-label">Browser input</span>
+          <div
+            id="meter"
+            role="meter"
+            aria-label="Browser microphone input level before WebRTC and voice detection"
+            aria-valuemin="0"
+            aria-valuemax="100"
+            aria-valuenow="0"
+            aria-valuetext="inactive"
+          >
+            <div id="meter-fill"></div>
+          </div>
+          <output id="level-text" for="microphone">inactive</output>
+        </div>
+        <p id="microphone-status" role="status" aria-live="polite">Microphone is not open.</p>
+        <p id="microphone-help" class="hint">
+          This meter is before WebRTC, VAD, and speech recognition. Speak normally and
+          confirm it moves. Changing the selection while connected switches the call.
+        </p>
+      </section>
+
+      <div class="call-row">
+        <button id="start" type="button">Start call</button>
+        <button id="stop" type="button" disabled>Hang up</button>
+      </div>
+      <p id="status" role="status" aria-live="polite">idle</p>
+      <p id="ttfa-stats" aria-label="Time to first audio statistics" hidden></p>
+      <div id="log" aria-live="polite" aria-label="Call transcript"></div>
+      <audio id="remote-audio" autoplay playsinline></audio>
+    </main>
+
+    <script>
+      const microphoneSelect = document.getElementById("microphone");
+      const refreshMicrophonesBtn = document.getElementById("refresh-microphones");
+      const testMicrophoneBtn = document.getElementById("test-microphone");
+      const startBtn = document.getElementById("start");
+      const stopBtn = document.getElementById("stop");
+      const statusEl = document.getElementById("status");
+      const microphoneStatusEl = document.getElementById("microphone-status");
+      const meterEl = document.getElementById("meter");
+      const meterFillEl = document.getElementById("meter-fill");
+      const levelTextEl = document.getElementById("level-text");
+      const logEl = document.getElementById("log");
+      const remoteAudio = document.getElementById("remote-audio");
+
+      const DEVICE_STORAGE_KEY = "babel-flowcat-microphone";
+      const ICE_GATHERING_TIMEOUT_MS = 1000;
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+
+      let pc = null;
+      let micSender = null;
+      let micStream = null;
+      let eventsWs = null;
+      // Time-to-first-audio (TTFA): the clock starts at the final user
+      // transcription (the closest client-visible edge to end-of-utterance)
+      // and stops at the first *audible* remote frame, measured with an
+      // AnalyserNode on the remote track so jitter-buffer/playout delay counts.
+      // `rtf-bot-started-speaking` is the fallback when WebAudio can't hear
+      // the remote stream (some browsers deliver a silent MediaStreamSource).
+      const ttfaStatsEl = document.getElementById("ttfa-stats");
+      const TTFA_GOOD_MS = 2000;
+      const TTFA_WARN_MS = 4000;
+      const TTFA_AUDIO_RMS = 0.01;
+      const TTFA_EVENT_FALLBACK_MS = 1500;
+      const ttfa = {
+        t0: null,            // performance.now() at the final user transcription
+        userLine: null,      // transcript element that receives the chip
+        awaiting: false,     // a reply's first audio is being timed
+        samples: [],         // ms per completed turn this call
+        firstDone: false,    // the first turn is the cache-sensitive one; tag it
+        analyser: null,
+        buf: null,
+        raf: null,
+        fallbackTimer: null,
+      };
+      let userInterim = null;
+      let audioContext = null;
+      let meterSource = null;
+      let meterAnalyser = null;
+      let meterFrame = null;
+      let meterData = null;
+      let meterStartedAt = 0;
+      let meterHasSignal = false;
+      let meterWarnedSilent = false;
+      let microphoneBusy = false;
+      let callStarting = false;
+      let lifecycleGeneration = 0;
+      let offerAbortController = null;
+      let disconnectTimer = null;
+      let playbackBlocked = false;
+
+      const setStatus = (text) => { statusEl.textContent = text; };
+      const setMicrophoneStatus = (text) => { microphoneStatusEl.textContent = text; };
+
+      function updateControls() {
+        microphoneSelect.disabled = microphoneBusy || callStarting;
+        refreshMicrophonesBtn.disabled = microphoneBusy || callStarting;
+        testMicrophoneBtn.disabled = microphoneBusy || callStarting;
+        startBtn.disabled = microphoneBusy || callStarting || Boolean(pc);
+        stopBtn.disabled = !pc && !callStarting;
+        testMicrophoneBtn.textContent = micStream
+          ? (pc ? "Restart microphone" : "Stop microphone test")
+          : "Test microphone";
+      }
+
+      class StaleOperationError extends Error {}
+
+      function assertCurrent(generation) {
+        if (generation !== lifecycleGeneration) throw new StaleOperationError();
+      }
+
+      function line(className, text) {
+        const div = document.createElement("div");
+        div.className = `turn ${className}`;
+        div.textContent = text;
+        logEl.appendChild(div);
+        logEl.scrollTop = logEl.scrollHeight;
+        return div;
+      }
+
+      function ttfaReset() {
+        ttfa.t0 = null;
+        ttfa.userLine = null;
+        ttfa.awaiting = false;
+        if (ttfa.fallbackTimer !== null) clearTimeout(ttfa.fallbackTimer);
+        ttfa.fallbackTimer = null;
+      }
+
+      function ttfaNewCall() {
+        ttfaReset();
+        ttfa.samples = [];
+        ttfa.firstDone = false;
+        ttfaStatsEl.hidden = true;
+        ttfaStatsEl.textContent = "";
+      }
+
+      // A user turn just finalized: (re)start the clock. On barge-in the
+      // previous reply's pending measurement is simply superseded, so an
+      // interrupted-before-audio reply never gets a chip.
+      function ttfaArm(userLine) {
+        ttfaReset();
+        ttfa.t0 = performance.now();
+        ttfa.userLine = userLine;
+        ttfa.awaiting = true;
+      }
+
+      function ttfaQuantile(sorted, q) {
+        if (!sorted.length) return 0;
+        const pos = (sorted.length - 1) * q;
+        const lo = Math.floor(pos);
+        const hi = Math.min(sorted.length - 1, lo + 1);
+        return sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo);
+      }
+
+      function ttfaFormat(ms) {
+        return `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)} s`;
+      }
+
+      function ttfaResolve(source) {
+        if (!ttfa.awaiting || ttfa.t0 === null) return;
+        const ms = performance.now() - ttfa.t0;
+        ttfa.awaiting = false;
+        if (ttfa.fallbackTimer !== null) clearTimeout(ttfa.fallbackTimer);
+        ttfa.fallbackTimer = null;
+        const isFirst = !ttfa.firstDone;
+        ttfa.firstDone = true;
+        ttfa.samples.push(ms);
+
+        const chip = document.createElement("span");
+        chip.className =
+          "ttfa " + (ms < TTFA_GOOD_MS ? "good" : ms < TTFA_WARN_MS ? "warn" : "slow");
+        chip.textContent = `⏱ ${ttfaFormat(ms)}${isFirst ? " · first" : ""}`;
+        chip.title =
+          `Time to first audio (${source === "audio" ? "first audible frame" : "bot-started-speaking event"})` +
+          (isFirst ? " — first turn of the call (prompt-cache sensitive)" : "");
+        (ttfa.userLine || logEl.lastElementChild || logEl).appendChild(chip);
+
+        const sorted = ttfa.samples.slice().sort((a, b) => a - b);
+        ttfaStatsEl.textContent =
+          `TTFA last ${ttfaFormat(ms)} · median ${ttfaFormat(ttfaQuantile(sorted, 0.5))}` +
+          ` · p95 ${ttfaFormat(ttfaQuantile(sorted, 0.95))} · n=${sorted.length}`;
+        ttfaStatsEl.hidden = false;
+      }
+
+      function ttfaStopMeter() {
+        if (ttfa.raf !== null) cancelAnimationFrame(ttfa.raf);
+        ttfa.raf = null;
+        ttfa.analyser = null;
+        ttfa.buf = null;
+      }
+
+      // Listen to the remote track (not the mic) for the first audible frame.
+      function ttfaStartMeter(stream, generation) {
+        ttfaStopMeter();
+        const ctx = primeAudioContext();
+        if (!ctx) return;
+        try {
+          const src = ctx.createMediaStreamSource(stream);
+          const analyser = ctx.createAnalyser();
+          analyser.fftSize = 512;
+          src.connect(analyser); // analysis only; the <audio> element plays it
+          ttfa.analyser = analyser;
+          ttfa.buf = new Float32Array(analyser.fftSize);
+        } catch (_) {
+          return; // fall back to the bot-started-speaking event
+        }
+        const tick = () => {
+          if (generation !== lifecycleGeneration || !ttfa.analyser) return;
+          if (ttfa.awaiting) {
+            ttfa.analyser.getFloatTimeDomainData(ttfa.buf);
+            let sum = 0;
+            for (let i = 0; i < ttfa.buf.length; i++) sum += ttfa.buf[i] * ttfa.buf[i];
+            if (Math.sqrt(sum / ttfa.buf.length) > TTFA_AUDIO_RMS) ttfaResolve("audio");
+          }
+          ttfa.raf = requestAnimationFrame(tick);
+        };
+        ttfa.raf = requestAnimationFrame(tick);
+      }
+
+      function selectedDeviceId() {
+        return microphoneSelect.value || "";
+      }
+
+      function rememberDevice(deviceId) {
+        try {
+          if (deviceId) localStorage.setItem(DEVICE_STORAGE_KEY, deviceId);
+          else localStorage.removeItem(DEVICE_STORAGE_KEY);
+        } catch (_) {
+          // Storage can be disabled without affecting audio.
+        }
+      }
+
+      function rememberedDevice() {
+        try {
+          return localStorage.getItem(DEVICE_STORAGE_KEY) || "";
+        } catch (_) {
+          return "";
+        }
+      }
+
+      async function refreshMicrophones(preferredId = selectedDeviceId() || rememberedDevice()) {
+        if (!navigator.mediaDevices?.enumerateDevices) {
+          microphoneSelect.disabled = true;
+          setMicrophoneStatus("This browser cannot enumerate audio devices.");
+          return;
+        }
+
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const microphones = devices.filter(
+          (device) => device.kind === "audioinput" && device.deviceId !== "default",
+        );
+        const defaultOption = new Option("Default microphone (browser/OS)", "");
+        microphoneSelect.replaceChildren(defaultOption);
+
+        microphones.forEach((device, index) => {
+          const label = device.label || `Microphone ${index + 1} (permission required)`;
+          microphoneSelect.add(new Option(label, device.deviceId));
+        });
+
+        if (preferredId && microphones.some((device) => device.deviceId === preferredId)) {
+          microphoneSelect.value = preferredId;
+        } else {
+          microphoneSelect.value = "";
+          const activeId = micStream?.getAudioTracks()[0]?.getSettings().deviceId;
+          if (activeId && preferredId === activeId) {
+            setMicrophoneStatus(
+              "The active microphone is no longer listed. Choose System default or another device.",
+            );
+          }
+        }
+      }
+
+      function microphoneConstraints(deviceId) {
+        const audio = {
+          autoGainControl: true,
+          echoCancellation: true,
+          noiseSuppression: true,
+          channelCount: { ideal: 1 },
+        };
+        if (deviceId) audio.deviceId = { exact: deviceId };
+        return { audio, video: false };
+      }
+
+      function resetMeter(closeContext = true) {
+        if (meterFrame !== null) cancelAnimationFrame(meterFrame);
+        meterFrame = null;
+        if (meterSource) meterSource.disconnect();
+        if (meterAnalyser) meterAnalyser.disconnect();
+        meterSource = null;
+        meterAnalyser = null;
+        meterData = null;
+        if (closeContext && audioContext) {
+          audioContext.close().catch(() => {});
+          audioContext = null;
+        }
+        meterFillEl.style.transform = "scaleX(0)";
+        meterEl.setAttribute("aria-valuenow", "0");
+        meterEl.setAttribute("aria-valuetext", "inactive");
+        levelTextEl.textContent = "inactive";
+      }
+
+      function primeAudioContext() {
+        if (!AudioContextClass) return null;
+        try {
+          if (!audioContext || audioContext.state === "closed") {
+            audioContext = new AudioContextClass();
+          }
+          if (audioContext.state === "suspended") {
+            audioContext.resume().catch(() => {});
+          }
+          return audioContext;
+        } catch (_) {
+          return null;
+        }
+      }
+
+      function startMeter(stream, label) {
+        resetMeter(false);
+        if (!AudioContextClass) {
+          setMicrophoneStatus(`${label} is open; this browser cannot display a level meter.`);
+          return false;
+        }
+
+        try {
+          const context = primeAudioContext();
+          if (!context) throw new Error("Web Audio is unavailable");
+          context.resume().catch((error) => {
+            if (audioContext === context) {
+              setMicrophoneStatus(
+                `${label} is open, but the level meter could not start: ${error.message || error}`,
+              );
+            }
+          });
+          meterSource = context.createMediaStreamSource(stream);
+          meterAnalyser = context.createAnalyser();
+          meterAnalyser.fftSize = 1024;
+          meterAnalyser.smoothingTimeConstant = 0.72;
+          meterData = new Uint8Array(meterAnalyser.fftSize);
+          meterSource.connect(meterAnalyser);
+        } catch (error) {
+          resetMeter();
+          setMicrophoneStatus(
+            `${label} is open, but the level meter failed: ${error.message || error}`,
+          );
+          return false;
+        }
+        meterStartedAt = performance.now();
+        meterHasSignal = false;
+        meterWarnedSilent = false;
+        let meterPaused = false;
+
+        const draw = () => {
+          if (!meterAnalyser) return;
+          if (audioContext?.state !== "running") {
+            if (!meterPaused) {
+              meterPaused = true;
+              setMicrophoneStatus(`${label} is open; click the page to activate its level meter.`);
+            }
+            meterStartedAt = performance.now();
+            meterFillEl.style.transform = "scaleX(0)";
+            meterEl.setAttribute("aria-valuenow", "0");
+            meterEl.setAttribute("aria-valuetext", "meter paused");
+            levelTextEl.textContent = "paused";
+            meterFrame = requestAnimationFrame(draw);
+            return;
+          }
+          if (meterPaused) {
+            meterPaused = false;
+            setMicrophoneStatus(`${label} level meter resumed; speak to test it.`);
+          }
+          meterAnalyser.getByteTimeDomainData(meterData);
+          let sumSquares = 0;
+          for (const sample of meterData) {
+            const normalized = (sample - 128) / 128;
+            sumSquares += normalized * normalized;
+          }
+          const rms = Math.sqrt(sumSquares / meterData.length);
+          const dbfs = rms > 0 ? 20 * Math.log10(rms) : -Infinity;
+          const level = Number.isFinite(dbfs) ? Math.max(0, Math.min(1, (dbfs + 60) / 60)) : 0;
+          const percent = Math.round(level * 100);
+
+          meterFillEl.style.transform = `scaleX(${level})`;
+          meterEl.setAttribute("aria-valuenow", String(percent));
+          const levelText = Number.isFinite(dbfs) ? `${dbfs.toFixed(1)} dBFS` : "silent";
+          meterEl.setAttribute("aria-valuetext", levelText);
+          levelTextEl.textContent = levelText;
+
+          if (!meterHasSignal && dbfs > -48) {
+            meterHasSignal = true;
+            setMicrophoneStatus(`${label} is receiving audio.`);
+          } else if (
+            !meterHasSignal &&
+            !meterWarnedSilent &&
+            performance.now() - meterStartedAt > 3000
+          ) {
+            meterWarnedSilent = true;
+            setMicrophoneStatus(
+              `${label} is open, but no speech level is visible. Speak or choose another microphone.`,
+            );
+          }
+          meterFrame = requestAnimationFrame(draw);
+        };
+        draw();
+        return true;
+      }
+
+      function stopMicrophone() {
+        resetMeter();
+        if (micStream) micStream.getTracks().forEach((track) => track.stop());
+        micStream = null;
+        setMicrophoneStatus("Microphone is not open.");
+      }
+
+      function microphoneErrorMessage(error) {
+        switch (error?.name) {
+          case "NotAllowedError":
+            return "Microphone permission was denied. Allow this site in the browser and OS settings.";
+          case "NotFoundError":
+            return "No microphone is available.";
+          case "NotReadableError":
+            return "The microphone is busy or unavailable to the browser.";
+          case "OverconstrainedError":
+            return "The selected microphone disconnected or is no longer available.";
+          case "SecurityError":
+            return "Microphone capture requires localhost or HTTPS.";
+          default:
+            return `Microphone error: ${error?.message || error}`;
+        }
+      }
+
+      async function openMicrophone(
+        deviceId = selectedDeviceId(),
+        generation = lifecycleGeneration,
+      ) {
+        if (microphoneBusy) return micStream;
+        microphoneBusy = true;
+        updateControls();
+        setMicrophoneStatus("Requesting microphone access…");
+
+        const previousStream = micStream;
+        const previousSelection = microphoneSelect.value;
+        const previousDeviceId = previousStream?.getAudioTracks()[0]?.getSettings().deviceId || "";
+        let nextStream = null;
+        try {
+          nextStream = await navigator.mediaDevices.getUserMedia(microphoneConstraints(deviceId));
+          assertCurrent(generation);
+          const nextTrack = nextStream.getAudioTracks()[0];
+          if (!nextTrack) throw new Error("the selected device returned no audio track");
+
+          const sender = micSender;
+          if (sender) {
+            await sender.replaceTrack(nextTrack);
+            assertCurrent(generation);
+          }
+
+          micStream = nextStream;
+          if (previousStream && previousStream !== nextStream) {
+            previousStream.getTracks().forEach((track) => track.stop());
+          }
+
+          const settings = nextTrack.getSettings();
+          await refreshMicrophones(settings.deviceId || deviceId).catch(() => {});
+          assertCurrent(generation);
+          rememberDevice(microphoneSelect.value);
+          const label = nextTrack.label || microphoneSelect.selectedOptions[0]?.text || "Microphone";
+          nextTrack.addEventListener("mute", () => {
+            if (micStream === nextStream) {
+              setMicrophoneStatus(`${label} is muted or not delivering samples.`);
+            }
+          });
+          nextTrack.addEventListener("unmute", () => {
+            if (micStream === nextStream) {
+              setMicrophoneStatus(`${label} resumed; speak to test its level.`);
+            }
+          });
+          nextTrack.addEventListener("ended", () => {
+            if (micStream === nextStream) {
+              resetMeter();
+              setMicrophoneStatus(`${label} disconnected.`);
+            }
+          });
+          const meterStarted = startMeter(nextStream, label);
+          if (meterStarted && !meterHasSignal) {
+            setMicrophoneStatus(`${label} is open; speak to test its level.`);
+          }
+          return nextStream;
+        } catch (error) {
+          if (nextStream) nextStream.getTracks().forEach((track) => track.stop());
+          if (error instanceof StaleOperationError || generation !== lifecycleGeneration) {
+            throw error;
+          }
+          micStream = previousStream;
+          if (!previousStream) resetMeter();
+          const canRestoreActive = Array.from(microphoneSelect.options).some(
+            (option) => option.value === previousDeviceId,
+          );
+          microphoneSelect.value = canRestoreActive ? previousDeviceId : previousSelection;
+          setMicrophoneStatus(microphoneErrorMessage(error));
+          throw error;
+        } finally {
+          microphoneBusy = false;
+          updateControls();
+        }
+      }
+
+      function iceComplete(peer, signal, timeoutMs = ICE_GATHERING_TIMEOUT_MS) {
+        if (signal.aborted) {
+          return Promise.reject(new DOMException("Call cancelled", "AbortError"));
+        }
+        if (peer.iceGatheringState === "complete") return Promise.resolve(true);
+        return new Promise((resolve, reject) => {
+          let timeout = null;
+          const cleanup = () => {
+            if (timeout !== null) clearTimeout(timeout);
+            peer.removeEventListener("icegatheringstatechange", check);
+            signal.removeEventListener("abort", abort);
+          };
+          const check = () => {
+            if (peer.iceGatheringState === "complete") {
+              cleanup();
+              resolve(true);
+            }
+          };
+          const abort = () => {
+            cleanup();
+            reject(new DOMException("Call cancelled", "AbortError"));
+          };
+          peer.addEventListener("icegatheringstatechange", check);
+          signal.addEventListener("abort", abort, { once: true });
+          timeout = setTimeout(() => {
+            cleanup();
+            resolve(false);
+          }, timeoutMs);
+        });
+      }
+
+      function handleEvent(message) {
+        const { type, payload } = message;
+        const data = payload || {};
+        switch (type) {
+          case "rtf-user-transcription":
+            if (!userInterim) userInterim = line("user", "🧑 ");
+            userInterim.textContent = `🧑 ${data.text || ""}`;
+            if (data.final) {
+              ttfaArm(userInterim);
+              userInterim = null;
+            }
+            break;
+          case "rtf-bot-text":
+            line("bot", `🤖 ${data.text || ""}`);
+            break;
+          case "rtf-function-call-start":
+            line("tool", `🔧 ${data.function_name || data.tool_name || "tool"}(…)`);
+            break;
+          case "rtf-function-call-end":
+            line("tool", `🔧 ↪ ${JSON.stringify(data.result ?? data)}`);
+            break;
+          case "rtf-bot-started-speaking":
+            setStatus("agent speaking…");
+            if (ttfa.awaiting) {
+              if (!ttfa.analyser) {
+                ttfaResolve("event");
+              } else if (ttfa.fallbackTimer === null) {
+                // The meter should fire within a playout delay; if the remote
+                // source is inaudible to WebAudio, fall back to the event edge.
+                const eventAt = performance.now();
+                ttfa.fallbackTimer = setTimeout(() => {
+                  ttfa.fallbackTimer = null;
+                  if (ttfa.awaiting) {
+                    ttfa.t0 = ttfa.t0 + (performance.now() - eventAt); // credit the wait
+                    ttfaResolve("event");
+                  }
+                }, TTFA_EVENT_FALLBACK_MS);
+              }
+            }
+            break;
+          case "rtf-bot-stopped-speaking":
+            setStatus("connected — listening…");
+            break;
+          default:
+            break;
+        }
+      }
+
+      function closeCall(status = "idle") {
+        lifecycleGeneration += 1;
+        if (offerAbortController) offerAbortController.abort();
+        offerAbortController = null;
+        if (disconnectTimer !== null) clearTimeout(disconnectTimer);
+        disconnectTimer = null;
+        const oldSocket = eventsWs;
+        const oldPeer = pc;
+        eventsWs = null;
+        pc = null;
+        micSender = null;
+        userInterim = null;
+        callStarting = false;
+        playbackBlocked = false;
+        if (oldSocket) {
+          try { oldSocket.close(); } catch (_) {}
+        }
+        if (oldPeer) {
+          try { oldPeer.close(); } catch (_) {}
+        }
+        remoteAudio.srcObject = null;
+        ttfaStopMeter();
+        ttfaReset();
+        stopMicrophone();
+        updateControls();
+        setStatus(status);
+      }
+
+      async function playRemoteAudio(generation) {
+        try {
+          await remoteAudio.play();
+          if (generation === lifecycleGeneration) playbackBlocked = false;
+        } catch (_) {
+          if (generation === lifecycleGeneration && remoteAudio.srcObject) {
+            playbackBlocked = true;
+            setStatus("connected — click the page once to allow speaker playback");
+          }
+        }
+      }
+
+      async function startCall() {
+        if (pc || callStarting) return;
+        ttfaNewCall();
+        primeAudioContext();
+        const generation = ++lifecycleGeneration;
+        const controller = new AbortController();
+        offerAbortController = controller;
+        callStarting = true;
+        updateControls();
+        setStatus("preparing microphone…");
+
+        let peer = null;
+        let socket = null;
+        try {
+          if (!micStream || micStream.getAudioTracks().every((track) => track.readyState !== "live")) {
+            await openMicrophone(selectedDeviceId(), generation);
+          }
+          assertCurrent(generation);
+
+          // This playground and FlowCat both run on loopback, so a host candidate
+          // is sufficient and contacting a public STUN server only adds latency.
+          peer = new RTCPeerConnection({ iceServers: [] });
+          pc = peer;
+          const microphoneTrack = micStream.getAudioTracks()[0];
+          if (!microphoneTrack) throw new Error("microphone stream has no audio track");
+          micSender = peer.addTrack(microphoneTrack, micStream);
+          updateControls();
+
+          peer.ontrack = (event) => {
+            if (generation !== lifecycleGeneration || pc !== peer) return;
+            const stream = event.streams[0] || new MediaStream([event.track]);
+            remoteAudio.srcObject = stream;
+            ttfaStartMeter(stream, generation);
+            playRemoteAudio(generation);
+          };
+          peer.onconnectionstatechange = () => {
+            if (generation !== lifecycleGeneration || pc !== peer) return;
+            switch (peer.connectionState) {
+              case "connected":
+                if (disconnectTimer !== null) clearTimeout(disconnectTimer);
+                disconnectTimer = null;
+                setStatus("connected — listening…");
+                break;
+              case "failed":
+              case "closed":
+                closeCall(`connection ${peer.connectionState}`);
+                break;
+              case "disconnected":
+                setStatus("media interrupted — reconnecting…");
+                if (disconnectTimer === null) {
+                  disconnectTimer = setTimeout(() => {
+                    disconnectTimer = null;
+                    if (
+                      generation === lifecycleGeneration &&
+                      pc === peer &&
+                      peer.connectionState === "disconnected"
+                    ) {
+                      closeCall("connection disconnected");
+                    }
+                  }, 3000);
+                }
+                break;
+              default:
+                setStatus(`media ${peer.connectionState}…`);
+            }
+          };
+
+          setStatus("creating local media offer…");
+          const offer = await peer.createOffer({ offerToReceiveAudio: true });
+          assertCurrent(generation);
+          await peer.setLocalDescription(offer);
+          assertCurrent(generation);
+          setStatus("finding local media route…");
+          const iceGatheringComplete = await iceComplete(peer, controller.signal);
+          assertCurrent(generation);
+
+          setStatus(
+            iceGatheringComplete
+              ? "starting voice pipeline…"
+              : "starting voice pipeline with available local route…",
+          );
+
+          const response = await fetch("/webrtc/offer", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ sdp: peer.localDescription.sdp }),
+            signal: controller.signal,
+          });
+          assertCurrent(generation);
+          if (!response.ok) {
+            const responseText = await response.text();
+            assertCurrent(generation);
+            throw new Error(`offer rejected: ${response.status} ${responseText}`);
+          }
+
+          const answer = await response.json();
+          assertCurrent(generation);
+          const { sdp, pc_id: pcId } = answer;
+          setStatus("applying media answer…");
+          await peer.setRemoteDescription({ type: "answer", sdp });
+          assertCurrent(generation);
+
+          const protocol = location.protocol === "https:" ? "wss" : "ws";
+          socket = new WebSocket(`${protocol}://${location.host}/webrtc/events/${pcId}`);
+          eventsWs = socket;
+          socket.onmessage = (event) => {
+            if (generation !== lifecycleGeneration || eventsWs !== socket) return;
+            try { handleEvent(JSON.parse(event.data)); } catch (_) {}
+          };
+          socket.onerror = () => {
+            if (generation === lifecycleGeneration && eventsWs === socket) {
+              setStatus("event stream error — media may still be connected");
+            }
+          };
+          socket.onclose = () => {
+            if (generation === lifecycleGeneration && eventsWs === socket) {
+              eventsWs = null;
+              setStatus("event stream closed — media may still be connected");
+            }
+          };
+          setStatus("connecting media…");
+        } catch (error) {
+          const stale =
+            error instanceof StaleOperationError ||
+            error?.name === "AbortError" ||
+            generation !== lifecycleGeneration;
+          if (stale) {
+            if (socket && eventsWs !== socket) {
+              try { socket.close(); } catch (_) {}
+            }
+            if (peer && pc !== peer) {
+              try { peer.close(); } catch (_) {}
+            }
+          } else {
+            closeCall(`call failed: ${error.message || error}`);
+          }
+        } finally {
+          if (offerAbortController === controller) offerAbortController = null;
+          if (generation === lifecycleGeneration) {
+            callStarting = false;
+            updateControls();
+          }
+        }
+      }
+
+      refreshMicrophonesBtn.addEventListener("click", () => {
+        refreshMicrophones().catch((error) => {
+          setMicrophoneStatus(`Cannot list microphones: ${error.message || error}`);
+        });
+      });
+      testMicrophoneBtn.addEventListener("click", () => {
+        if (micStream && !pc) {
+          lifecycleGeneration += 1;
+          stopMicrophone();
+          updateControls();
+          return;
+        }
+        primeAudioContext();
+        openMicrophone(selectedDeviceId(), lifecycleGeneration).catch(() => {});
+      });
+      microphoneSelect.addEventListener("change", () => {
+        if (micStream) {
+          primeAudioContext();
+          openMicrophone(selectedDeviceId(), lifecycleGeneration).catch(() => {});
+        } else {
+          rememberDevice(selectedDeviceId());
+        }
+      });
+      startBtn.addEventListener("click", startCall);
+      stopBtn.addEventListener("click", () => closeCall());
+      navigator.mediaDevices?.addEventListener?.("devicechange", () => {
+        refreshMicrophones().catch(() => {});
+      });
+      document.addEventListener("click", () => {
+        if (audioContext?.state === "suspended") {
+          audioContext.resume().catch(() => {});
+        }
+        if (playbackBlocked && remoteAudio.srcObject) {
+          playRemoteAudio(lifecycleGeneration);
+        }
+      });
+      window.addEventListener("pagehide", () => closeCall());
+
+      refreshMicrophones().catch((error) => {
+        setMicrophoneStatus(`Cannot list microphones: ${error.message || error}`);
+      });
+    </script>
+  </body>
+</html>
