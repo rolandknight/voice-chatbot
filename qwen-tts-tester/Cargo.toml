@@ -1,0 +1,22 @@
+[package]
+name = "qwen-tts-tester"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Model-testing GUI and bench for the qwen-tts crate: streams Qwen3-TTS to the browser over WebSocket"
+
+[[bin]]
+name = "qwen-tts-tester"
+path = "src/main.rs"
+
+[dependencies]
+qwen-tts = { path = "../crates/qwen-tts" }
+axum = { version = "0.8", features = ["ws", "multipart"] }
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["fs", "trace"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+uuid = { version = "1", features = ["v4"] }

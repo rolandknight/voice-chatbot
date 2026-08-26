@@ -1,0 +1,4 @@
+uploads/
+reports/*.wav
+reports/*.log
+.env

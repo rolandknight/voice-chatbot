@@ -6,7 +6,7 @@ requires-python = ">=3.12"
 dependencies = ["mlx-audio>=0.5.0,<0.6", "mlx-whisper", "soundfile", "pyyaml", "numpy"]
 
 [project.optional-dependencies]
-test = ["pytest"]
+test = ["pytest", "httpx", "websockets"]
 
 [build-system]
 requires = ["setuptools>=68"]

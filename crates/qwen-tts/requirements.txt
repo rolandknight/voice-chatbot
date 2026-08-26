@@ -5,5 +5,7 @@ mlx-whisper
 soundfile
 pyyaml
 numpy
-# tests
+# tests (pytest here; httpx + websockets for qwen-tts-tester/tests/e2e_ws.py)
 pytest
+httpx
+websockets
