@@ -4,17 +4,12 @@
 //!   poc-qwen-streaming info                          # print model_info() and exit
 //!   poc-qwen-streaming bench                         # headless TTFA bench
 
-mod bench;
-mod config;
-mod engine;
-mod pcm;
-mod server;
-
 use anyhow::Result;
 use std::path::PathBuf;
 
-use config::Config;
-use engine::Engine;
+use poc_qwen_streaming::config::Config;
+use poc_qwen_streaming::engine::Engine;
+use poc_qwen_streaming::{bench, server};
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()

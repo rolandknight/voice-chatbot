@@ -308,6 +308,10 @@ impl<L: LlmService + 'static> FrameProcessor for LlmProcessor<L> {
 pub struct TtsProcessor<T: TtsService> {
     /// The wrapped TTS service.
     svc: Arc<Mutex<T>>,
+    /// Shared barge-in generation (same counter the VAD bumps and the LLM adapter
+    /// polls). When set, a streaming synthesis is dropped as soon as the
+    /// generation moves, so a streaming engine stops after its current chunk.
+    interrupt_flag: Option<Arc<std::sync::atomic::AtomicU64>>,
 }
 
 impl<T: TtsService> TtsProcessor<T> {
@@ -315,38 +319,87 @@ impl<T: TtsService> TtsProcessor<T> {
     pub fn new(svc: T) -> Self {
         Self {
             svc: Arc::new(Mutex::new(svc)),
+            interrupt_flag: None,
         }
     }
 
-    /// Synthesize `text`, mapping each `TtsAudio` to `OutputAudio` for the sink.
+    /// Share the barge-in generation counter (see [`LlmProcessor::with_interrupt_flag`]).
+    pub fn with_interrupt_flag(mut self, flag: Arc<std::sync::atomic::AtomicU64>) -> Self {
+        self.interrupt_flag = Some(flag);
+        self
+    }
+
+    /// Synthesize `text`, forwarding each frame **as the service yields it**
+    /// (`TtsAudio` → `OutputAudio` so a transport-out sink plays it). For a
+    /// whole-utterance service the stream is the finished `Vec`; for a streaming
+    /// service the first audio reaches the sink while the rest is still being
+    /// generated. Awaiting the stream inside `process_frame` keeps frame order
+    /// (see the module docs) — nothing is detached.
     async fn run(&self, text: &str, link: &Link) {
         tracing::debug!(chars = text.len(), "cascaded TTS run");
-        let frames = self.svc.lock().await.run_tts(text).await;
-        match frames {
-            Ok(frames) => {
-                tracing::debug!(frames = frames.len(), "cascaded TTS produced frames");
+        let start_gen = self
+            .interrupt_flag
+            .as_ref()
+            .map(|f| f.load(std::sync::atomic::Ordering::SeqCst));
+        let mut guard = self.svc.lock().await;
+        let result = guard.run_tts_stream(text).await;
+        let err = match result {
+            Ok(mut stream) => {
                 // Report characters synthesized for cost accounting. Count Unicode
                 // chars (not byte len) so multilingual text (Hindi/Telugu) bills
-                // correctly. Emitted only on success (a failed synth bills nothing);
-                // folded by the recorder into usage_metrics, priced per-1k-chars.
+                // correctly. Emitted once the synthesis started (a failed synth
+                // bills nothing); folded by the recorder into usage_metrics.
                 link.push_down(Frame::Metrics(vec![MetricsData::TtsUsage {
                     processor: "tts".to_string(),
                     characters: text.chars().count() as u64,
                 }]))
                 .await;
-                for f in frames {
+                let mut pushed = 0usize;
+                let mut cancelled = false;
+                let mut open_context: Option<Option<Arc<str>>> = None;
+                while let Some(f) = stream.next().await {
+                    if let (Some(flag), Some(g0)) = (&self.interrupt_flag, start_gen) {
+                        if flag.load(std::sync::atomic::Ordering::SeqCst) != g0 {
+                            cancelled = true;
+                            break;
+                        }
+                    }
                     let f = match f {
+                        Frame::TtsStarted { context_id } => {
+                            open_context = Some(context_id.clone());
+                            Frame::TtsStarted { context_id }
+                        }
+                        Frame::TtsStopped { context_id } => {
+                            open_context = None;
+                            Frame::TtsStopped { context_id }
+                        }
                         // Map TtsAudio → OutputAudio so a transport-out sink plays it.
                         Frame::TtsAudio { audio, .. } => Frame::OutputAudio(audio),
                         other => other,
                     };
+                    pushed += 1;
                     link.push_down(f).await;
                 }
+                // Dropping the stream cancels a streaming synthesis after its
+                // current chunk. Close the framing so downstream never sees an
+                // open TtsStarted span (the stale-audio latch drops what is in
+                // flight; the caller already heard the carrier flush).
+                drop(stream);
+                if cancelled {
+                    tracing::debug!(pushed, "cascaded TTS stream cancelled by barge-in");
+                    if let Some(context_id) = open_context {
+                        link.push_down(Frame::TtsStopped { context_id }).await;
+                    }
+                } else {
+                    tracing::debug!(frames = pushed, "cascaded TTS produced frames");
+                }
+                None
             }
-            Err(e) => {
-                tracing::warn!(error = %e, "cascaded TTS error");
-                link.push_error(format!("tts: {e}"), false).await;
-            }
+            Err(e) => Some(format!("tts: {e}")),
+        };
+        if let Some(msg) = err {
+            tracing::warn!(error = %msg, "cascaded TTS error");
+            link.push_error(msg, false).await;
         }
     }
 }
@@ -601,6 +654,129 @@ mod tests {
             tap.names.lock().unwrap().contains(&"LlmResponseEnd"),
             "a cancelled stream must still close its response framing"
         );
+    }
+
+    /// A streaming TTS: yields one 20 ms frame per `tick`, bumping the barge-in
+    /// flag after `at` frames when asked (mirrors `BargeInMidStream` for the LLM).
+    struct StreamingTts {
+        flag: Arc<AtomicU64>,
+        chunks: usize,
+        at: Option<usize>,
+        /// Set once the stream is dropped — the cancel path for a real engine.
+        dropped: Arc<std::sync::atomic::AtomicBool>,
+    }
+    struct DropGuard(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for DropGuard {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+    #[async_trait]
+    impl TtsService for StreamingTts {
+        fn name(&self) -> &str {
+            "streaming-tts"
+        }
+        fn sample_rate(&self) -> u32 {
+            24_000
+        }
+        async fn start(&mut self, _p: &StartParams) -> Result<()> {
+            Ok(())
+        }
+        async fn run_tts(&mut self, _text: &str) -> Result<Vec<Frame>> {
+            panic!("the processor must use run_tts_stream for a streaming service")
+        }
+        async fn run_tts_stream<'a>(&'a mut self, _text: &'a str) -> Result<BoxStream<'a, Frame>> {
+            let flag = self.flag.clone();
+            let chunks = self.chunks;
+            let at = self.at;
+            let guard = DropGuard(self.dropped.clone());
+            let ctx: Arc<str> = Arc::from("t-1");
+            Ok(Box::pin(futures::stream::unfold((0usize, guard), move |(i, guard)| {
+                let flag = flag.clone();
+                let ctx = ctx.clone();
+                async move {
+                    if i > chunks + 1 {
+                        return None;
+                    }
+                    let frame = if i == 0 {
+                        Frame::TtsStarted { context_id: Some(ctx) }
+                    } else if i == chunks + 1 {
+                        Frame::TtsStopped { context_id: Some(ctx) }
+                    } else {
+                        if at == Some(i) {
+                            flag.fetch_add(1, Ordering::SeqCst);
+                        }
+                        Frame::TtsAudio {
+                            audio: Arc::new(AudioFrame::mono(vec![i as i16; 480], 24_000)),
+                            context_id: Some(ctx),
+                        }
+                    };
+                    Some((frame, (i + 1, guard)))
+                }
+            })))
+        }
+    }
+
+    async fn run_tts_turn(tts: TtsProcessor<StreamingTts>) -> Arc<Tap> {
+        let tap = Arc::new(Tap::default());
+        let task = PipelineTask::new(
+            Pipeline::new(vec![Box::new(tts)]),
+            PipelineTaskParams::default(),
+            vec![tap.clone() as Arc<dyn FrameObserver>],
+        );
+        task.queue_frame(Frame::TtsSpeak {
+            text: "hello there".into(),
+            append_to_context: None,
+        })
+        .await;
+        task.stop_when_done().await;
+        tokio::time::timeout(Duration::from_secs(5), task.run())
+            .await
+            .expect("tts pipeline timed out")
+            .expect("run ok");
+        tap
+    }
+
+    /// A streaming `TtsService` is driven through `run_tts_stream`: every yielded
+    /// frame is forwarded (audio as `OutputAudio`) and the span closes normally.
+    #[tokio::test]
+    async fn streaming_tts_frames_are_forwarded_as_they_arrive() {
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let tap = run_tts_turn(TtsProcessor::new(StreamingTts {
+            flag: Arc::new(AtomicU64::new(0)),
+            chunks: 5,
+            at: None,
+            dropped: dropped.clone(),
+        }))
+        .await;
+        let names = tap.names.lock().unwrap().clone();
+        assert_eq!(names.iter().filter(|n| **n == "OutputAudio").count(), 5);
+        assert!(names.contains(&"TtsStarted") && names.contains(&"TtsStopped"));
+        assert!(dropped.load(Ordering::SeqCst), "stream released after completion");
+    }
+
+    /// Barge-in mid-stream: the processor stops forwarding at the generation
+    /// bump, drops the stream (which is how a streaming engine is cancelled), and
+    /// still closes the `TtsStarted` span so downstream framing never wedges.
+    #[tokio::test]
+    async fn barge_in_flag_cancels_an_in_flight_tts_stream() {
+        let flag = Arc::new(AtomicU64::new(0));
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let tap = run_tts_turn(
+            TtsProcessor::new(StreamingTts {
+                flag: flag.clone(),
+                chunks: 8,
+                at: Some(3),
+                dropped: dropped.clone(),
+            })
+            .with_interrupt_flag(flag),
+        )
+        .await;
+        let names = tap.names.lock().unwrap().clone();
+        let audio = names.iter().filter(|n| **n == "OutputAudio").count();
+        assert!(audio <= 3, "audio after the barge-in must not be pushed (got {audio})");
+        assert_eq!(names.iter().filter(|n| **n == "TtsStopped").count(), 1);
+        assert!(dropped.load(Ordering::SeqCst), "the cancelled stream must be dropped");
     }
 
     /// Same LLM, no flag wired (the default / half-duplex path): every token is

@@ -5,6 +5,10 @@ edition = "2021"
 publish = false
 description = "Rust server embedding poc-qwen's mlx-audio engine via PyO3; streams Qwen3-TTS to the browser over WebSocket"
 
+[lib]
+name = "poc_qwen_streaming"
+path = "src/lib.rs"
+
 [[bin]]
 name = "poc-qwen-streaming"
 path = "src/main.rs"

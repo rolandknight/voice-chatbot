@@ -29,6 +29,7 @@ Kokoro TTS shim.
 cd poc
 make                # setup (venv, models, Nemotron runtime) -> build -> ollama serve + model resident -> stack up on :6210
 make client         # native mic/speaker call; INPUT_DEVICE='Jabra' OUTPUT_DEVICE='Jabra' to pick devices
+                    # from another machine: POC_BIND=0.0.0.0:6210 make up, then make client FLOWCAT_URL=http://<server-lan-ip>:6210
 make client-devices # list CoreAudio devices
 make status         # listeners, Ollama resident model, flowcat healthz
 make restart        # after `make build` or editing .env
@@ -37,15 +38,63 @@ make down
 make help
 ```
 
-`make` is idempotent: setup is stamped, `ollama` only starts `ollama serve` /
-pulls when needed, and `up` skips parts already running. The `ollama` step
-prewarms through the same `/v1` endpoint FlowCat uses with the real system
-prompt + tool schemas (`ollama_ctl.py`), and makes sure `ollama serve` runs with
-`OLLAMA_KEEP_ALIVE=-1` (a per-request pin is overwritten by every `/v1` call, so
-the model would unload after 5 idle minutes): without
-that, the first user turn pays an Ollama runner swap plus a ~2 K-token prefill
-(~8 s measured); with it the first LLM round is ~0.6 s.
-The repo-root `make poc-*` targets still work but assume a system `cargo`.
+`make` is idempotent: setup is stamped and `up` skips parts already running.
+The LLM lifecycle is the chatbot's own (ADR-0007): at start-up `flowcat-poc`
+spawns `ollama serve` if nothing answers on the base URL (`POC_OLLAMA_SUPERVISE`),
+pulls the model if missing, warms the exact system-prompt + sorted-tools prefix
+so the first turn hits the prompt cache, and verifies the model is pinned with
+the requested context. Every turn goes through Ollama's native `/api/chat`
+with `keep_alive: -1`, `num_ctx` and `think: false` on the request, so residency
+no longer depends on how `serve` was started (the `/v1` endpoint resets
+keep-alive to 5 min on each request — the cause of the old ~10 s first turns).
+On exit (`make down` → SIGTERM) it unloads the model so its ~17 GB returns and
+stops a serve it spawned. `make ollama` runs the same start-up path and exits
+(`--warm-only`). `POC_OLLAMA_UNLOAD_ON_EXIT=false` keeps the model across dev
+restarts.
+
+## Remote callers (LAN)
+
+The server binds `127.0.0.1:6210` by default. For a browser or the native
+client on another machine, bind the LAN (`POC_BIND=0.0.0.0:6210`, or a specific
+interface) — the media socket is already wildcard-bound. ICE uses host
+candidates only (no STUN/TURN): the server advertises the interface that routes
+back to each caller (loopback for same-machine peers, the LAN interface for
+remote ones; `POC_ADVERTISE_IP` overrides), and the native client binds and
+advertises the interface that routes to `--server-url`. Nothing on the offer
+endpoint is authenticated, so bind to a trusted network only.
+
+**Browsers need HTTPS.** `getUserMedia`/`enumerateDevices` exist only on secure
+origins (`https://…` or `localhost`), so a browser on another machine opening
+`http://<ip>:6210` loads the page but has no microphone API ("cannot enumerate
+audio devices"). `make up-lan` adds an HTTPS listener on `:6443` with the repo's
+self-signed dev cert (`make tls-cert`; SAN covers localhost and this Mac's LAN
+IPs): open `https://<server-lan-ip>:6443`, accept the certificate warning once,
+and the playground works (its events WebSocket switches to `wss` by itself). The
+plain `:6210` listener stays for the harness and the native client. Verified
+2026-08-25 with the native client pairing on the Mac's LAN address
+(`local_addr=192.168.0.245`) while the loopback harness kept passing.
+
+## TTS backends
+
+`POC_TTS_BACKEND` selects one of three; the other two cost nothing at build or
+run time.
+
+| backend | what runs | first audio | notes |
+|---|---|---|---|
+| `kokoro` (default) | `stubs/kokoro_shim.py` sidecar on :8880 | after each whole sentence is synthesized (~0.4 s) | CPU ONNX; no GPU memory |
+| `chatterbox` | external Chatterbox-TTS-Server on :8004 | whole sentence (1–3 s) | cloned Marvin voice; started outside `run_poc.sh` |
+| `qwen` | **in-process** Qwen3-TTS via poc-qwen-streaming's PyO3 mlx-audio engine (Cargo feature `qwen-tts`) | **streamed**: ~0.2 s to the first chunk, then chunk-by-chunk | Apple Silicon; clones `voices/<POC_QWEN_VOICE>` (babel by default); 4.3 GB active / 6.4 GB peak measured |
+
+`qwen` must be compiled in: `POC_TTS_BACKEND=qwen make build` links against
+poc-qwen's venv interpreter (`make setup` creates it when the backend is qwen)
+and enables the feature; a kokoro build carries no libpython. FlowCat loads and
+warms the model before binding (~11 s from a warm HF cache, minutes on the first
+download) and caches the `Ready.` greeting. Streaming reaches the caller through
+`TtsService::run_tts_stream` in the vendored flowcat-core: the TTS processor
+forwards frames as the engine yields them and drops the stream on barge-in,
+which stops generation after the current chunk. Tunables: `POC_QWEN_SIZE`
+(`1.7B`/`0.6B`), `POC_QWEN_INTERVAL_S` (chunk length), `POC_QWEN_CONFIG`
+(engine profile, default `poc-qwen-streaming/config.flowcat.yaml`).
 
 ## Cross-platform profile
 
@@ -76,9 +125,14 @@ frames are display-only: FlowCat sends exactly one final transcription to
 Claude Haiku after the existing Silero VAD endpoint. Selecting Moonshine does
 not run Whisper in shadow mode or decode each utterance twice.
 
-NVIDIA Nemotron Speech Streaming English 0.6B is the GPU-streaming option. A
-pinned NeMo-Speech.cpp sidecar keeps the Q8 model resident and exposes only a
-localhost WebSocket to Rust. FlowCat still owns VAD and turn boundaries:
+NVIDIA Nemotron Speech Streaming English 0.6B is the GPU-streaming option.
+`POC_STT_BACKEND=nemotron` loads the pinned NeMo-Speech.cpp Q8 model
+**in-process** through its C library (`flowcat/src/nemotron_native.rs`, Cargo
+feature `nemotron-native`, enabled by `make build` when the runtime from
+`setup_nemotron.sh` is present): one recognizer per process, one native stream
+per call on its own worker thread, no sidecar, no session limit. The earlier
+localhost WebSocket sidecar remains available as `nemotron-sidecar` (it accepts
+two concurrent sessions). FlowCat still owns VAD and turn boundaries:
 partials update the playground, while the VAD-triggered commit produces the
 single final transcript that can reach Haiku and tools. The default 560 ms
 cache window is the accuracy/latency operating point; set

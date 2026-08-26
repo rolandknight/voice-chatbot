@@ -31,9 +31,9 @@ POC_MARKER ?= smoke
 OLLAMA_URL ?= http://127.0.0.1:11434
 
 .PHONY: run setup build ollama up down restart status client client-devices client-build \
-        test test-all doctor logs clean help
+        test test-all doctor logs clean help tls-cert up-lan
 
-run: setup build ollama up  ## Install if needed, build, ensure Ollama+model, start the stack on :6210
+run: setup build up  ## Install if needed, build, start the stack on :6210 (flowcat brings up Ollama itself)
 
 setup: $(STAMP)  ## mise python 3.12, venv, deps, models, fixtures, STT sidecar runtime (idempotent)
 
@@ -44,13 +44,19 @@ $(STAMP): requirements.txt mise.toml setup.sh $(DOTENV)
 build: setup  ## Build flowcat-poc for the STT backend in .env (platform.sh picks Metal/CPU)
 	@mise exec -- ./platform.sh build
 
-ollama: setup  ## ollama serve (OLLAMA_KEEP_ALIVE=-1), pull if missing, prewarm the FlowCat prefix via /v1
-	@$(LOAD_ENV) $(PY) ollama_ctl.py ensure
+ollama: build  ## LLM ready: serve (spawned if needed), model pulled, prefix warmed, pinned — the binary's own --warm-only (ADR-0007)
+	@$(LOAD_ENV) ./$(FLOWCAT_BIN) --warm-only
 
 up: setup  ## Start STT sidecar (if nemotron) + stubs + kokoro shim + FlowCat; no-op for parts already running
 	@./run_poc.sh up
 
-down:  ## Stop everything run_poc.sh started (Ollama and Chatterbox are left alone)
+tls-cert:  ## Self-signed dev cert (SAN: localhost + this Mac's LAN IPs) in ../.certs, for LAN browsers
+	@$(MAKE) -C $(REPO) .certs/cert.pem
+
+up-lan: setup tls-cert  ## Stack reachable from the LAN: http on :6210 for tests/native client, https on :6443 for browsers
+	@POC_BIND=0.0.0.0:6210 POC_TLS_BIND=0.0.0.0:6443 POC_TLS_CERT=$(REPO)/.certs/cert.pem POC_TLS_KEY=$(REPO)/.certs/key.pem ./run_poc.sh up
+
+down:  ## Stop the stack; flowcat unloads the LLM on exit and stops an Ollama it spawned (Chatterbox is left alone)
 	@./run_poc.sh down
 
 restart: down up  ## Restart the stack, e.g. after `make build` or editing .env
@@ -75,13 +81,13 @@ client:  ## Connect mic/speaker to the running stack: make client [INPUT_DEVICE=
 	    $(if $(INPUT_DEVICE),--input-device "$(INPUT_DEVICE)",) \
 	    $(if $(OUTPUT_DEVICE),--output-device "$(OUTPUT_DEVICE)",)
 
-test: setup ollama  ## Run one pytest marker against a fresh stack (POC_MARKER=smoke|tools|duplex|wake|voice|latency|soak)
+test: setup build  ## Run one pytest marker against a fresh stack (POC_MARKER=smoke|tools|duplex|wake|voice|latency|soak)
 	@./run_poc.sh down >/dev/null 2>&1 || true
 	@./run_poc.sh up
 	@$(PY) -m pytest harness -m $(POC_MARKER) -q || { ./run_poc.sh down; exit 1; }
 	@./run_poc.sh down
 
-test-all: setup ollama  ## Full suite minus wake/voice
+test-all: setup build  ## Full suite minus wake/voice
 	@./run_poc.sh down >/dev/null 2>&1 || true
 	@./run_poc.sh up
 	@$(PY) -m pytest harness -q -m "not wake and not voice" || { ./run_poc.sh down; exit 1; }
