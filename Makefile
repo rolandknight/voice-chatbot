@@ -1,7 +1,8 @@
 # voice-chatbot — server + native WebRTC client (Cargo workspace in crates/).
 # The PoC targets live on in Makefile.old.
 #
-# Runtime artifacts (models, stubs, logs) and poc/.env are still read from poc/;
+# Runtime artifacts (models, logs) and poc/.env are still read from poc/; skills
+# run in-process (crates/server/src/skills, docs/plans/skills-in-server.md).
 # SERVER_FEATURES mirrors the Mac build profile: in-process Nemotron STT
 # (poc/.deps/nemo-speech) and Qwen3-TTS via PyO3 against crates/qwen-tts/.venv
 # (make -C crates/qwen-tts setup).
@@ -21,7 +22,7 @@ SERVER_BUILD_ENV := PYO3_PYTHON=$(QWEN_PYTHON) NEMO_SPEECH_LIB_DIR=$(NEMO_SPEECH
 comma := ,
 WS_FEATURES := $(subst $(eval) ,$(comma),$(addprefix voice-chatbot-server/,$(subst $(comma), ,$(SERVER_FEATURES))))
 
-.PHONY: build server-build client-build server stubs call devices test check clean help
+.PHONY: build server-build client-build server call devices test check clean help
 
 build: server-build client-build  ## Build server + client (release)
 
@@ -33,11 +34,6 @@ client-build:  ## Build crates/client
 
 server: server-build  ## Build if needed, then run the server (reads poc/.env)
 	./$(SERVER_BIN)
-
-stubs:  ## Start the skills stub server on :8790 (tools: time, weather, radio, Spotify)
-	@if pgrep -f "uvicorn stub_server:app" >/dev/null; then echo "stubs already running"; else \
-	  cd poc/stubs; nohup ../.venv/bin/uvicorn stub_server:app --host 127.0.0.1 --port 8790 \
-	    >../logs/stubs.log 2>&1 & echo $$! > ../logs/stubs.pid; echo "stubs started (poc/logs/stubs.log)"; fi
 
 call: build   ## Build if needed, then call the server with native audio
 	./$(CLIENT_BIN) --log-level "$(LOG_LEVEL)" call --server-url "$(SERVER_URL)" \

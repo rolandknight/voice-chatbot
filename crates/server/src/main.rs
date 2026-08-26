@@ -2,7 +2,7 @@
 //!
 //! Serves the same surface as flowcat-server's webrtc mode (`GET /` playground,
 //! `POST /webrtc/offer`, `GET /webrtc/events/{pc_id}`, `GET /healthz`) but with
-//! Babel's shape: a no-graph brain, skills relayed to the local stub server, and
+//! Babel's shape: a no-graph brain, in-process skills (`skills/`), and
 //! directly-constructed local services (selectable local STT, OpenRouter LLM,
 //! Kokoro-shim TTS) — bypassing `factory::cascaded`, which can't set Kokoro's
 //! base_url and demands dummy API keys for keyless local providers.
@@ -19,6 +19,7 @@ mod nemotron_native;
 mod ollama_serve;
 mod playground;
 mod session;
+mod skills;
 mod stt;
 mod tts_chatterbox;
 #[cfg(feature = "qwen-tts")]
@@ -37,7 +38,7 @@ use serde_json::json;
 
 use flowcat_server::events::EventRegistry;
 
-use crate::session::StubSession;
+use crate::session::SkillSession;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SttBackend {
@@ -162,7 +163,7 @@ pub struct PocConfig {
 pub struct PocState {
     pub cfg: PocConfig,
     pub registry: Arc<EventRegistry>,
-    pub session: Arc<StubSession>,
+    pub session: Arc<SkillSession>,
     pub stt: LoadedStt,
     pub ready_pcm: Option<Arc<[i16]>>,
     pub next_run: AtomicI64,
@@ -396,15 +397,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let skills_path = env_or(
-        "POC_SKILLS",
-        &poc_dir.join("stubs/skills.json").to_string_lossy(),
-    );
-    let session = StubSession::new(
-        &std::fs::read_to_string(&skills_path)?,
-        env_or("POC_STUBS_URL", "http://127.0.0.1:8790"),
-        poc_dir.join("logs/artifacts"),
-    )?;
+    let session = SkillSession::new(build_skills()?, poc_dir.join("logs/artifacts"));
 
     // ADR-0007: the chatbot owns its LLM's lifecycle. Ensure a serve, pull the
     // model if missing, warm the exact prefix, verify residency — before the
@@ -711,7 +704,7 @@ async fn shutdown_signal() {
 /// handle so shutdown can stop what we started.
 async fn start_ollama(
     cfg: &PocConfig,
-    session: &StubSession,
+    session: &SkillSession,
     poc_dir: &std::path::Path,
 ) -> Result<ollama_serve::OllamaServe, Box<dyn std::error::Error>> {
     use flowcat_core::SessionSource;
@@ -773,6 +766,27 @@ async fn start_ollama(
         None => return Err(format!("ollama: {} not resident after warm", cfg.llm_model).into()),
     }
     Ok(serve)
+}
+
+/// Construct the skills this process runs. Gating happens here, once: a skill
+/// that is not built is not advertised (docs/plans/skills-in-server.md).
+fn build_skills() -> Result<skills::Registry, Box<dyn std::error::Error>> {
+    use std::sync::Arc;
+    let mut list: Vec<Arc<dyn skills::Skill>> = vec![
+        Arc::new(skills::time::GetCurrentTime),
+        Arc::new(skills::time::GetCurrentDate),
+        Arc::new(skills::weather::GetWeather::new(env_or(
+            "POC_WEATHER_DEFAULT_LOCATION",
+            "",
+        ))),
+    ];
+    let provider = skills::web_search::Provider::parse(&env_or("POC_WEB_SEARCH_PROVIDER", ""))?;
+    list.push(Arc::new(skills::web_search::WebSearch::new(
+        provider,
+        env_or("BRAVE_API_KEY", ""),
+        env_or("TAVILY_API_KEY", ""),
+    )));
+    Ok(skills::Registry::new(include_str!("../skills.json"), list)?)
 }
 
 async fn healthz(State(state): State<Arc<PocState>>) -> Json<serde_json::Value> {

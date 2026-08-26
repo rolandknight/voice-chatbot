@@ -36,6 +36,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
 dotenvy = "0.15"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 futures = "0.3"
 qwen-tts = { path = "../qwen-tts", optional = true }
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }

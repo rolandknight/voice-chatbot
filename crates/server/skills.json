@@ -1,0 +1,117 @@
+[
+  {
+    "name": "get_current_time",
+    "description": "Get the current local time. Call this any time the user asks what time it is or how late it is.",
+    "parameters": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    }
+  },
+  {
+    "name": "get_current_date",
+    "description": "Get today's date including the day of the week. Call this when the user asks what day it is, today's date, or what month/year it is.",
+    "parameters": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    }
+  },
+  {
+    "name": "set_timer",
+    "description": "Start a countdown timer. When it expires the assistant will speak the alert out loud. Use for any request like 'set a timer', 'remind me in N minutes', 'wake me in N minutes'.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "minutes": {
+          "type": "number",
+          "description": "Duration of the timer in minutes. Can be fractional."
+        },
+        "label": {
+          "type": "string",
+          "description": "Optional short label spoken when the timer fires (e.g. 'tea', 'standup')."
+        }
+      },
+      "required": ["minutes"]
+    }
+  },
+  {
+    "name": "get_weather",
+    "description": "Get current weather conditions for a location. Use for any question about temperature, rain, snow, wind, or forecasts. If the user doesn't name a location, pass an empty string and the assistant will use the default or auto-detected current location.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "location": {
+          "type": "string",
+          "description": "City name, optionally with region/country (e.g. 'San Francisco' or 'Paris, France'). Empty string to use the default or auto-detected location."
+        }
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "play_bbc_radio",
+    "description": "Start streaming a live BBC radio station on the connected USB speaker. Use this whenever the user asks to play, put on, tune to, or switch to a BBC station (Radio 1, 1Xtra, Radio 2, Radio 3, Radio 4, Radio 4 Extra, Radio 5 Live, Radio 5 Sports Extra, 6 Music, Asian Network, or the World Service), or generally asks to hear the news.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "station": {
+          "type": "string",
+          "description": "The station the user named, verbatim. Examples: 'Radio 1', 'BBC Radio 4', 'Radio 4 Extra', 'World Service', '6 Music', '5 Live', '1Xtra'."
+        }
+      },
+      "required": ["station"]
+    }
+  },
+  {
+    "name": "stop_bbc_radio",
+    "description": "Stop whatever BBC audio is currently playing — live radio or an on-demand show/podcast. Use this when the user says 'stop', 'stop the radio', 'stop the show', 'turn it off', 'silence', 'kill the radio', or anything similar while audio is playing.",
+    "parameters": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    }
+  },
+  {
+    "name": "play_spotify",
+    "description": "Play music from Spotify on the connected USB speaker. Use whenever the user asks to play a song, album, artist, or generally 'something by X' or 'a bit of Y' that isn't a BBC radio station. Examples: 'play Radiohead', 'play Fake Plastic Trees', 'put on some jazz', 'play the new Taylor Swift album'.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "What the user wants to play, verbatim: a song title, artist, album, or descriptive phrase. e.g. 'Radiohead', 'Karma Police', 'OK Computer Radiohead', 'some Bach'."
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["track", "album", "artist", "any"],
+          "description": "What to look for. 'track' for a specific song, 'album' for a named album, 'artist' to play an artist's top songs, 'any' (default) when unclear."
+        }
+      },
+      "required": ["query"]
+    }
+  },
+  {
+    "name": "pause_spotify",
+    "description": "Pause Spotify playback. Use when the user says 'pause', 'pause the music', 'pause Spotify', 'hold on', 'wait' while music is playing. For stopping BBC radio use stop_bbc_radio.",
+    "parameters": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    }
+  },
+  {
+    "name": "web_search",
+    "description": "Search the web for current information. Use this for news, recent events, sports scores, prices, or any question whose answer may have changed recently or is outside the model's training data. Do NOT use it for things you already know or for simple chit-chat.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Natural-language search query."
+        }
+      },
+      "required": ["query"]
+    }
+  }
+]
