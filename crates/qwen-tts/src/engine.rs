@@ -1,6 +1,6 @@
 //! The one thread that talks to Python.
 //!
-//! MLX keeps per-thread Metal state, and poc-qwen learned (commit faca18a)
+//! MLX keeps per-thread Metal state, and the Qwen PoC learned (commit faca18a)
 //! that touching it from short-lived pool threads segfaults. So: a single
 //! dedicated OS thread attaches to the interpreter, builds the bridge, and
 //! serves commands from a channel for the life of the process. tokio never
@@ -197,18 +197,18 @@ fn init_bridge<'py>(
     // An embedded interpreter has an empty argv and reports this binary as
     // sys.executable; libraries that spawn `sys.executable -c ...` would run
     // the server. Point both at sane values (the interpreter we linked).
-    sys.setattr("argv", PyList::new(py, ["poc-qwen-streaming"])?)?;
+    sys.setattr("argv", PyList::new(py, ["qwen-tts"])?)?;
     let python = env!("POC_PYTHON");
     if std::path::Path::new(python).exists() {
         sys.setattr("executable", python)?;
     }
-    let module = py.import("poc_qwen_streaming.bridge").map_err(|e| {
+    let module = py.import("qwen_tts.bridge").map_err(|e| {
         let tb = e
             .traceback(py)
             .and_then(|t| t.format().ok())
             .unwrap_or_default();
         anyhow!(
-            "importing poc_qwen_streaming.bridge failed: {e}\n{tb}\nsys.path={:?}",
+            "importing qwen_tts.bridge failed: {e}\n{tb}\nsys.path={:?}",
             paths
         )
     })?;
@@ -287,7 +287,7 @@ fn handle(py: Python<'_>, bridge: &Bound<'_, PyAny>, cmd: Cmd) {
         }
         Cmd::BenchSentences(reply) => {
             let r = py
-                .import("poc_qwen.bench")
+                .import("qwen_tts.bench")
                 .and_then(|m| m.getattr("SENTENCES"))
                 .and_then(|s| s.extract::<Vec<(String, String)>>())
                 .map_err(pyerr(py));

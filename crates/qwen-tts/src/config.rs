@@ -1,5 +1,5 @@
 //! The Rust-side view of config.yaml. The engine sections (models:,
-//! generation:, voices:, transcribe:) are read by poc-qwen's Python loader
+//! generation:, voices:, transcribe:) are read by qwen_tts.config (python/)
 //! from the same file; only what the server needs is deserialised here.
 
 use anyhow::{Context, Result};

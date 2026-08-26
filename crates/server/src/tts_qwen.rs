@@ -1,6 +1,6 @@
 //! Qwen3-TTS streaming backend (`POC_TTS_BACKEND=qwen`, Cargo feature `qwen-tts`).
 //!
-//! poc-qwen-streaming's engine runs in-process: one Python thread owns the GIL
+//! The qwen-tts engine runs in-process: one Python thread owns the GIL
 //! and mlx-audio's own worker thread owns Metal (see its `engine.rs`). Each
 //! synthesis is a clone from the configured preset voice; chunks arrive on an
 //! `mpsc` receiver as the model emits them (~0.2 s to the first one) and are

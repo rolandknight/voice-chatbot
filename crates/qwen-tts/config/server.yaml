@@ -1,10 +1,9 @@
-# Server profile for the in-process Qwen3-TTS backend (crates/qwen-tts):
-# clone-only, one model resident, no transcription. Copied from
-# poc-qwen-streaming/config.flowcat.yaml; measured there 2026-08-25.
-# poc-qwen-streaming configuration. Read by both the Rust server (server:,
-# python:, bench:) and poc-qwen's config loader for the engine (models:,
-# generation:, voices:, transcribe:). Scalars in the engine sections can be
-# overridden with POC_QWEN_<SECTION>_<KEY>=value as in poc-qwen.
+# Server profile for the in-process Qwen3-TTS backend: clone-only, one model
+# resident, no transcription. Numbers measured on the M4 Max 2026-08-25.
+# Read by both the Rust side (server:, python:, bench:) and qwen_tts.config
+# for the engine (models:, generation:, voices:, preload:, transcribe:).
+# Scalars in the engine sections can be overridden with
+# POC_QWEN_<SECTION>_<KEY>=value.
 server:
   host: 127.0.0.1
   port: 8008
@@ -13,8 +12,7 @@ python:
   # Pushed onto sys.path before importing the bridge. Relative to this file.
   paths:
     - ../../../poc-qwen/.venv/lib/python3.12/site-packages
-    - ../../../poc-qwen
-    - ../../qwen-tts/python
+    - ../python
 
 models:
   clone_default: mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16

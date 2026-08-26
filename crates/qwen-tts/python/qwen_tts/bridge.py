@@ -1,9 +1,8 @@
 """Python side of the PyO3 embed.
 
 The Rust server owns one OS thread that holds the GIL and calls the methods of
-`Bridge`. `Bridge` wraps poc-qwen's `Qwen3Engine` (imported from ../poc-qwen,
-never copied) and adds the one thing the Gradio app lacked: a single streaming
-generator for all three tabs. Everything MLX still runs on the engine's
+`Bridge`. `Bridge` wraps `Qwen3Engine` (engine.py) and adds a single streaming
+generator for all three tabs (clone, custom voice, voice design). Everything MLX still runs on the engine's
 `mlx-worker` daemon thread; chunks cross to the caller through a queue, and the
 queue waits release the GIL, so the Rust thread blocking here never starves it.
 """
@@ -19,9 +18,9 @@ from typing import Iterator
 
 import numpy as np
 
-from poc_qwen.config import load_config, voice_dirs
-from poc_qwen.engine import LANGUAGES, SAMPLE_RATE, SIZES, Qwen3Engine, discover_voices, lang_key, sidecar_transcript
-from poc_qwen.text import chunk_text
+from .config import load_config, voice_dirs
+from .engine import LANGUAGES, SAMPLE_RATE, SIZES, Qwen3Engine, discover_voices, lang_key, sidecar_transcript
+from .text import chunk_text
 
 _DONE = object()
 

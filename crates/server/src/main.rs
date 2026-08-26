@@ -142,7 +142,7 @@ pub struct PocConfig {
     pub tts_backend: String,
     pub chatterbox_url: String,
     pub chatterbox_voice: String,
-    /// Qwen3-TTS (`qwen`): engine profile (poc-qwen-streaming config), preset
+    /// Qwen3-TTS (`qwen`): engine profile (crates/qwen-tts/config/server.yaml), preset
     /// voice name, model size, streamed-chunk interval.
     pub qwen_config: String,
     pub qwen_voice: String,
@@ -308,7 +308,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         qwen_config: env_or(
             "POC_QWEN_CONFIG",
             &manifest_dir
-                .join("config/qwen.yaml")
+                .join("../qwen-tts/config/server.yaml")
                 .to_string_lossy(),
         ),
         qwen_voice: env_or("POC_QWEN_VOICE", "babel"),
@@ -801,7 +801,7 @@ async fn events_ws(
     }
 }
 
-/// Start poc-qwen-streaming's engine in-process, wait for its preload (model
+/// Start the qwen-tts engine in-process, wait for its preload (model
 /// load + warm-up + preset voice priming, ~11 s), resolve the configured voice
 /// from the engine catalog, and cache the `Ready.` greeting.
 #[cfg(feature = "qwen-tts")]
