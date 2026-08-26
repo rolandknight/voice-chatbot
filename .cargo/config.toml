@@ -1,0 +1,4 @@
+# whisper-rs-sys: use the crate's pregenerated bindings; the bindgen path needs
+# a shared libclang that is not guaranteed on the build hosts.
+[env]
+WHISPER_DONT_GENERATE_BINDINGS = "1"

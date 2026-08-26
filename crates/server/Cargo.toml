@@ -1,0 +1,50 @@
+[package]
+name = "voice-chatbot-server"
+version = "0.1.0"
+edition = "2021"
+publish = false
+build = "build.rs"
+description = "Voice chatbot server: WebRTC full-duplex STT -> LLM -> TTS on FlowCat"
+
+[[bin]]
+name = "voice-chatbot-server"
+path = "src/main.rs"
+
+[dependencies]
+flowcat-core = { git = "https://github.com/AreevAI/flowcat.git", rev = "4ff03f3ef8e179d988a20c6f46498dfb9419c1c1", features = ["vad-ort"] }
+flowcat-services = { git = "https://github.com/AreevAI/flowcat.git", rev = "4ff03f3ef8e179d988a20c6f46498dfb9419c1c1", default-features = false, features = [
+    "llm-openrouter",
+    "tts-kokoro",
+] }
+whisper-rs = "0.16"
+oww_rs = { package = "oww-rs", path = "../../third_party/oww_rs/crates/oww" }
+flowcat-transports = { git = "https://github.com/AreevAI/flowcat.git", rev = "4ff03f3ef8e179d988a20c6f46498dfb9419c1c1", default-features = false, features = [
+    "webrtc-str0m",
+] }
+flowcat-server = { git = "https://github.com/AreevAI/flowcat.git", rev = "4ff03f3ef8e179d988a20c6f46498dfb9419c1c1", default-features = false, features = [
+    "webrtc-helper",
+] }
+
+axum = { version = "0.8", features = ["ws"] }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
+dotenvy = "0.15"
+futures = "0.3"
+qwen-tts = { path = "../qwen-tts", optional = true }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+
+[features]
+moonshine = []
+metal = ["whisper-rs/metal"]
+cuda = ["whisper-rs/cuda"]
+# Qwen3-TTS in-process via crates/qwen-tts (PyO3; set PYO3_PYTHON to poc-qwen's venv).
+qwen-tts = ["dep:qwen-tts"]
+# In-process Nemotron STT through NeMo-Speech.cpp's C ABI (NEMO_SPEECH_LIB_DIR).
+nemotron-native = []
