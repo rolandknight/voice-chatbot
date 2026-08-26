@@ -248,13 +248,7 @@ mod network_tests {
     async fn network_duckduckgo_instant_answer() {
         let s = WebSearch::new(Provider::DuckDuckGo, String::new(), String::new());
         let out = s
-            .call(
-                &json!({"query": "Eiffel Tower"}),
-                &CallCtx {
-                    run_id: 0,
-                    frames: None,
-                },
-            )
+            .call(&json!({"query": "Eiffel Tower"}), &CallCtx::detached(0))
             .await;
         assert!(!out.starts_with("I couldn't reach"), "{out}");
         assert!(out.len() > 20, "{out}");

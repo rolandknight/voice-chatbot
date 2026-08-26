@@ -1,4 +1,7 @@
-//! Human-readable rendering of FlowCat's server-to-client event WebSocket.
+//! Human-readable rendering of FlowCat's server-to-client event WebSocket,
+//! plus dispatch of the server's media commands to the local player.
+
+use std::time::Duration;
 
 use futures::StreamExt;
 use reqwest::Url;
@@ -6,7 +9,9 @@ use serde_json::Value;
 use tokio::sync::watch;
 use tokio_tungstenite::tungstenite::Message;
 
-pub async fn run(url: Url, mut shutdown: watch::Receiver<bool>) {
+use crate::media::MediaPlayer;
+
+pub async fn run(url: Url, mut shutdown: watch::Receiver<bool>, mut media: Option<MediaPlayer>) {
     let (mut socket, _) = match tokio_tungstenite::connect_async(url.as_str()).await {
         Ok(connection) => connection,
         Err(error) => {
@@ -14,6 +19,7 @@ pub async fn run(url: Url, mut shutdown: watch::Receiver<bool>) {
             return;
         }
     };
+    let mut housekeeping = tokio::time::interval(Duration::from_secs(1));
 
     loop {
         tokio::select! {
@@ -23,6 +29,11 @@ pub async fn run(url: Url, mut shutdown: watch::Receiver<bool>) {
                     return;
                 }
             }
+            _ = housekeeping.tick() => {
+                if let Some(line) = media.as_mut().and_then(MediaPlayer::tick) {
+                    println!("{line}");
+                }
+            }
             message = socket.next() => {
                 match message {
                     Some(Ok(Message::Text(text))) => {
@@ -30,6 +41,11 @@ pub async fn run(url: Url, mut shutdown: watch::Receiver<bool>) {
                             Ok(Some(line)) => println!("{line}"),
                             Ok(None) => {}
                             Err(error) => tracing::warn!(%error, "ignoring malformed FlowCat event"),
+                        }
+                        if let Some(player) = media.as_mut() {
+                            if let Some(line) = dispatch_media(player, &text) {
+                                println!("{line}");
+                            }
                         }
                     }
                     Some(Ok(Message::Close(_))) | None => return,
@@ -42,6 +58,15 @@ pub async fn run(url: Url, mut shutdown: watch::Receiver<bool>) {
             }
         }
     }
+}
+
+/// Hand `{type, payload}` to the player (media commands and the speaking
+/// boundaries it ducks on).
+fn dispatch_media(player: &mut MediaPlayer, input: &str) -> Option<String> {
+    let message: Value = serde_json::from_str(input).ok()?;
+    let kind = message.get("type").and_then(Value::as_str)?;
+    let payload = message.get("payload").cloned().unwrap_or(Value::Null);
+    player.on_event(kind, &payload)
 }
 
 pub fn render(input: &str) -> anyhow::Result<Option<String>> {

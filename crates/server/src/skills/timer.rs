@@ -125,6 +125,7 @@ mod tests {
         let ctx = CallCtx {
             run_id: 7,
             frames: Some(tx),
+            media: None,
         };
         let reply = SetTimer
             .call(&json!({"minutes": 0.5, "label": "tea"}), &ctx)
@@ -140,10 +141,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_bad_durations_and_missing_pipeline() {
-        let ctx = CallCtx {
-            run_id: 1,
-            frames: None,
-        };
+        let ctx = CallCtx::detached(1);
         assert_eq!(
             SetTimer.call(&json!({"minutes": -1}), &ctx).await,
             "The timer duration needs to be greater than zero."

@@ -306,6 +306,9 @@ pub async fn offer(
     let brain = crate::brain::BabelBrain::new(cfg.system_prompt.clone());
     let session = state.session.clone();
 
+    // Skills drive client-side playback (radio, shows, sound effects) over the
+    // same events channel the RTVI observer publishes on.
+    let media = Arc::new(crate::media::MediaController::new(events.clone()));
     let sink: Arc<dyn RtviSink> = Arc::new(RtfSink::new(events));
     let observers: Vec<Arc<dyn FrameObserver>> = vec![Arc::new(RtviObserver::new(sink))];
 
@@ -339,10 +342,13 @@ pub async fn offer(
         match built {
             Ok(task) => {
                 // Skills that act later (timers) find this call's pipeline here.
-                hangups
-                    .session
-                    .calls()
-                    .register(run_id, task.task.queue_sender());
+                hangups.session.calls().register(
+                    run_id,
+                    crate::skills::CallHandle {
+                        frames: task.task.queue_sender(),
+                        media,
+                    },
+                );
                 let token = task.task.cancel_token();
                 let watcher = tokio::spawn(async move {
                     hangup.notified().await;

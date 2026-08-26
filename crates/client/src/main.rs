@@ -7,6 +7,7 @@ use tokio::sync::watch;
 use tracing_subscriber::EnvFilter;
 use voice_chatbot_client::audio::{AudioDevices, AudioIoParts};
 use voice_chatbot_client::events;
+use voice_chatbot_client::media::MediaPlayer;
 use voice_chatbot_client::peer::PendingPeer;
 use voice_chatbot_client::protocol::{exchange_offer, require_healthy, ServerEndpoints};
 
@@ -134,7 +135,16 @@ async fn run_call(
 
     let events_url = endpoints.events_url(&response.pc_id)?;
     let (event_shutdown_tx, event_shutdown_rx) = watch::channel(false);
-    let event_task = tokio::spawn(events::run(events_url, event_shutdown_rx));
+    // Radio/shows/sound effects the server's skills start play here via mpv,
+    // on the call's output device. Without mpv the call still works; media
+    // commands are logged and dropped.
+    let media = if MediaPlayer::is_available() {
+        Some(MediaPlayer::new(Some(&output_device.name)))
+    } else {
+        tracing::warn!("mpv not found; BBC radio, shows and sound effects will not play (brew/apt install mpv)");
+        None
+    };
+    let event_task = tokio::spawn(events::run(events_url, event_shutdown_rx, media));
 
     streams.start()?;
     eprintln!("audio devices started; negotiating WebRTC (press Ctrl-C to hang up)");

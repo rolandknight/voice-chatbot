@@ -4,7 +4,7 @@
 # The poc-* trees keep their own manifests and are not members here.
 [workspace]
 resolver = "2"
-members = ["crates/server", "crates/client", "crates/qwen-tts", "qwen-tts-tester"]
+members = ["crates/protocol", "crates/server", "crates/client", "crates/qwen-tts", "qwen-tts-tester"]
 exclude = ["third_party", "poc", "poc-qwen-streaming"]
 
 # Vendored flowcat-core carries Babel's extra input-processor seam (wake-word

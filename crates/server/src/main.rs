@@ -11,6 +11,7 @@ mod brain;
 mod call;
 mod llm;
 mod llm_ollama;
+mod media;
 #[cfg(feature = "moonshine")]
 mod moonshine;
 mod nemotron;
@@ -179,6 +180,15 @@ pub struct PocState {
 
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+/// Boolean env switch: `off|false|0|no` → false, `on|true|1|yes` → true.
+fn env_flag(key: &str, default: bool) -> bool {
+    match env_or(key, "").trim().to_ascii_lowercase().as_str() {
+        "" => default,
+        "off" | "false" | "0" | "no" => false,
+        _ => true,
+    }
 }
 
 fn require_nonempty(value: &str, key: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -787,6 +797,15 @@ fn build_skills() -> Result<skills::Registry, Box<dyn std::error::Error>> {
         env_or("BRAVE_API_KEY", ""),
         env_or("TAVILY_API_KEY", ""),
     )));
+    // Playback happens on the native client (mpv); the browser playground has
+    // no media, so these can be switched off for browser-only setups.
+    if env_flag("POC_SKILLS_RADIO", true) {
+        list.push(Arc::new(skills::radio::PlayBbcRadio::new()));
+        list.push(Arc::new(skills::radio::StopBbcRadio));
+    }
+    if env_flag("POC_SKILLS_SHOWS", true) {
+        list.push(Arc::new(skills::shows::PlayBbcShow::new()));
+    }
     Ok(skills::Registry::new(include_str!("../skills.json"), list)?)
 }
 

@@ -7,6 +7,9 @@
 //! (config/credentials): a skill that is not constructed is not advertised.
 //! The tool list never changes per turn.
 
+pub mod alias;
+pub mod radio;
+pub mod shows;
 pub mod time;
 pub mod timer;
 pub mod weather;
@@ -23,6 +26,8 @@ use tokio::sync::mpsc;
 use flowcat_core::processor::frame::Frame;
 use flowcat_core::session::ToolDecl;
 
+use crate::media::MediaController;
+
 /// What a skill gets per invocation. Grows with the tiers in the plan (media
 /// controller, per-call state).
 pub struct CallCtx {
@@ -30,19 +35,52 @@ pub struct CallCtx {
     /// Head-injection queue of this call's pipeline (`PipelineTask::queue_sender`),
     /// for skills that speak later (timers). `None` outside a live call.
     pub frames: Option<mpsc::UnboundedSender<Frame>>,
+    /// Media playback on this call's client. `None` outside a live call.
+    pub media: Option<Arc<MediaController>>,
 }
 
-/// Per-call handles a skill may need, registered by `call.rs` for the life of
-/// the call. `SessionSource::tool_call` only receives the `run_id`, so this is
-/// how a tool call finds its own pipeline.
+impl CallCtx {
+    /// Outside a live call (tests, warm-up).
+    pub fn detached(run_id: i64) -> Self {
+        Self {
+            run_id,
+            frames: None,
+            media: None,
+        }
+    }
+
+    /// Before starting one audio source, silence the others: the Python
+    /// handlers cross-stopped radio/shows and Spotify both ways.
+    pub async fn stop_other_audio(&self) {
+        if let Some(m) = &self.media {
+            m.stop();
+        }
+        self.stop_spotify().await;
+    }
+
+    /// Stop Spotify if it is playing; true when it was. Wired in tier D.
+    pub async fn stop_spotify(&self) -> bool {
+        false
+    }
+}
+
+/// Handles `call.rs` registers for the life of a call.
+#[derive(Clone)]
+pub struct CallHandle {
+    pub frames: mpsc::UnboundedSender<Frame>,
+    pub media: Arc<MediaController>,
+}
+
+/// Per-call handles a skill may need. `SessionSource::tool_call` only
+/// receives the `run_id`, so this is how a tool call finds its own call.
 #[derive(Default)]
 pub struct CallRegistry {
-    calls: Mutex<HashMap<i64, mpsc::UnboundedSender<Frame>>>,
+    calls: Mutex<HashMap<i64, CallHandle>>,
 }
 
 impl CallRegistry {
-    pub fn register(&self, run_id: i64, frames: mpsc::UnboundedSender<Frame>) {
-        self.calls.lock().unwrap().insert(run_id, frames);
+    pub fn register(&self, run_id: i64, handle: CallHandle) {
+        self.calls.lock().unwrap().insert(run_id, handle);
     }
 
     pub fn unregister(&self, run_id: i64) {
@@ -50,9 +88,11 @@ impl CallRegistry {
     }
 
     pub fn ctx(&self, run_id: i64) -> CallCtx {
+        let handle = self.calls.lock().unwrap().get(&run_id).cloned();
         CallCtx {
             run_id,
-            frames: self.calls.lock().unwrap().get(&run_id).cloned(),
+            frames: handle.as_ref().map(|h| h.frames.clone()),
+            media: handle.map(|h| h.media),
         }
     }
 }
@@ -178,10 +218,7 @@ mod tests {
         let r = Registry::new(JSON, vec![Arc::new(Fake("a"))]).unwrap();
         let names: Vec<_> = r.decls().into_iter().map(|d| d.name).collect();
         assert_eq!(names, vec!["a"]);
-        let ctx = CallCtx {
-            run_id: 1,
-            frames: None,
-        };
+        let ctx = CallCtx::detached(1);
         assert_eq!(r.call("a", &Value::Null, &ctx).await, "a ran");
         assert_eq!(
             r.call("b", &Value::Null, &ctx).await,

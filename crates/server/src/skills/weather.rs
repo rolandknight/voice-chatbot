@@ -356,24 +356,12 @@ mod network_tests {
     async fn network_weather_for_a_named_city() {
         let w = GetWeather::new(String::new());
         let out = w
-            .call(
-                &json!({"location": "Paris, France"}),
-                &CallCtx {
-                    run_id: 0,
-                    frames: None,
-                },
-            )
+            .call(&json!({"location": "Paris, France"}), &CallCtx::detached(0))
             .await;
         assert!(out.ends_with("in Paris right now."), "{out}");
         assert!(out.contains("degrees"), "{out}");
         let out = w
-            .call(
-                &json!({"location": "Xyzzyqwv"}),
-                &CallCtx {
-                    run_id: 0,
-                    frames: None,
-                },
-            )
+            .call(&json!({"location": "Xyzzyqwv"}), &CallCtx::detached(0))
             .await;
         assert_eq!(out, "I couldn't find a place called Xyzzyqwv.");
     }

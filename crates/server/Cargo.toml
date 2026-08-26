@@ -39,6 +39,8 @@ dotenvy = "0.15"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 futures = "0.3"
 qwen-tts = { path = "../qwen-tts", optional = true }
+voice-chatbot-protocol = { path = "../protocol" }
+roxmltree = "0.20"
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 
 [dev-dependencies]
