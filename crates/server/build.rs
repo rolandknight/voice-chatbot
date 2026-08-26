@@ -68,7 +68,7 @@ fn require_file(dir: &Path, name: &str) {
     println!("cargo:rerun-if-changed={}", path.display());
 }
 
-/// `qwen-tts`: the binary embeds Python (poc-qwen-streaming's PyO3 engine).
+/// `qwen-tts`: the binary embeds Python (crates/qwen-tts's PyO3 engine).
 /// pyo3 links against the interpreter named by PYO3_PYTHON but emits no rpath,
 /// and a dependency's `cargo:rustc-link-arg` is not transitive, so add
 /// libpython's directory to this package's link line (binary and tests) here —

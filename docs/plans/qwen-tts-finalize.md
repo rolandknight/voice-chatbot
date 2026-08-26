@@ -1,6 +1,10 @@
 # Plan: finalize the Qwen3-TTS backend
 
-Status: proposed 2026-08-26. Makes `crates/qwen-tts` self-contained (Rust
+Status: implemented 2026-08-26 on branch `python-cleanup` (steps 1–5; the
+config move of step 4 landed with step 1). Kept as the record of the layout
+and its reasons.
+
+Originally: Makes `crates/qwen-tts` self-contained (Rust
 and Python halves, own venv) and adds a top-level `qwen-tts-tester/` dev
 tool built from copies of `poc-qwen-streaming`'s GUI and bench. **No `poc*`
 directory is touched**: everything is copied, nothing moved or deleted.
@@ -91,9 +95,9 @@ crates/qwen-tts/                # the library the server embeds — Rust + Pytho
 qwen-tts-tester/                # dev tool: the streaming GUI + bench (copied from poc-qwen-streaming)
   Cargo.toml                    # workspace member; qwen-tts = { path = "../crates/qwen-tts" }, axum, tower-http
   Makefile                      # run, explore, bench, info (all `make -C ../crates/qwen-tts setup` first)
-  config/
-    gui.yaml                    # poc-qwen-streaming/config.yaml
-    explore.yaml                # poc-qwen-streaming/config.explore.yaml
+  gui.yaml                      # poc-qwen-streaming/config.yaml (flat: ui/, reports/, uploads/ resolve next to the profile)
+  explore.yaml                  # poc-qwen-streaming/config.explore.yaml
+  build.rs                      # libpython rpath (a dependency's rustc-link-arg is not transitive)
   src/
     main.rs                     # serve | bench | info
     server.rs bench.rs          # from poc-qwen-streaming/src

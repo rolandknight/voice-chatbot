@@ -44,7 +44,7 @@ tokio-tungstenite = { version = "0.30", default-features = false, features = ["c
 moonshine = []
 metal = ["whisper-rs/metal"]
 cuda = ["whisper-rs/cuda"]
-# Qwen3-TTS in-process via crates/qwen-tts (PyO3; set PYO3_PYTHON to poc-qwen's venv).
+# Qwen3-TTS in-process via crates/qwen-tts (PyO3; PYO3_PYTHON = crates/qwen-tts/.venv/bin/python).
 qwen-tts = ["dep:qwen-tts"]
 # In-process Nemotron STT through NeMo-Speech.cpp's C ABI (NEMO_SPEECH_LIB_DIR).
 nemotron-native = []

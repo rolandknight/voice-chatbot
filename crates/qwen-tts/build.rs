@@ -1,7 +1,7 @@
 //! Add libpython's directory to the binary's rpath so the embedded interpreter
 //! resolves at run time without DYLD_LIBRARY_PATH. pyo3 already links against
-//! the interpreter named by PYO3_PYTHON (the Makefile points it at poc-qwen's
-//! mise Python 3.12); it only emits the link search path, not an rpath.
+//! the interpreter named by PYO3_PYTHON (the Makefile points it at this crate's
+//! .venv, mise Python 3.12); it only emits the link search path, not an rpath.
 
 use std::process::Command;
 

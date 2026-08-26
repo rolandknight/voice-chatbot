@@ -1,9 +1,8 @@
 # Voice exploration profile: preload only the CustomVoice model (built-in
 # speakers); Clone/Design tabs load their models on first use (LRU of 2).
-# poc-qwen-streaming configuration. Read by both the Rust server (server:,
-# python:, bench:) and poc-qwen's config loader for the engine (models:,
-# generation:, voices:, transcribe:). Scalars in the engine sections can be
-# overridden with POC_QWEN_<SECTION>_<KEY>=value as in poc-qwen.
+# Read by the Rust side (server:, python:, bench:) and by qwen_tts.config for
+# the engine (models:, generation:, voices:, preload:, transcribe:). Scalars in
+# the engine sections can be overridden with POC_QWEN_<SECTION>_<KEY>=value.
 server:
   host: 127.0.0.1
   port: 8008
