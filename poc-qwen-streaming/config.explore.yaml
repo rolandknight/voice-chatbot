@@ -1,0 +1,56 @@
+# Voice exploration profile: preload only the CustomVoice model (built-in
+# speakers); Clone/Design tabs load their models on first use (LRU of 2).
+# poc-qwen-streaming configuration. Read by both the Rust server (server:,
+# python:, bench:) and poc-qwen's config loader for the engine (models:,
+# generation:, voices:, transcribe:). Scalars in the engine sections can be
+# overridden with POC_QWEN_<SECTION>_<KEY>=value as in poc-qwen.
+server:
+  host: 127.0.0.1
+  port: 8008
+
+python:
+  # Pushed onto sys.path before importing the bridge. Relative to this file.
+  paths:
+    - ../poc-qwen/.venv/lib/python3.12/site-packages
+    - ../poc-qwen
+    - .
+
+models:
+  clone_default: mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16
+  clone_small: mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16
+  custom_voice: mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-bf16
+  voice_design: mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16
+  # All three demo models resident (3 x ~4.5 GiB bf16) so hopping between
+  # tabs never reloads; peak was 10.4 GiB with two on the M4 Max.
+  max_resident: 2
+
+generation:
+  temperature: 0.9
+  top_p: 0.9
+  max_chunk_chars: 300
+  crossfade_ms: 20
+  # Seconds of audio per streamed chunk (mlx-audio streaming_interval).
+  # 0.32 s measured TTFC 0.12 s (0.6B) / 0.18 s (1.7B) on the M4 Max.
+  streaming_interval_s: 0.32
+
+voices:
+  paths: [../voices]
+
+# Done on start-up, right after the server binds (requests queue behind it).
+# Each model is loaded + warmed, then one short clone per listed preset voice
+# primes mlx-audio's ICL reference cache, so the first click pays ~0.2 s, not
+# the ~6 s of load + kernel compilation + reference encoding.
+preload:
+  enabled: true
+  models: [custom_voice]
+  voices: all          # or a list of preset names
+  size: "1.7B"
+
+transcribe:
+  enabled: false
+  model: mlx-community/whisper-base.en-mlx
+
+bench:
+  voice: one-one
+  size: "1.7B"
+  repeats: 2

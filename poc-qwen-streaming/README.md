@@ -7,6 +7,7 @@ as mlx-audio emits it — so the browser hears the first chunk ~0.18 s after
 clicking Generate instead of waiting for the whole utterance.
 
     make              # build (needs poc-qwen's venv; created on demand), serve http://127.0.0.1:8008
+    make explore      # same UI, CustomVoice model preloaded only (LRU 2): compare built-in speakers vs clones next to a resident LLM
     make bench        # headless TTFA bench -> reports/rs_runs.jsonl + reports/bench_*.wav
     make info         # print model_info() from the embedded engine and exit
     make test         # GPU-free: bridge unit tests (fake model) + Rust unit tests

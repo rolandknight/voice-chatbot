@@ -16,10 +16,13 @@ BIN := target/release/poc-qwen-streaming
 DOTENV := $(wildcard .env)
 LOAD_ENV = $(if $(DOTENV),set -a; . ./.env; set +a;)
 
-.PHONY: run setup build info bench test test-py test-rs clean help
+.PHONY: run setup build info bench test test-py test-rs clean help explore
 
 run: build  ## Build if needed, then serve the UI on http://127.0.0.1:8008
 	@$(LOAD_ENV) ./$(BIN) serve
+
+explore: build  ## Serve :8008 with config.explore.yaml (CustomVoice preloaded, LRU 2) for voice comparisons
+	@$(LOAD_ENV) ./$(BIN) --config config.explore.yaml serve
 
 setup:  ## poc-qwen venv (mise python 3.12 + mlx-audio); idempotent
 	@$(MAKE) -C $(QWEN) setup
