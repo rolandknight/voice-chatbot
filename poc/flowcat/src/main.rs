@@ -103,6 +103,12 @@ pub struct PocConfig {
     pub ollama_bin: String,
     /// Release the model on exit (`keep_alive: 0`) so its memory returns.
     pub ollama_unload_on_exit: bool,
+    /// Keep-warm period: a one-token prefix request every N seconds while idle
+    /// (0 = off). Ollama's scheduler re-evaluates fit on the first request after
+    /// a long idle and may evict + reload the resident model when system memory
+    /// has shifted (16 s, observed on a user's turn); pinging keeps that on the
+    /// background path and the prompt cache hot.
+    pub ollama_keepwarm_secs: u64,
     pub stt_backend: SttBackend,
     pub whisper_model: String,
     /// CPU workers used by whisper.cpp for each utterance.
@@ -244,6 +250,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ollama_unload_on_exit: env_or("POC_OLLAMA_UNLOAD_ON_EXIT", "true")
             .parse::<bool>()
             .map_err(|error| format!("invalid POC_OLLAMA_UNLOAD_ON_EXIT: {error}"))?,
+        ollama_keepwarm_secs: env_or("POC_OLLAMA_KEEPWARM_SECS", "60")
+            .parse::<u64>()
+            .map_err(|error| format!("invalid POC_OLLAMA_KEEPWARM_SECS: {error}"))?,
         stt_backend,
         whisper_model: env_or(
             "POC_WHISPER_MODEL",
@@ -521,6 +530,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         #[cfg(feature = "qwen-tts")]
         qwen,
     });
+
+    // Keep-warm: while no call is active, re-send the prefix every N seconds.
+    if state.cfg.llm_provider == "ollama" && state.cfg.ollama_keepwarm_secs > 0 {
+        let st = state.clone();
+        tokio::spawn(async move {
+            let period = std::time::Duration::from_secs(st.cfg.ollama_keepwarm_secs);
+            let llm = llm_ollama::OllamaLlm::new(st.cfg.llm_base_url.clone(), st.cfg.llm_model.clone())
+                .num_ctx(st.cfg.llm_num_ctx);
+            let tools = match flowcat_core::SessionSource::node_tools(&*st.session, 0, "poc", "babel").await {
+                Ok(t) => t,
+                Err(error) => {
+                    tracing::warn!(%error, "keep-warm: no tools; disabled");
+                    return;
+                }
+            };
+            loop {
+                tokio::time::sleep(period).await;
+                if !st.hangups.lock().unwrap().is_empty() {
+                    continue; // a call is active; never queue behind a real turn
+                }
+                match llm.warm(&st.cfg.system_prompt, &tools).await {
+                    Ok(r) if r.load_ms > 0 || r.prompt_eval_ms > 500 => tracing::info!(
+                        load_ms = r.load_ms, prompt_eval_ms = r.prompt_eval_ms,
+                        "keep-warm: model was cold (reloaded/re-prefilled in the background)"
+                    ),
+                    Ok(r) => tracing::debug!(prompt_eval_ms = r.prompt_eval_ms, "keep-warm ok"),
+                    Err(error) => tracing::warn!(%error, "keep-warm request failed"),
+                }
+            }
+        });
+    }
 
     let bind = env_or("POC_BIND", "127.0.0.1:6210");
     let app = Router::new()
