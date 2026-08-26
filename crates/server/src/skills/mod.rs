@@ -8,22 +8,53 @@
 //! The tool list never changes per turn.
 
 pub mod time;
+pub mod timer;
 pub mod weather;
 pub mod web_search;
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::Value;
+use tokio::sync::mpsc;
 
+use flowcat_core::processor::frame::Frame;
 use flowcat_core::session::ToolDecl;
 
-/// What a skill gets per invocation. Grows with the tiers in the plan (frame
-/// sender for timers, media controller, per-call state).
+/// What a skill gets per invocation. Grows with the tiers in the plan (media
+/// controller, per-call state).
 pub struct CallCtx {
     pub run_id: i64,
+    /// Head-injection queue of this call's pipeline (`PipelineTask::queue_sender`),
+    /// for skills that speak later (timers). `None` outside a live call.
+    pub frames: Option<mpsc::UnboundedSender<Frame>>,
+}
+
+/// Per-call handles a skill may need, registered by `call.rs` for the life of
+/// the call. `SessionSource::tool_call` only receives the `run_id`, so this is
+/// how a tool call finds its own pipeline.
+#[derive(Default)]
+pub struct CallRegistry {
+    calls: Mutex<HashMap<i64, mpsc::UnboundedSender<Frame>>>,
+}
+
+impl CallRegistry {
+    pub fn register(&self, run_id: i64, frames: mpsc::UnboundedSender<Frame>) {
+        self.calls.lock().unwrap().insert(run_id, frames);
+    }
+
+    pub fn unregister(&self, run_id: i64) {
+        self.calls.lock().unwrap().remove(&run_id);
+    }
+
+    pub fn ctx(&self, run_id: i64) -> CallCtx {
+        CallCtx {
+            run_id,
+            frames: self.calls.lock().unwrap().get(&run_id).cloned(),
+        }
+    }
 }
 
 /// One tool. `call` returns the spoken-friendly text fed back to the LLM and
@@ -147,7 +178,10 @@ mod tests {
         let r = Registry::new(JSON, vec![Arc::new(Fake("a"))]).unwrap();
         let names: Vec<_> = r.decls().into_iter().map(|d| d.name).collect();
         assert_eq!(names, vec!["a"]);
-        let ctx = CallCtx { run_id: 1 };
+        let ctx = CallCtx {
+            run_id: 1,
+            frames: None,
+        };
         assert_eq!(r.call("a", &Value::Null, &ctx).await, "a ran");
         assert_eq!(
             r.call("b", &Value::Null, &ctx).await,

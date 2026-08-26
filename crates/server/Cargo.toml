@@ -41,6 +41,10 @@ futures = "0.3"
 qwen-tts = { path = "../qwen-tts", optional = true }
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 
+[dev-dependencies]
+# Paused-clock timer test (skills/timer.rs).
+tokio = { version = "1", features = ["full", "test-util"] }
+
 [features]
 moonshine = []
 metal = ["whisper-rs/metal"]

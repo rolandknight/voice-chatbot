@@ -775,6 +775,7 @@ fn build_skills() -> Result<skills::Registry, Box<dyn std::error::Error>> {
     let mut list: Vec<Arc<dyn skills::Skill>> = vec![
         Arc::new(skills::time::GetCurrentTime),
         Arc::new(skills::time::GetCurrentDate),
+        Arc::new(skills::timer::SetTimer),
         Arc::new(skills::weather::GetWeather::new(env_or(
             "POC_WEATHER_DEFAULT_LOCATION",
             "",

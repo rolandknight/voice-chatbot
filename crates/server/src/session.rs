@@ -13,10 +13,13 @@ use serde_json::{json, Value};
 use flowcat_core::session::{Finalize, ResolvedCall, ToolDecl, UploadTarget};
 use flowcat_core::{FlowcatError, SessionSource};
 
-use crate::skills::{CallCtx, Registry};
+use std::sync::Arc;
+
+use crate::skills::{CallRegistry, Registry};
 
 pub struct SkillSession {
     skills: Registry,
+    calls: Arc<CallRegistry>,
     artifact_dir: PathBuf,
 }
 
@@ -24,8 +27,14 @@ impl SkillSession {
     pub fn new(skills: Registry, artifact_dir: PathBuf) -> Self {
         Self {
             skills,
+            calls: Arc::new(CallRegistry::default()),
             artifact_dir,
         }
+    }
+
+    /// Live-call handles; `call.rs` registers each call's pipeline here.
+    pub fn calls(&self) -> &CallRegistry {
+        &self.calls
     }
 }
 
@@ -99,6 +108,9 @@ impl SessionSource for SkillSession {
     ) -> Result<String, FlowcatError> {
         // Per the SessionSource contract the result is always a spoken-friendly
         // string; the registry folds every failure into one.
-        Ok(self.skills.call(tool_name, args, &CallCtx { run_id }).await)
+        Ok(self
+            .skills
+            .call(tool_name, args, &self.calls.ctx(run_id))
+            .await)
     }
 }

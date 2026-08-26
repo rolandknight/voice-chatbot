@@ -338,6 +338,11 @@ pub async fn offer(
         .await;
         match built {
             Ok(task) => {
+                // Skills that act later (timers) find this call's pipeline here.
+                hangups
+                    .session
+                    .calls()
+                    .register(run_id, task.task.queue_sender());
                 let token = task.task.cancel_token();
                 let watcher = tokio::spawn(async move {
                     hangup.notified().await;
@@ -349,6 +354,7 @@ pub async fn offer(
                     tracing::info!(run_id, "call ended");
                 }
                 watcher.abort();
+                hangups.session.calls().unregister(run_id);
             }
             Err(e) => tracing::error!(run_id, error = %e, "failed to build call"),
         }

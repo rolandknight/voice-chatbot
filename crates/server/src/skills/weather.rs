@@ -358,13 +358,22 @@ mod network_tests {
         let out = w
             .call(
                 &json!({"location": "Paris, France"}),
-                &CallCtx { run_id: 0 },
+                &CallCtx {
+                    run_id: 0,
+                    frames: None,
+                },
             )
             .await;
         assert!(out.ends_with("in Paris right now."), "{out}");
         assert!(out.contains("degrees"), "{out}");
         let out = w
-            .call(&json!({"location": "Xyzzyqwv"}), &CallCtx { run_id: 0 })
+            .call(
+                &json!({"location": "Xyzzyqwv"}),
+                &CallCtx {
+                    run_id: 0,
+                    frames: None,
+                },
+            )
             .await;
         assert_eq!(out, "I couldn't find a place called Xyzzyqwv.");
     }
