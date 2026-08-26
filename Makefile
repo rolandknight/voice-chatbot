@@ -3,7 +3,8 @@
 #
 # Runtime artifacts (models, stubs, logs) and poc/.env are still read from poc/;
 # SERVER_FEATURES mirrors the Mac build profile: in-process Nemotron STT
-# (poc/.deps/nemo-speech) and Qwen3-TTS via PyO3 against poc-qwen's venv.
+# (poc/.deps/nemo-speech) and Qwen3-TTS via PyO3 against crates/qwen-tts/.venv
+# (make -C crates/qwen-tts setup).
 
 .DEFAULT_GOAL := help
 
@@ -13,7 +14,7 @@ SERVER_BIN := target/release/voice-chatbot-server
 CLIENT_BIN := target/release/voice-chatbot-client
 SERVER_URL ?= http://127.0.0.1:6210
 LOG_LEVEL ?= info
-QWEN_PYTHON := $(abspath poc-qwen/.venv/bin/python)
+QWEN_PYTHON := $(abspath crates/qwen-tts/.venv/bin/python)
 NEMO_SPEECH_LIB_DIR := $(abspath poc/.deps/nemo-speech/v0.1.0/lib)
 SERVER_BUILD_ENV := PYO3_PYTHON=$(QWEN_PYTHON) NEMO_SPEECH_LIB_DIR=$(NEMO_SPEECH_LIB_DIR)
 # Package-qualified features for workspace-wide cargo invocations.
@@ -46,8 +47,9 @@ call: build   ## Build if needed, then call the server with native audio
 devices: client-build  ## List native capture/playback devices
 	./$(CLIENT_BIN) devices
 
-test:  ## Workspace unit tests
+test:  ## Workspace unit tests (Rust, then the qwen-tts Python package)
 	$(SERVER_BUILD_ENV) $(CARGO) test --release --workspace --features "$(WS_FEATURES)"
+	$(MAKE) -C crates/qwen-tts test-py
 
 check:  ## fmt --check, clippy -D warnings, tests
 	$(CARGO) fmt --all -- --check

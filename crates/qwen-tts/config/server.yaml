@@ -11,7 +11,7 @@ server:
 python:
   # Pushed onto sys.path before importing the bridge. Relative to this file.
   paths:
-    - ../../../poc-qwen/.venv/lib/python3.12/site-packages
+    - ../.venv/lib/python3.12/site-packages
     - ../python
 
 models:

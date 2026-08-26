@@ -1,0 +1,9 @@
+# Runtime deps of python/qwen_tts (pinned ranges match what was measured on
+# the M4 Max; the package itself is installed editable by setup.sh).
+mlx-audio>=0.5.0,<0.6
+mlx-whisper
+soundfile
+pyyaml
+numpy
+# tests
+pytest

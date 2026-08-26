@@ -40,3 +40,7 @@ cuda_*.run
 
 # Workspace build output (crates/server, crates/client).
 /target/
+
+# Python test/packaging droppings (crates/qwen-tts/python).
+.pytest_cache/
+*.egg-info/
