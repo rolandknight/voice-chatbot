@@ -1,6 +1,7 @@
 # Plan: move all skills into the Rust server
 
-Status: proposed 2026-08-26 (v2 — full scope, rewrite-not-embed).
+Status: implemented 2026-08-26 on branch `skill-cleanup` (v2 — full scope,
+rewrite-not-embed). Outcome notes at the end.
 Replaces the PoC stub relay (`poc/stubs/stub_server.py`, port 8790) with
 in-process skills in `crates/server`. No separate skills server of any kind.
 
@@ -251,3 +252,32 @@ Each step ships on its own; step 1 alone fixes "I can't check the time".
   widening the pipeline change.
 - `yt-dlp`'s BBC extractor tracks BBC site changes; a stale `yt-dlp` fails
   the fallback only, never the curated RSS path.
+
+## Outcome (2026-08-26)
+
+All seven steps landed; 107 unit tests plus ignored live tests
+(`cargo test -p voice-chatbot-server -- --ignored network`,
+`cargo test -p voice-chatbot-client -- --ignored live`) that hit Open-Meteo,
+DuckDuckGo, BBC RSS, Spotify (token refresh + devices), the Messages API, and
+play three seconds of Radio 4 through mpv. Deviations from the plan above:
+
+- The Pi installer (`devices/rpi5/install_rpi.sh`) belongs to the legacy
+  Python wake client and was left alone; `mpv` is documented as a client
+  requirement in the README instead.
+- `yt-dlp`'s BBC extractor is broken upstream as of 2026.03.17 ("Unable to
+  extract playlist data"), so the BBC Sounds search fallback currently
+  fails for every show — the same failure the Python path has. Curated RSS
+  shows work. Re-test after a `yt-dlp` upgrade.
+- `dotenvy` was replaced by `env_file.rs`: the shared root `.env` contains a
+  line dotenvy rejects (`WAKE_PHRASES=hey babel,hey babe,hey baby`), which made
+  it drop the whole file — and with it every secret — silently. The server
+  now reads `poc/.env` then `.env`, line by line, never overriding set vars.
+- `ask_claude` talks to `/v1/messages` directly (`llm_claude.rs`) rather
+  than through an OpenAI-compatible shim; default model `claude-opus-5`
+  (`POC_CLAUDE_MODEL`). The legacy Python used `claude-sonnet-4-6`.
+- Not verified live: an end-to-end spoken turn (Ollama wasn't running and
+  gemma4:26b needs ~17 GB), the timer firing mid-conversation through the
+  speech gate, Spotify playback (no "Babel" librespot device was online),
+  and sound-effect generation (model servers not started). Everything up to
+  the pipeline boundary is covered by tests.
+

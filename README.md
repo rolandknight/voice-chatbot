@@ -1,8 +1,27 @@
 # Voice Chatbot
 
-## Rust PoC
+## Rust server + native client
 
-- make poc-chatterbox
+`make build` / `make server` / `make call` (see `make help`). All 18 skills run
+inside `voice-chatbot-server` — no skills stub, no Python at runtime — ported
+from the `skills/` package below (`crates/server/src/skills/`, plan in
+`docs/plans/skills-in-server.md`). Anything that plays audio (BBC radio,
+shows, sound effects) plays on the native client through `mpv`
+(`brew install mpv` / `apt install mpv` where the client runs); Spotify plays
+on the client's librespot "Babel" endpoint as before. Config is `POC_*` env in
+`poc/.env` (see `poc/.env.example`); secrets come from the repo-root `.env`.
+
+- Spotify first-time auth: `target/release/voice-chatbot-server spotify-login`
+  (`--headless` over SSH). The token is compatible with `scripts/spotify.py`.
+- Sound effects: `make sfx-up` / `make sfx-down` / `make sfx-status` run the
+  Woosh and Stable Audio Open model servers; the tool answers "isn't running"
+  until they are.
+- BBC shows not in the curated RSS list fall back to `yt-dlp` on the server
+  host (`brew install yt-dlp`).
+- Personas: `POC_QWEN_VOICES=marvin,one-one` exposes `switch_persona`;
+  `ANTHROPIC_API_KEY` exposes `ask_claude`. Both last for the current call.
+
+The PoC targets live on in `Makefile.old` (`make -f Makefile.old poc-chatterbox`).
 
 ## Pipecat Jabra Mac Prototype
 
