@@ -17,6 +17,8 @@ use serde_json::Value;
 use voice_chatbot_protocol::{MediaCommand, AFTER_SPEECH_CAP_SECS, MEDIA_EVENT};
 
 pub struct MediaPlayer {
+    /// Server base URL; relative media URLs (`/sfx/x.flac`) resolve against it.
+    server_base: String,
     ipc_path: PathBuf,
     /// mpv `--audio-device` matched to the call's output device, if any.
     device: Option<String>,
@@ -31,13 +33,14 @@ pub struct MediaPlayer {
 impl MediaPlayer {
     /// `output_device_name` is the cpal name of the call's playback device; the
     /// matching mpv device is looked up once (`mpv --audio-device=help`).
-    pub fn new(output_device_name: Option<&str>) -> Self {
+    pub fn new(output_device_name: Option<&str>, server_base: &str) -> Self {
         let device = output_device_name.and_then(mpv_device_for);
         match &device {
             Some(d) => tracing::info!(device = %d, "media: mpv output device"),
             None => tracing::info!("media: mpv will use the system default output"),
         }
         Self {
+            server_base: server_base.trim_end_matches('/').to_string(),
             ipc_path: std::env::temp_dir()
                 .join(format!("voice-chatbot-mpv-{}.sock", std::process::id())),
             device,
@@ -145,6 +148,12 @@ impl MediaPlayer {
 
     fn play(&mut self, url: &str, title: &str, stream: bool) -> String {
         self.stop();
+        let url = if url.starts_with('/') {
+            format!("{}{url}", self.server_base)
+        } else {
+            url.to_string()
+        };
+        let url = url.as_str();
         let _ = std::fs::remove_file(&self.ipc_path);
         let mut cmd = Command::new("mpv");
         cmd.args(["--no-video", "--no-terminal", "--idle=no"])
@@ -292,7 +301,7 @@ mod live_tests {
     #[ignore]
     fn live_mpv_play_duck_stop() {
         assert!(MediaPlayer::is_available(), "mpv not installed");
-        let mut p = MediaPlayer::new(None);
+        let mut p = MediaPlayer::new(None, "http://127.0.0.1:6210");
         let url = "http://as-hls-ww-live.akamaized.net/pool_55057080/live/ww/bbc_radio_fourfm/bbc_radio_fourfm.isml/bbc_radio_fourfm-audio%3d96000.norewind.m3u8";
         let line = p.on_event(
             MEDIA_EVENT,

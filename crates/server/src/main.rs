@@ -167,6 +167,8 @@ pub struct PocState {
     pub cfg: PocConfig,
     pub registry: Arc<EventRegistry>,
     pub session: Arc<SkillSession>,
+    /// Generated sound-effect clips, served at `/sfx/{file}` for the client.
+    pub sfx_dir: std::path::PathBuf,
     pub stt: LoadedStt,
     pub ready_pcm: Option<Arc<[i16]>>,
     pub next_run: AtomicI64,
@@ -422,7 +424,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let (registry, calls) = build_skills()?;
+    let sfx_dir = poc_dir.join("logs/sfx");
+    let (registry, calls) = build_skills(sfx_dir.clone())?;
     let session = SkillSession::new(registry, calls, poc_dir.join("logs/artifacts"));
 
     // ADR-0007: the chatbot owns its LLM's lifecycle. Ensure a serve, pull the
@@ -547,6 +550,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cfg,
         registry: Arc::new(EventRegistry::new()),
         session: Arc::new(session),
+        sfx_dir,
         stt: loaded_stt,
         ready_pcm,
         next_run: AtomicI64::new(1),
@@ -601,6 +605,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/healthz", get(healthz))
         .route("/webrtc/offer", post(call::offer))
         .route("/webrtc/events/{pc_id}", get(events_ws))
+        .route("/sfx/{file}", get(sfx_file))
         .with_state(state.clone());
 
     tracing::info!(%bind, "voice-chatbot-server listening");
@@ -796,7 +801,9 @@ async fn start_ollama(
 
 /// Construct the skills this process runs. Gating happens here, once: a skill
 /// that is not built is not advertised (docs/plans/skills-in-server.md).
-fn build_skills() -> Result<(skills::Registry, skills::CallRegistry), Box<dyn std::error::Error>> {
+fn build_skills(
+    sfx_dir: std::path::PathBuf,
+) -> Result<(skills::Registry, skills::CallRegistry), Box<dyn std::error::Error>> {
     use std::sync::Arc;
     let mut list: Vec<Arc<dyn skills::Skill>> = vec![
         Arc::new(skills::time::GetCurrentTime),
@@ -838,10 +845,32 @@ fn build_skills() -> Result<(skills::Registry, skills::CallRegistry), Box<dyn st
     if let Some(c) = &spotify {
         list.extend(skills::spotify::all(c.clone()));
     }
+    // The generators are separate model servers (`make sfx-up`); the tool is
+    // advertised regardless and reports "not running" per call.
+    if env_flag("POC_SKILLS_SFX", true) {
+        list.push(Arc::new(skills::sfx::GenerateSoundEffect::new(
+            env_or("POC_SFX_WOOSH_URL", "http://127.0.0.1:8005"),
+            env_or("POC_SFX_SAO_URL", "http://127.0.0.1:8006"),
+            skills::sfx::Routing::parse(&env_or("POC_SFX_BACKEND", "auto"))?,
+            sfx_dir,
+        )));
+    }
     Ok((
         skills::Registry::new(include_str!("../skills.json"), list)?,
         skills::CallRegistry::new(spotify),
     ))
+}
+
+/// Serve one generated clip to the client (`media play_file` sends `/sfx/<file>`).
+async fn sfx_file(State(state): State<Arc<PocState>>, Path(file): Path<String>) -> Response {
+    // One path component only: no traversal out of the clips directory.
+    if file.is_empty() || file.contains(['/', '\\']) || file.starts_with('.') {
+        return axum::http::StatusCode::NOT_FOUND.into_response();
+    }
+    match tokio::fs::read(state.sfx_dir.join(&file)).await {
+        Ok(bytes) => ([(axum::http::header::CONTENT_TYPE, "audio/flac")], bytes).into_response(),
+        Err(_) => axum::http::StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 async fn healthz(State(state): State<Arc<PocState>>) -> Json<serde_json::Value> {

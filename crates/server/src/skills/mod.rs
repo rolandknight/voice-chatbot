@@ -9,6 +9,7 @@
 
 pub mod alias;
 pub mod radio;
+pub mod sfx;
 pub mod shows;
 pub mod spotify;
 pub mod spotify_client;

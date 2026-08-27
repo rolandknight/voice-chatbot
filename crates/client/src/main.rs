@@ -139,7 +139,7 @@ async fn run_call(
     // on the call's output device. Without mpv the call still works; media
     // commands are logged and dropped.
     let media = if MediaPlayer::is_available() {
-        Some(MediaPlayer::new(Some(&output_device.name)))
+        Some(MediaPlayer::new(Some(&output_device.name), server_url))
     } else {
         tracing::warn!("mpv not found; BBC radio, shows and sound effects will not play (brew/apt install mpv)");
         None
