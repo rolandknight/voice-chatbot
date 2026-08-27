@@ -127,6 +127,7 @@ mod tests {
             frames: Some(tx),
             media: None,
             spotify: None,
+            state: None,
         };
         let reply = SetTimer
             .call(&json!({"minutes": 0.5, "label": "tea"}), &ctx)

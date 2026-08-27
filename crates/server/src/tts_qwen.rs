@@ -56,13 +56,18 @@ impl QwenVoice {
 #[derive(Clone)]
 pub struct QwenShared {
     pub engine: Engine,
+    /// The default voice (first of `POC_QWEN_VOICES`).
     pub voice: Arc<QwenVoice>,
+    /// Every loaded preset, selectable per call by `switch_persona`.
+    pub voices: Vec<Arc<QwenVoice>>,
     /// Process-preloaded `Ready.` greeting so reconnects never synthesize.
     pub ready_pcm: Option<Arc<[i16]>>,
 }
 
 pub struct QwenTts {
     shared: QwenShared,
+    /// The call's chosen voice, if `switch_persona` set one.
+    state: Option<Arc<crate::skills::CallState>>,
     ctx_counter: u64,
 }
 
@@ -70,8 +75,24 @@ impl QwenTts {
     pub fn new(shared: QwenShared) -> Self {
         Self {
             shared,
+            state: None,
             ctx_counter: 0,
         }
+    }
+
+    pub fn with_state(mut self, state: Arc<crate::skills::CallState>) -> Self {
+        self.state = Some(state);
+        self
+    }
+
+    /// The voice for the next utterance: the call's selection if it names a
+    /// loaded preset, else the default.
+    fn current_voice(&self) -> Arc<QwenVoice> {
+        self.state
+            .as_ref()
+            .and_then(|s| s.voice())
+            .and_then(|name| self.shared.voices.iter().find(|v| v.name == name).cloned())
+            .unwrap_or_else(|| self.shared.voice.clone())
     }
 
     fn cached_ready_pcm(&self, text: &str) -> Option<&[i16]> {
@@ -245,7 +266,11 @@ impl TtsService for QwenTts {
 
     async fn run_tts_stream<'a>(&'a mut self, text: &'a str) -> Result<BoxStream<'a, Frame>> {
         let context_id = self.next_context();
-        if let Some(cached) = self.cached_ready_pcm(text) {
+        let voice = self.current_voice();
+        // The cached greeting is the default voice's; a switched call synthesizes.
+        if voice.name != self.shared.voice.name {
+            // fall through to synthesis below
+        } else if let Some(cached) = self.cached_ready_pcm(text) {
             tracing::info!(samples = cached.len(), "serving cached greeting audio");
             return Ok(futures::stream::iter(frames_from_pcm(cached, context_id)).boxed());
         }
@@ -253,7 +278,7 @@ impl TtsService for QwenTts {
         let mut rx = self
             .shared
             .engine
-            .generate("clone", self.shared.voice.params(text))
+            .generate("clone", voice.params(text))
             .map_err(|e| FlowcatError::Other(format!("qwen tts: {e}")))?;
         // Surface start-up failures (bad voice, engine gone) as an error rather
         // than an empty stream; the first event is Start or Error.

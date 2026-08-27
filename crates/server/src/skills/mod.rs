@@ -8,6 +8,8 @@
 //! The tool list never changes per turn.
 
 pub mod alias;
+pub mod claude;
+pub mod persona;
 pub mod radio;
 pub mod sfx;
 pub mod shows;
@@ -42,6 +44,8 @@ pub struct CallCtx {
     pub media: Option<Arc<MediaController>>,
     /// Process-wide Spotify control, when configured.
     pub spotify: Option<Arc<spotify_client::SpotifyClient>>,
+    /// This call's voice/backend flags. `None` outside a live call.
+    pub state: Option<Arc<CallState>>,
 }
 
 impl CallCtx {
@@ -52,6 +56,7 @@ impl CallCtx {
             frames: None,
             media: None,
             spotify: None,
+            state: None,
         }
     }
 
@@ -76,11 +81,54 @@ impl CallCtx {
     }
 }
 
+/// Which model answers the call's turns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LlmBackend {
+    Local,
+    Claude,
+}
+
+/// Per-call mutable flags that skills set and the pipeline stages read on
+/// every turn: the TTS voice (`switch_persona`) and the LLM backend
+/// (`ask_claude`). Created per call, so both revert when the call ends —
+/// the Python "resets when the assistant goes back to sleep" semantics.
+#[derive(Default)]
+pub struct CallState {
+    voice: Mutex<Option<String>>,
+    claude: std::sync::atomic::AtomicBool,
+}
+
+impl CallState {
+    pub fn voice(&self) -> Option<String> {
+        self.voice.lock().unwrap().clone()
+    }
+
+    pub fn set_voice(&self, name: &str) {
+        *self.voice.lock().unwrap() = Some(name.to_string());
+    }
+
+    pub fn backend(&self) -> LlmBackend {
+        if self.claude.load(std::sync::atomic::Ordering::Relaxed) {
+            LlmBackend::Claude
+        } else {
+            LlmBackend::Local
+        }
+    }
+
+    pub fn set_backend(&self, backend: LlmBackend) {
+        self.claude.store(
+            backend == LlmBackend::Claude,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+}
+
 /// Handles `call.rs` registers for the life of a call.
 #[derive(Clone)]
 pub struct CallHandle {
     pub frames: mpsc::UnboundedSender<Frame>,
     pub media: Arc<MediaController>,
+    pub state: Arc<CallState>,
 }
 
 /// Per-call handles a skill may need. `SessionSource::tool_call` only
@@ -112,8 +160,9 @@ impl CallRegistry {
         CallCtx {
             run_id,
             frames: handle.as_ref().map(|h| h.frames.clone()),
-            media: handle.map(|h| h.media),
+            media: handle.as_ref().map(|h| h.media.clone()),
             spotify: self.spotify.clone(),
+            state: handle.map(|h| h.state),
         }
     }
 }

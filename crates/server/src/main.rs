@@ -11,6 +11,7 @@ mod brain;
 mod call;
 mod env_file;
 mod llm;
+mod llm_claude;
 mod llm_ollama;
 mod media;
 #[cfg(feature = "moonshine")]
@@ -150,7 +151,13 @@ pub struct PocConfig {
     /// voice name, model size, streamed-chunk interval.
     pub qwen_config: String,
     pub qwen_voice: String,
+    /// Extra preset voices to load for `switch_persona` (comma-separated;
+    /// `qwen_voice` is always first).
+    pub qwen_voices: Vec<String>,
     pub qwen_size: String,
+    /// `ask_claude`: Anthropic API key (empty → the tool is not advertised) and model.
+    pub anthropic_key: String,
+    pub claude_model: String,
     pub qwen_interval_s: f64,
     /// Host ICE candidate address to advertise (POC_ADVERTISE_IP). None →
     /// the interface that routes back to each caller.
@@ -340,6 +347,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .to_string_lossy(),
         ),
         qwen_voice: env_or("POC_QWEN_VOICE", "babel"),
+        qwen_voices: env_or("POC_QWEN_VOICES", "")
+            .split(',')
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .collect(),
+        anthropic_key: env_or("ANTHROPIC_API_KEY", ""),
+        claude_model: env_or("POC_CLAUDE_MODEL", "claude-opus-5"),
         qwen_size: env_or("POC_QWEN_SIZE", "1.7B"),
         qwen_interval_s: env_or("POC_QWEN_INTERVAL_S", "0.32")
             .parse::<f64>()
@@ -425,7 +439,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let sfx_dir = poc_dir.join("logs/sfx");
-    let (registry, calls) = build_skills(sfx_dir.clone())?;
+    let (registry, calls) = build_skills(&cfg, sfx_dir.clone())?;
     let session = SkillSession::new(registry, calls, poc_dir.join("logs/artifacts"));
 
     // ADR-0007: the chatbot owns its LLM's lifecycle. Ensure a serve, pull the
@@ -799,9 +813,24 @@ async fn start_ollama(
     Ok(serve)
 }
 
+/// `POC_QWEN_VOICE` followed by `POC_QWEN_VOICES` (deduplicated), when the
+/// TTS backend is Qwen; otherwise just the one configured voice.
+fn qwen_persona_names(cfg: &PocConfig) -> Vec<String> {
+    let mut names = vec![cfg.qwen_voice.clone()];
+    if cfg.tts_backend == "qwen" {
+        for v in &cfg.qwen_voices {
+            if !names.contains(v) {
+                names.push(v.clone());
+            }
+        }
+    }
+    names
+}
+
 /// Construct the skills this process runs. Gating happens here, once: a skill
 /// that is not built is not advertised (docs/plans/skills-in-server.md).
 fn build_skills(
+    cfg: &PocConfig,
     sfx_dir: std::path::PathBuf,
 ) -> Result<(skills::Registry, skills::CallRegistry), Box<dyn std::error::Error>> {
     use std::sync::Arc;
@@ -854,6 +883,16 @@ fn build_skills(
             skills::sfx::Routing::parse(&env_or("POC_SFX_BACKEND", "auto"))?,
             sfx_dir,
         )));
+    }
+    // Personas are Qwen presets; with one voice there is nothing to switch to.
+    let personas = qwen_persona_names(cfg);
+    if personas.len() > 1 {
+        list.push(Arc::new(skills::persona::SwitchPersona::new(personas)));
+    }
+    if !cfg.anthropic_key.trim().is_empty() {
+        list.push(Arc::new(skills::claude::AskClaude));
+    } else {
+        tracing::info!("ask_claude disabled: ANTHROPIC_API_KEY not set");
     }
     Ok((
         skills::Registry::new(include_str!("../skills.json"), list)?,
@@ -941,40 +980,38 @@ async fn start_qwen(cfg: &PocConfig) -> Result<tts_qwen::QwenShared, Box<dyn std
         .catalog()
         .await
         .map_err(|e| format!("qwen catalog: {e}"))?;
-    let entry = catalog["voices"]
-        .as_array()
-        .and_then(|vs| vs.iter().find(|v| v["name"] == cfg.qwen_voice.as_str()))
-        .ok_or_else(|| {
-            format!(
-                "POC_QWEN_VOICE {:?} not in the engine's voices/ catalog",
-                cfg.qwen_voice
-            )
-        })?;
-    let ref_text = entry["transcript"]
-        .as_str()
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    if ref_text.is_empty() {
-        return Err(format!(
-            "voice {:?} has no sidecar transcript (voices/<name>.txt)",
-            cfg.qwen_voice
-        )
-        .into());
+    let mut voices: Vec<Arc<tts_qwen::QwenVoice>> = Vec::new();
+    for name in qwen_persona_names(cfg) {
+        let entry = catalog["voices"]
+            .as_array()
+            .and_then(|vs| vs.iter().find(|v| v["name"] == name.as_str()))
+            .ok_or_else(|| format!("voice {name:?} (POC_QWEN_VOICE/POC_QWEN_VOICES) not in the engine's voices/ catalog"))?;
+        let ref_text = entry["transcript"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if ref_text.is_empty() {
+            return Err(
+                format!("voice {name:?} has no sidecar transcript (voices/<name>.txt)").into(),
+            );
+        }
+        voices.push(Arc::new(tts_qwen::QwenVoice {
+            name,
+            ref_audio: entry["path"].as_str().unwrap_or("").to_string(),
+            ref_text,
+            size: cfg.qwen_size.clone(),
+            language: "English".to_string(),
+            interval_s: cfg.qwen_interval_s,
+        }));
     }
-    let voice = tts_qwen::QwenVoice {
-        name: cfg.qwen_voice.clone(),
-        ref_audio: entry["path"].as_str().unwrap_or("").to_string(),
-        ref_text,
-        size: cfg.qwen_size.clone(),
-        language: "English".to_string(),
-        interval_s: cfg.qwen_interval_s,
-    };
+    let voice = voices[0].clone();
     let greeting = tts_qwen::synthesize_pcm(&engine, &voice, "Ready.").await?;
-    tracing::info!(samples = greeting.len(), voice = %voice.name, "qwen greeting cached");
+    tracing::info!(samples = greeting.len(), voice = %voice.name, personas = voices.len(), "qwen greeting cached");
     Ok(tts_qwen::QwenShared {
         engine,
-        voice: Arc::new(voice),
+        voice,
+        voices,
         ready_pcm: (!greeting.is_empty()).then(|| Arc::from(greeting.into_boxed_slice())),
     })
 }
