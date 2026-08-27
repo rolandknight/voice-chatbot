@@ -2,15 +2,18 @@
 //!
 //! Serves the same surface as flowcat-server's webrtc mode (`GET /` playground,
 //! `POST /webrtc/offer`, `GET /webrtc/events/{pc_id}`, `GET /healthz`) but with
-//! Babel's shape: a no-graph brain, skills relayed to the local stub server, and
+//! Babel's shape: a no-graph brain, in-process skills (`skills/`), and
 //! directly-constructed local services (selectable local STT, OpenRouter LLM,
 //! Kokoro-shim TTS) — bypassing `factory::cascaded`, which can't set Kokoro's
 //! base_url and demands dummy API keys for keyless local providers.
 
 mod brain;
 mod call;
+mod env_file;
 mod llm;
+mod llm_claude;
 mod llm_ollama;
+mod media;
 #[cfg(feature = "moonshine")]
 mod moonshine;
 mod nemotron;
@@ -19,6 +22,8 @@ mod nemotron_native;
 mod ollama_serve;
 mod playground;
 mod session;
+mod skills;
+mod spotify_login;
 mod stt;
 mod tts_chatterbox;
 #[cfg(feature = "qwen-tts")]
@@ -37,7 +42,7 @@ use serde_json::json;
 
 use flowcat_server::events::EventRegistry;
 
-use crate::session::StubSession;
+use crate::session::SkillSession;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SttBackend {
@@ -101,6 +106,9 @@ pub struct PocConfig {
     /// ADR-0007 Layer 2: `auto` | `never` | `always`.
     pub ollama_supervise: ollama_serve::Supervise,
     pub ollama_bin: String,
+    /// Bind address for a spawned serve: `127.0.0.1` (default) or `0.0.0.0` to
+    /// share the model with the rest of the LAN. Ignored for an existing serve.
+    pub ollama_host: String,
     /// Release the model on exit (`keep_alive: 0`) so its memory returns.
     pub ollama_unload_on_exit: bool,
     /// Keep-warm period: a one-token prefix request every N seconds while idle
@@ -146,7 +154,13 @@ pub struct PocConfig {
     /// voice name, model size, streamed-chunk interval.
     pub qwen_config: String,
     pub qwen_voice: String,
+    /// Extra preset voices to load for `switch_persona` (comma-separated;
+    /// `qwen_voice` is always first).
+    pub qwen_voices: Vec<String>,
     pub qwen_size: String,
+    /// `ask_claude`: Anthropic API key (empty → the tool is not advertised) and model.
+    pub anthropic_key: String,
+    pub claude_model: String,
     pub qwen_interval_s: f64,
     /// Host ICE candidate address to advertise (POC_ADVERTISE_IP). None →
     /// the interface that routes back to each caller.
@@ -162,7 +176,9 @@ pub struct PocConfig {
 pub struct PocState {
     pub cfg: PocConfig,
     pub registry: Arc<EventRegistry>,
-    pub session: Arc<StubSession>,
+    pub session: Arc<SkillSession>,
+    /// Generated sound-effect clips, served at `/sfx/{file}` for the client.
+    pub sfx_dir: std::path::PathBuf,
     pub stt: LoadedStt,
     pub ready_pcm: Option<Arc<[i16]>>,
     pub next_run: AtomicI64,
@@ -178,6 +194,15 @@ pub struct PocState {
 
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+/// Boolean env switch: `off|false|0|no` → false, `on|true|1|yes` → true.
+fn env_flag(key: &str, default: bool) -> bool {
+    match env_or(key, "").trim().to_ascii_lowercase().as_str() {
+        "" => default,
+        "off" | "false" | "0" | "no" => false,
+        _ => true,
+    }
 }
 
 fn require_nonempty(value: &str, key: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -198,7 +223,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
     // poc/.env when run from repo root or poc/; fall back silently otherwise.
-    let _ = dotenvy::from_filename("poc/.env").or_else(|_| dotenvy::from_filename(".env"));
+    // poc/.env holds the server profile; the repo-root .env holds the shared
+    // secrets (Spotify, search keys). Neither overrides variables already set.
+    env_file::load_if_unset(std::path::Path::new("poc/.env"));
+    env_file::load_if_unset(std::path::Path::new(".env"));
+    if let Some(pos) = std::env::args().position(|a| a == "spotify-login") {
+        let headless = std::env::args().skip(pos + 1).any(|a| a == "--headless");
+        return spotify_login::run(
+            &env_or("SPOTIPY_CLIENT_ID", ""),
+            &env_or("SPOTIPY_REDIRECT_URI", "http://127.0.0.1:8765/callback"),
+            headless,
+        )
+        .await
+        .map_err(Into::into);
+    }
 
     // crates/server. Runtime artifacts (downloaded models, stubs, logs) still
     // live under poc/ until the production layout for them is decided.
@@ -250,6 +288,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map_err(|error| format!("invalid POC_LLM_NUM_CTX: {error}"))?,
         ollama_supervise: ollama_serve::Supervise::parse(&env_or("POC_OLLAMA_SUPERVISE", "auto"))?,
         ollama_bin: env_or("POC_OLLAMA_BIN", "ollama"),
+        ollama_host: env_or("POC_OLLAMA_HOST", "127.0.0.1"),
         ollama_unload_on_exit: env_or("POC_OLLAMA_UNLOAD_ON_EXIT", "true")
             .parse::<bool>()
             .map_err(|error| format!("invalid POC_OLLAMA_UNLOAD_ON_EXIT: {error}"))?,
@@ -312,6 +351,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .to_string_lossy(),
         ),
         qwen_voice: env_or("POC_QWEN_VOICE", "babel"),
+        qwen_voices: env_or("POC_QWEN_VOICES", "")
+            .split(',')
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .collect(),
+        anthropic_key: env_or("ANTHROPIC_API_KEY", ""),
+        claude_model: env_or("POC_CLAUDE_MODEL", "claude-opus-5"),
         qwen_size: env_or("POC_QWEN_SIZE", "1.7B"),
         qwen_interval_s: env_or("POC_QWEN_INTERVAL_S", "0.32")
             .parse::<f64>()
@@ -396,15 +442,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let skills_path = env_or(
-        "POC_SKILLS",
-        &poc_dir.join("stubs/skills.json").to_string_lossy(),
-    );
-    let session = StubSession::new(
-        &std::fs::read_to_string(&skills_path)?,
-        env_or("POC_STUBS_URL", "http://127.0.0.1:8790"),
-        poc_dir.join("logs/artifacts"),
-    )?;
+    let sfx_dir = poc_dir.join("logs/sfx");
+    let (registry, calls) = build_skills(&cfg, sfx_dir.clone())?;
+    let session = SkillSession::new(registry, calls, poc_dir.join("logs/artifacts"));
 
     // ADR-0007: the chatbot owns its LLM's lifecycle. Ensure a serve, pull the
     // model if missing, warm the exact prefix, verify residency — before the
@@ -528,6 +568,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cfg,
         registry: Arc::new(EventRegistry::new()),
         session: Arc::new(session),
+        sfx_dir,
         stt: loaded_stt,
         ready_pcm,
         next_run: AtomicI64::new(1),
@@ -582,6 +623,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/healthz", get(healthz))
         .route("/webrtc/offer", post(call::offer))
         .route("/webrtc/events/{pc_id}", get(events_ws))
+        .route("/sfx/{file}", get(sfx_file))
         .with_state(state.clone());
 
     tracing::info!(%bind, "voice-chatbot-server listening");
@@ -711,7 +753,7 @@ async fn shutdown_signal() {
 /// handle so shutdown can stop what we started.
 async fn start_ollama(
     cfg: &PocConfig,
-    session: &StubSession,
+    session: &SkillSession,
     poc_dir: &std::path::Path,
 ) -> Result<ollama_serve::OllamaServe, Box<dyn std::error::Error>> {
     use flowcat_core::SessionSource;
@@ -722,6 +764,7 @@ async fn start_ollama(
         cfg.ollama_supervise,
         &cfg.ollama_bin,
         cfg.llm_num_ctx,
+        &cfg.ollama_host,
         &poc_dir.join("logs/ollama.log"),
     )
     .await?;
@@ -773,6 +816,105 @@ async fn start_ollama(
         None => return Err(format!("ollama: {} not resident after warm", cfg.llm_model).into()),
     }
     Ok(serve)
+}
+
+/// `POC_QWEN_VOICE` followed by `POC_QWEN_VOICES` (deduplicated), when the
+/// TTS backend is Qwen; otherwise just the one configured voice.
+fn qwen_persona_names(cfg: &PocConfig) -> Vec<String> {
+    let mut names = vec![cfg.qwen_voice.clone()];
+    if cfg.tts_backend == "qwen" {
+        for v in &cfg.qwen_voices {
+            if !names.contains(v) {
+                names.push(v.clone());
+            }
+        }
+    }
+    names
+}
+
+/// Construct the skills this process runs. Gating happens here, once: a skill
+/// that is not built is not advertised (docs/plans/skills-in-server.md).
+fn build_skills(
+    cfg: &PocConfig,
+    sfx_dir: std::path::PathBuf,
+) -> Result<(skills::Registry, skills::CallRegistry), Box<dyn std::error::Error>> {
+    use std::sync::Arc;
+    let mut list: Vec<Arc<dyn skills::Skill>> = vec![
+        Arc::new(skills::time::GetCurrentTime),
+        Arc::new(skills::time::GetCurrentDate),
+        Arc::new(skills::timer::SetTimer),
+        Arc::new(skills::weather::GetWeather::new(env_or(
+            "POC_WEATHER_DEFAULT_LOCATION",
+            "",
+        ))),
+    ];
+    let provider = skills::web_search::Provider::parse(&env_or("POC_WEB_SEARCH_PROVIDER", ""))?;
+    list.push(Arc::new(skills::web_search::WebSearch::new(
+        provider,
+        env_or("BRAVE_API_KEY", ""),
+        env_or("TAVILY_API_KEY", ""),
+    )));
+    // Playback happens on the native client (mpv); the browser playground has
+    // no media, so these can be switched off for browser-only setups.
+    if env_flag("POC_SKILLS_RADIO", true) {
+        list.push(Arc::new(skills::radio::PlayBbcRadio::new()));
+        list.push(Arc::new(skills::radio::StopBbcRadio));
+    }
+    if env_flag("POC_SKILLS_SHOWS", true) {
+        list.push(Arc::new(skills::shows::PlayBbcShow::new()));
+    }
+    // Spotify needs a client id and a cached PKCE token (`spotify-login`);
+    // without them the seven tools are simply not advertised.
+    let spotify = if env_flag("POC_SKILLS_SPOTIFY", true) {
+        match skills::spotify_client::SpotifyClient::new(env_or("SPOTIPY_CLIENT_ID", "")) {
+            Ok(c) => Some(Arc::new(c)),
+            Err(reason) => {
+                tracing::warn!(%reason, "spotify skills disabled");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    if let Some(c) = &spotify {
+        list.extend(skills::spotify::all(c.clone()));
+    }
+    // The generators are separate model servers (`make sfx-up`); the tool is
+    // advertised regardless and reports "not running" per call.
+    if env_flag("POC_SKILLS_SFX", true) {
+        list.push(Arc::new(skills::sfx::GenerateSoundEffect::new(
+            env_or("POC_SFX_WOOSH_URL", "http://127.0.0.1:8005"),
+            env_or("POC_SFX_SAO_URL", "http://127.0.0.1:8006"),
+            skills::sfx::Routing::parse(&env_or("POC_SFX_BACKEND", "auto"))?,
+            sfx_dir,
+        )));
+    }
+    // Personas are Qwen presets; with one voice there is nothing to switch to.
+    let personas = qwen_persona_names(cfg);
+    if personas.len() > 1 {
+        list.push(Arc::new(skills::persona::SwitchPersona::new(personas)));
+    }
+    if !cfg.anthropic_key.trim().is_empty() {
+        list.push(Arc::new(skills::claude::AskClaude));
+    } else {
+        tracing::info!("ask_claude disabled: ANTHROPIC_API_KEY not set");
+    }
+    Ok((
+        skills::Registry::new(include_str!("../skills.json"), list)?,
+        skills::CallRegistry::new(spotify),
+    ))
+}
+
+/// Serve one generated clip to the client (`media play_file` sends `/sfx/<file>`).
+async fn sfx_file(State(state): State<Arc<PocState>>, Path(file): Path<String>) -> Response {
+    // One path component only: no traversal out of the clips directory.
+    if file.is_empty() || file.contains(['/', '\\']) || file.starts_with('.') {
+        return axum::http::StatusCode::NOT_FOUND.into_response();
+    }
+    match tokio::fs::read(state.sfx_dir.join(&file)).await {
+        Ok(bytes) => ([(axum::http::header::CONTENT_TYPE, "audio/flac")], bytes).into_response(),
+        Err(_) => axum::http::StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 async fn healthz(State(state): State<Arc<PocState>>) -> Json<serde_json::Value> {
@@ -843,40 +985,38 @@ async fn start_qwen(cfg: &PocConfig) -> Result<tts_qwen::QwenShared, Box<dyn std
         .catalog()
         .await
         .map_err(|e| format!("qwen catalog: {e}"))?;
-    let entry = catalog["voices"]
-        .as_array()
-        .and_then(|vs| vs.iter().find(|v| v["name"] == cfg.qwen_voice.as_str()))
-        .ok_or_else(|| {
-            format!(
-                "POC_QWEN_VOICE {:?} not in the engine's voices/ catalog",
-                cfg.qwen_voice
-            )
-        })?;
-    let ref_text = entry["transcript"]
-        .as_str()
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    if ref_text.is_empty() {
-        return Err(format!(
-            "voice {:?} has no sidecar transcript (voices/<name>.txt)",
-            cfg.qwen_voice
-        )
-        .into());
+    let mut voices: Vec<Arc<tts_qwen::QwenVoice>> = Vec::new();
+    for name in qwen_persona_names(cfg) {
+        let entry = catalog["voices"]
+            .as_array()
+            .and_then(|vs| vs.iter().find(|v| v["name"] == name.as_str()))
+            .ok_or_else(|| format!("voice {name:?} (POC_QWEN_VOICE/POC_QWEN_VOICES) not in the engine's voices/ catalog"))?;
+        let ref_text = entry["transcript"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if ref_text.is_empty() {
+            return Err(
+                format!("voice {name:?} has no sidecar transcript (voices/<name>.txt)").into(),
+            );
+        }
+        voices.push(Arc::new(tts_qwen::QwenVoice {
+            name,
+            ref_audio: entry["path"].as_str().unwrap_or("").to_string(),
+            ref_text,
+            size: cfg.qwen_size.clone(),
+            language: "English".to_string(),
+            interval_s: cfg.qwen_interval_s,
+        }));
     }
-    let voice = tts_qwen::QwenVoice {
-        name: cfg.qwen_voice.clone(),
-        ref_audio: entry["path"].as_str().unwrap_or("").to_string(),
-        ref_text,
-        size: cfg.qwen_size.clone(),
-        language: "English".to_string(),
-        interval_s: cfg.qwen_interval_s,
-    };
+    let voice = voices[0].clone();
     let greeting = tts_qwen::synthesize_pcm(&engine, &voice, "Ready.").await?;
-    tracing::info!(samples = greeting.len(), voice = %voice.name, "qwen greeting cached");
+    tracing::info!(samples = greeting.len(), voice = %voice.name, personas = voices.len(), "qwen greeting cached");
     Ok(tts_qwen::QwenShared {
         engine,
-        voice: Arc::new(voice),
+        voice,
+        voices,
         ready_pcm: (!greeting.is_empty()).then(|| Arc::from(greeting.into_boxed_slice())),
     })
 }

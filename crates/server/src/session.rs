@@ -1,61 +1,45 @@
-//! StubSession — a [`SessionSource`] that relays workflow tool calls to the
-//! PoC stub server (`poc/stubs/stub_server.py`, see `poc/CONTRACT.md`).
+//! SkillSession — a [`SessionSource`] whose workflow tools are the in-process
+//! skills (`crate::skills`), replacing the PoC stub relay.
 //!
 //! Modeled on flowcat-server's `StaticSession`, but with real `node_tools` /
-//! `tool_call`: the 8 skill schemas from `poc/stubs/skills.json` are advertised
-//! to the LLM, and every call is `POST {stubs}/tool/{name}`.
+//! `tool_call`: the registry's schemas are advertised to the LLM and every
+//! call dispatches straight to the matching [`crate::skills::Skill`].
 
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use serde::Deserialize;
 use serde_json::{json, Value};
 
 use flowcat_core::session::{Finalize, ResolvedCall, ToolDecl, UploadTarget};
 use flowcat_core::{FlowcatError, SessionSource};
 
-/// One entry in `skills.json` (`parameters` is the JSON-Schema).
-#[derive(Deserialize)]
-struct SkillDef {
-    name: String,
-    description: String,
-    parameters: Value,
-}
+use std::sync::Arc;
 
-pub struct StubSession {
-    skills: Vec<ToolDecl>,
-    stubs_url: String,
-    http: reqwest::Client,
+use crate::skills::{CallRegistry, Registry};
+
+pub struct SkillSession {
+    skills: Registry,
+    calls: Arc<CallRegistry>,
     artifact_dir: PathBuf,
 }
 
-impl StubSession {
-    pub fn new(
-        skills_json: &str,
-        stubs_url: String,
-        artifact_dir: PathBuf,
-    ) -> Result<Self, String> {
-        let defs: Vec<SkillDef> =
-            serde_json::from_str(skills_json).map_err(|e| format!("parse skills.json: {e}"))?;
-        let skills = defs
-            .into_iter()
-            .map(|d| ToolDecl {
-                name: d.name,
-                description: d.description,
-                params: d.parameters,
-            })
-            .collect();
-        Ok(Self {
+impl SkillSession {
+    pub fn new(skills: Registry, calls: CallRegistry, artifact_dir: PathBuf) -> Self {
+        Self {
             skills,
-            stubs_url: stubs_url.trim_end_matches('/').to_string(),
-            http: reqwest::Client::new(),
+            calls: Arc::new(calls),
             artifact_dir,
-        })
+        }
+    }
+
+    /// Live-call handles; `call.rs` registers each call's pipeline here.
+    pub fn calls(&self) -> &CallRegistry {
+        &self.calls
     }
 }
 
 #[async_trait]
-impl SessionSource for StubSession {
+impl SessionSource for SkillSession {
     async fn resolve(&self, _run_id: i64, _token: &str) -> Result<ResolvedCall, FlowcatError> {
         Ok(ResolvedCall {
             provider: "poc".to_string(),
@@ -111,36 +95,22 @@ impl SessionSource for StubSession {
         _token: &str,
         _node_id: &str,
     ) -> Result<Vec<ToolDecl>, FlowcatError> {
-        Ok(self.skills.clone())
+        Ok(self.skills.decls())
     }
 
     async fn tool_call(
         &self,
-        _run_id: i64,
+        run_id: i64,
         _token: &str,
         _node_id: &str,
         tool_name: &str,
         args: &Value,
     ) -> Result<String, FlowcatError> {
-        let url = format!("{}/tool/{}", self.stubs_url, tool_name);
-        // Per the SessionSource contract: fold failures into a spoken-friendly
-        // string so the call continues; never abort the turn on a stub error.
-        match self.http.post(&url).json(args).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                let body: Value = resp.json().await.unwrap_or(json!({}));
-                let result = body.get("result").cloned().unwrap_or(body);
-                Ok(result.to_string())
-            }
-            Ok(resp) => {
-                tracing::warn!(tool = tool_name, status = %resp.status(), "stub tool error");
-                Ok(format!("The {tool_name} service returned an error."))
-            }
-            Err(e) => {
-                tracing::warn!(tool = tool_name, error = %e, "stub tool unreachable");
-                Ok(format!(
-                    "The {tool_name} service is temporarily unavailable."
-                ))
-            }
-        }
+        // Per the SessionSource contract the result is always a spoken-friendly
+        // string; the registry folds every failure into one.
+        Ok(self
+            .skills
+            .call(tool_name, args, &self.calls.ctx(run_id))
+            .await)
     }
 }

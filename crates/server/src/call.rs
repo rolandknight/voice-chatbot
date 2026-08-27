@@ -145,6 +145,47 @@ impl flowcat_core::service::LlmService for PocLlm {
     }
 }
 
+/// The local model, or Claude once the call's `ask_claude` flag is set. Both
+/// share the rolling context, so the switch is seamless mid-conversation.
+struct SwitchingLlm {
+    local: PocLlm,
+    claude: Option<crate::llm_claude::ClaudeLlm>,
+    state: Arc<crate::skills::CallState>,
+}
+
+#[async_trait::async_trait]
+impl flowcat_core::service::LlmService for SwitchingLlm {
+    fn name(&self) -> &str {
+        "switching-llm"
+    }
+    async fn start(
+        &mut self,
+        params: &flowcat_core::processor::frame::StartParams,
+    ) -> flowcat_core::Result<()> {
+        self.local.start(params).await?;
+        if let Some(c) = &mut self.claude {
+            c.start(params).await?;
+        }
+        Ok(())
+    }
+    async fn run_llm<'a>(
+        &'a mut self,
+        ctx: &'a flowcat_core::processor::frame::LlmContext,
+    ) -> flowcat_core::Result<futures::stream::BoxStream<'a, flowcat_core::processor::frame::Frame>>
+    {
+        match (&mut self.claude, self.state.backend()) {
+            (Some(c), crate::skills::LlmBackend::Claude) => c.run_llm(ctx).await,
+            _ => self.local.run_llm(ctx).await,
+        }
+    }
+    fn set_tools(&mut self, tools: Vec<flowcat_core::service::Tool>) {
+        if let Some(c) = &mut self.claude {
+            c.set_tools(tools.clone());
+        }
+        self.local.set_tools(tools);
+    }
+}
+
 #[derive(Deserialize)]
 pub struct OfferRequest {
     pub sdp: String,
@@ -285,6 +326,16 @@ pub async fn offer(
                 .build(),
         ),
     };
+    // Per-call flags the skills set (voice, backend); dropped with the call.
+    let call_state = Arc::new(crate::skills::CallState::default());
+    let claude = (!cfg.anthropic_key.trim().is_empty()).then(|| {
+        crate::llm_claude::ClaudeLlm::new(cfg.anthropic_key.clone(), cfg.claude_model.clone())
+    });
+    let inner = SwitchingLlm {
+        local: inner,
+        claude,
+        state: call_state.clone(),
+    };
     let llm = crate::llm::StaticGreetingLlm::new(inner, "Ready.");
     let tts = match cfg.tts_backend.as_str() {
         "chatterbox" => PocTts::Chatterbox(
@@ -298,14 +349,20 @@ pub async fn offer(
             KokoroTts::new("", cfg.kokoro_voice.clone()).with_base_url(cfg.kokoro_url.clone()),
         ),
         #[cfg(feature = "qwen-tts")]
-        "qwen" => PocTts::Qwen(crate::tts_qwen::QwenTts::new(
-            state.qwen.clone().expect("qwen engine started at startup"),
-        )),
+        "qwen" => PocTts::Qwen(
+            crate::tts_qwen::QwenTts::new(
+                state.qwen.clone().expect("qwen engine started at startup"),
+            )
+            .with_state(call_state.clone()),
+        ),
         _ => unreachable!("validated at startup"),
     };
     let brain = crate::brain::BabelBrain::new(cfg.system_prompt.clone());
     let session = state.session.clone();
 
+    // Skills drive client-side playback (radio, shows, sound effects) over the
+    // same events channel the RTVI observer publishes on.
+    let media = Arc::new(crate::media::MediaController::new(events.clone()));
     let sink: Arc<dyn RtviSink> = Arc::new(RtfSink::new(events));
     let observers: Vec<Arc<dyn FrameObserver>> = vec![Arc::new(RtviObserver::new(sink))];
 
@@ -338,6 +395,15 @@ pub async fn offer(
         .await;
         match built {
             Ok(task) => {
+                // Skills that act later (timers) find this call's pipeline here.
+                hangups.session.calls().register(
+                    run_id,
+                    crate::skills::CallHandle {
+                        frames: task.task.queue_sender(),
+                        media,
+                        state: call_state,
+                    },
+                );
                 let token = task.task.cancel_token();
                 let watcher = tokio::spawn(async move {
                     hangup.notified().await;
@@ -349,6 +415,7 @@ pub async fn offer(
                     tracing::info!(run_id, "call ended");
                 }
                 watcher.abort();
+                hangups.session.calls().unregister(run_id);
             }
             Err(e) => tracing::error!(run_id, error = %e, "failed to build call"),
         }

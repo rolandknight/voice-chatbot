@@ -1,7 +1,8 @@
 # voice-chatbot — server + native WebRTC client (Cargo workspace in crates/).
 # The PoC targets live on in Makefile.old.
 #
-# Runtime artifacts (models, stubs, logs) and poc/.env are still read from poc/;
+# Runtime artifacts (models, logs) and poc/.env are still read from poc/; skills
+# run in-process (crates/server/src/skills, docs/plans/skills-in-server.md).
 # SERVER_FEATURES mirrors the Mac build profile: in-process Nemotron STT
 # (poc/.deps/nemo-speech) and Qwen3-TTS via PyO3 against crates/qwen-tts/.venv
 # (make -C crates/qwen-tts setup).
@@ -21,7 +22,7 @@ SERVER_BUILD_ENV := PYO3_PYTHON=$(QWEN_PYTHON) NEMO_SPEECH_LIB_DIR=$(NEMO_SPEECH
 comma := ,
 WS_FEATURES := $(subst $(eval) ,$(comma),$(addprefix voice-chatbot-server/,$(subst $(comma), ,$(SERVER_FEATURES))))
 
-.PHONY: build server-build client-build server stubs call devices test check clean help
+.PHONY: build server-build client-build server call devices sfx-up sfx-down sfx-status test check clean help
 
 build: server-build client-build  ## Build server + client (release)
 
@@ -34,11 +35,6 @@ client-build:  ## Build crates/client
 server: server-build  ## Build if needed, then run the server (reads poc/.env)
 	./$(SERVER_BIN)
 
-stubs:  ## Start the skills stub server on :8790 (tools: time, weather, radio, Spotify)
-	@if pgrep -f "uvicorn stub_server:app" >/dev/null; then echo "stubs already running"; else \
-	  cd poc/stubs; nohup ../.venv/bin/uvicorn stub_server:app --host 127.0.0.1 --port 8790 \
-	    >../logs/stubs.log 2>&1 & echo $$! > ../logs/stubs.pid; echo "stubs started (poc/logs/stubs.log)"; fi
-
 call: build   ## Build if needed, then call the server with native audio
 	./$(CLIENT_BIN) --log-level "$(LOG_LEVEL)" call --server-url "$(SERVER_URL)" \
 	    $(if $(INPUT_DEVICE),--input-device "$(INPUT_DEVICE)",) \
@@ -46,6 +42,40 @@ call: build   ## Build if needed, then call the server with native audio
 
 devices: client-build  ## List native capture/playback devices
 	./$(CLIENT_BIN) devices
+
+# Sound-effect generators for the generate_sound_effect skill: Woosh (Sony)
+# on :8005 and Stable Audio Open on :8006, each a separate Python model server
+# under vendor/ (first launch clones + installs + downloads weights; see
+# scripts/start_woosh.sh and scripts/start_stable_audio.sh). Pid files and logs
+# match run.sh's so either launcher can stop what the other started.
+WOOSH_PORT ?= 8005
+STABLE_AUDIO_PORT ?= 8006
+
+sfx-up:  ## Start the Woosh + Stable Audio Open servers in the background
+	@$(call sfx_start,woosh,scripts/start_woosh.sh,$(WOOSH_PORT))
+	@$(call sfx_start,stable-audio,scripts/start_stable_audio.sh,$(STABLE_AUDIO_PORT))
+
+sfx-down:  ## Stop the sound-effect servers
+	@$(call sfx_stop,woosh,$(WOOSH_PORT))
+	@$(call sfx_stop,stable-audio,$(STABLE_AUDIO_PORT))
+
+sfx-status:  ## Show whether the sound-effect servers answer
+	@for s in "woosh $(WOOSH_PORT)" "stable-audio $(STABLE_AUDIO_PORT)"; do set -- $$s; \
+	  if curl -sS -m 2 "http://127.0.0.1:$$2/docs" >/dev/null 2>&1; then echo "$$1: up on :$$2"; else echo "$$1: down"; fi; done
+
+# $(1)=name $(2)=launcher $(3)=port. WOOSH_PORT/STABLE_AUDIO_PORT are read by the launchers.
+define sfx_start
+if curl -sS -m 2 "http://127.0.0.1:$(3)/docs" >/dev/null 2>&1; then echo "$(1): already up on :$(3)"; else \
+  mkdir -p vendor; WOOSH_PORT=$(WOOSH_PORT) STABLE_AUDIO_PORT=$(STABLE_AUDIO_PORT) nohup ./$(2) >vendor/$(1).log 2>&1 & echo $$! >vendor/$(1).pid; \
+  echo "$(1): starting on :$(3) (log: vendor/$(1).log; first launch installs models and can take many minutes)"; fi
+endef
+
+# Kill the launcher's process group (the launcher exec's uvicorn, so its pid is the server's).
+define sfx_stop
+if [ -f vendor/$(1).pid ] && kill -0 "$$(cat vendor/$(1).pid)" 2>/dev/null; then kill "$$(cat vendor/$(1).pid)" && echo "$(1): stopped"; \
+elif pid=$$(lsof -nP -tiTCP:$(3) -sTCP:LISTEN 2>/dev/null | head -1); [ -n "$$pid" ]; then kill "$$pid" && echo "$(1): stopped (pid $$pid)"; \
+else echo "$(1): not running"; fi; rm -f vendor/$(1).pid
+endef
 
 test:  ## Workspace unit tests (Rust, then the qwen-tts Python package)
 	$(SERVER_BUILD_ENV) $(CARGO) test --release --workspace --features "$(WS_FEATURES)"
