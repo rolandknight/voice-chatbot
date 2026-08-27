@@ -20,6 +20,7 @@ mod nemotron;
 #[cfg(feature = "nemotron-native")]
 mod nemotron_native;
 mod ollama_serve;
+mod paced_transport;
 mod playground;
 mod session;
 mod skills;

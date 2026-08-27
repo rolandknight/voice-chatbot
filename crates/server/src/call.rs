@@ -373,6 +373,9 @@ pub async fn offer(
         .lock()
         .unwrap()
         .insert(pc_id.clone(), hangup.clone());
+    // Release bot audio at realtime (+ a small lead) instead of as fast as
+    // TTS produces it; see paced_transport.rs for why bursts lose audio.
+    let transport = crate::paced_transport::PacedTransport::new(transport);
     let hangups = state.clone();
     let hook_pc_id = pc_id.clone();
 
