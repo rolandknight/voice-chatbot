@@ -35,7 +35,7 @@ client-build:  ## Build crates/client
 server: server-build  ## Build if needed, then run the server (reads poc/.env)
 	./$(SERVER_BIN)
 
-call: build   ## Build if needed, then call the server with native audio
+call: client-build   ## Build the client if needed, then call the server (SERVER_URL) with native audio
 	./$(CLIENT_BIN) --log-level "$(LOG_LEVEL)" call --server-url "$(SERVER_URL)" \
 	    $(if $(INPUT_DEVICE),--input-device "$(INPUT_DEVICE)",) \
 	    $(if $(OUTPUT_DEVICE),--output-device "$(OUTPUT_DEVICE)",)

@@ -304,6 +304,9 @@ fn enumerate_devices(
                 .id()
                 .with_context(|| format!("failed to read {direction} audio device ID"))?
                 .to_string();
+            if is_alsa_software_mixer(&id) {
+                bail!("ALSA software mixing plugin PCMs are never probed");
+            }
             let name = device
                 .description()
                 .with_context(|| format!("failed to describe {direction} audio device {id:?}"))?
@@ -343,6 +346,19 @@ fn enumerate_devices(
     }
 
     Ok(available)
+}
+
+/// ALSA `dsnoop`/`dmix` plugin PCMs.
+///
+/// These are userspace mixers layered directly on a hardware PCM. Probing
+/// their configuration opens and prepares that hardware behind the sound
+/// server's back; on Realtek HDA codecs the Alt Analog `dsnoop` probe leaves
+/// the main ADC producing no frames for the next capture stream. They are
+/// never a useful selection for this client, so they are excluded before any
+/// probe happens.
+fn is_alsa_software_mixer(id: &str) -> bool {
+    id.strip_prefix("alsa:")
+        .is_some_and(|pcm| pcm.starts_with("dsnoop:") || pcm.starts_with("dmix:"))
 }
 
 fn compare_device_info(left: &AudioDeviceInfo, right: &AudioDeviceInfo) -> Ordering {
@@ -778,6 +794,31 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("no audio device matches"));
+    }
+
+    #[test]
+    fn enumeration_never_probes_alsa_software_mixing_plugins() {
+        // Probing dsnoop/dmix opens the underlying hardware PCM directly behind
+        // PipeWire's back; on an ALC1220 the Alt Analog dsnoop probe leaves the
+        // codec's main ADC silent for the next capture stream.
+        for id in [
+            "alsa:dsnoop:CARD=PCH,DEV=2",
+            "alsa:dsnoop:CARD=PCH,DEV=0",
+            "alsa:dmix:CARD=PCH,DEV=0",
+            "alsa:dmix:CARD=NVidia,DEV=3",
+        ] {
+            assert!(is_alsa_software_mixer(id), "{id} must be skipped");
+        }
+        for id in [
+            "alsa:default",
+            "alsa:pipewire",
+            "alsa:hw:CARD=PCH,DEV=2",
+            "alsa:plughw:CARD=PCH,DEV=0",
+            "alsa:front:CARD=PCH,DEV=0",
+            "coreaudio:dsnoop",
+        ] {
+            assert!(!is_alsa_software_mixer(id), "{id} must be probed");
+        }
     }
 
     #[test]
