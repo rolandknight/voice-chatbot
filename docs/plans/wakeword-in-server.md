@@ -240,3 +240,12 @@ for browser sessions; the native client wakes on-device by default.
   asserts on the existing babel fixture that only the babel head fires.
 - Pre-existing, unrelated: `stt_backend_parser_accepts_only_supported_local_engines`
   fails without the `moonshine` feature on `main` as well.
+- Follow-up (same day): persona prompts. `crates/server/prompt.<persona>.txt`
+  files are loaded at startup (`main.rs::load_persona_prompts`);
+  `CallState::set_voice` selects the matching prompt (None when the persona
+  has no file), and `SwitchingLlm::run_llm` swaps it in as the system
+  message for that run. Every persona entry point — server gate, client
+  wake frame, `switch_persona` — goes through `set_voice`, so all three
+  switch prompt and voice together. Switching prompts changes the prefix,
+  so the first turn after a persona change pays a full prompt eval on
+  Ollama (the keep-warm task only warms `prompt.txt`).

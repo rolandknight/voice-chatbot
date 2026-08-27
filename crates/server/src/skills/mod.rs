@@ -95,16 +95,52 @@ pub enum LlmBackend {
 #[derive(Default)]
 pub struct CallState {
     voice: Mutex<Option<String>>,
+    /// System prompt for the selected persona (`prompt.<persona>.txt`), None =
+    /// the process default. Read by the LLM adapter on every run.
+    prompt: Mutex<Option<String>>,
+    /// persona → prompt text, loaded once at startup (`crates/server/prompt.*.txt`).
+    prompts: HashMap<String, String>,
     claude: std::sync::atomic::AtomicBool,
 }
 
+/// `prompt.<persona>.txt` lookup key: lowercase, `_` as `-` (the persona
+/// convention wake heads and Qwen presets share).
+pub fn prompt_key(persona: &str) -> String {
+    persona.trim().to_ascii_lowercase().replace('_', "-")
+}
+
 impl CallState {
+    pub fn with_prompts(prompts: HashMap<String, String>) -> Self {
+        Self {
+            prompts,
+            ..Self::default()
+        }
+    }
+
     pub fn voice(&self) -> Option<String> {
         self.voice.lock().unwrap().clone()
     }
 
+    /// Select a persona: its voice, and its prompt when `prompt.<persona>.txt`
+    /// exists (otherwise the process default prompt applies again).
     pub fn set_voice(&self, name: &str) {
         *self.voice.lock().unwrap() = Some(name.to_string());
+        let prompt = self.prompts.get(&prompt_key(name)).cloned();
+        tracing::info!(
+            persona = name,
+            prompt = if prompt.is_some() {
+                "persona"
+            } else {
+                "default"
+            },
+            "persona selected"
+        );
+        *self.prompt.lock().unwrap() = prompt;
+    }
+
+    /// The persona's system prompt, if one is selected and has a file.
+    pub fn prompt(&self) -> Option<String> {
+        self.prompt.lock().unwrap().clone()
     }
 
     pub fn backend(&self) -> LlmBackend {

@@ -151,6 +151,26 @@ struct SwitchingLlm {
     local: PocLlm,
     claude: Option<crate::llm_claude::ClaudeLlm>,
     state: Arc<crate::skills::CallState>,
+    /// The context with the persona's system prompt swapped in; owned here so
+    /// the returned stream can borrow it for the run.
+    scratch: flowcat_core::processor::frame::LlmContext,
+}
+
+/// `ctx` with `prompt` as its system message (replacing a leading system
+/// message, else prepended).
+fn with_system_prompt(
+    ctx: &flowcat_core::processor::frame::LlmContext,
+    prompt: &str,
+) -> flowcat_core::processor::frame::LlmContext {
+    let mut out = ctx.clone();
+    let system = serde_json::json!({ "role": "system", "content": prompt });
+    match out.messages.first_mut() {
+        Some(first) if first.get("role").and_then(|r| r.as_str()) == Some("system") => {
+            *first = system;
+        }
+        _ => out.messages.insert(0, system),
+    }
+    out
 }
 
 #[async_trait::async_trait]
@@ -173,9 +193,26 @@ impl flowcat_core::service::LlmService for SwitchingLlm {
         ctx: &'a flowcat_core::processor::frame::LlmContext,
     ) -> flowcat_core::Result<futures::stream::BoxStream<'a, flowcat_core::processor::frame::Frame>>
     {
-        match (&mut self.claude, self.state.backend()) {
+        // Persona prompt (prompt.<persona>.txt) selected by a wake word or
+        // switch_persona replaces the default system message for this run.
+        // Split borrows: the stream borrows `scratch` while `local`/`claude`
+        // are borrowed mutably.
+        let Self {
+            local,
+            claude,
+            state,
+            scratch,
+        } = self;
+        let ctx: &'a flowcat_core::processor::frame::LlmContext = match state.prompt() {
+            Some(prompt) => {
+                *scratch = with_system_prompt(ctx, &prompt);
+                scratch
+            }
+            None => ctx,
+        };
+        match (claude, state.backend()) {
             (Some(c), crate::skills::LlmBackend::Claude) => c.run_llm(ctx).await,
-            _ => self.local.run_llm(ctx).await,
+            _ => local.run_llm(ctx).await,
         }
     }
     fn set_tools(&mut self, tools: Vec<flowcat_core::service::Tool>) {
@@ -271,7 +308,9 @@ pub async fn offer(
     };
     // Per-call flags the skills and the wake gate set (voice, backend); dropped
     // with the call.
-    let call_state = Arc::new(crate::skills::CallState::default());
+    let call_state = Arc::new(crate::skills::CallState::with_prompts(
+        cfg.persona_prompts.clone(),
+    ));
     // Listen mode: wake gate between VAD and SpeechGate when wake heads are
     // configured (POC_WAKE_DIR / POC_WAKE_MODEL); push mode otherwise. A fire
     // selects the head's persona voice on `call_state` and publishes `wake`
@@ -342,6 +381,7 @@ pub async fn offer(
         local: inner,
         claude,
         state: call_state.clone(),
+        scratch: Default::default(),
     };
     let llm = crate::llm::StaticGreetingLlm::new(inner, "Ready.");
     let tts = match cfg.tts_backend.as_str() {
@@ -439,4 +479,64 @@ pub async fn offer(
     );
 
     Json(json!(OfferResponse { sdp: answer, pc_id })).into_response()
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn persona_prompt_replaces_or_prepends_the_system_message() {
+        let ctx = flowcat_core::processor::frame::LlmContext {
+            messages: vec![
+                json!({"role": "system", "content": "default"}),
+                json!({"role": "user", "content": "hi"}),
+            ],
+            tools: vec![json!({"name": "t"})],
+        };
+        let out = with_system_prompt(&ctx, "marvin");
+        assert_eq!(
+            out.messages[0],
+            json!({"role": "system", "content": "marvin"})
+        );
+        assert_eq!(out.messages[1], ctx.messages[1]);
+        assert_eq!(out.tools, ctx.tools);
+
+        let no_system = flowcat_core::processor::frame::LlmContext {
+            messages: vec![json!({"role": "user", "content": "hi"})],
+            tools: vec![],
+        };
+        let out = with_system_prompt(&no_system, "marvin");
+        assert_eq!(out.messages.len(), 2);
+        assert_eq!(out.messages[0]["role"], "system");
+    }
+
+    #[test]
+    fn selecting_a_persona_picks_its_prompt_or_the_default() {
+        let prompts = [("marvin", "I am Marvin."), ("one-one", "I am One One.")]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let state = crate::skills::CallState::with_prompts(prompts);
+        assert_eq!(
+            state.prompt(),
+            None,
+            "default prompt until a persona is chosen"
+        );
+        state.set_voice("marvin");
+        assert_eq!(state.prompt().as_deref(), Some("I am Marvin."));
+        state.set_voice("one_one");
+        assert_eq!(
+            state.prompt().as_deref(),
+            Some("I am One One."),
+            "`_`/`-` insensitive"
+        );
+        state.set_voice("babel");
+        assert_eq!(
+            state.prompt(),
+            None,
+            "no prompt.babel.txt in this map → default"
+        );
+    }
 }

@@ -139,6 +139,11 @@ pub struct PocConfig {
     pub kokoro_url: String,
     pub kokoro_voice: String,
     pub system_prompt: String,
+    /// Per-persona system prompts: `crates/server/prompt.<persona>.txt`, keyed by
+    /// persona (`babel`, `marvin`, `one-one`, …). Selected with the persona
+    /// (wake word, client wake, `switch_persona`); personas without a file use
+    /// `system_prompt`.
+    pub persona_prompts: std::collections::HashMap<String, String>,
     pub vad_model: String,
     /// Silence needed to close a speech turn. The default matches the Python
     /// chatbot's `wake.vad_stop_secs` setting.
@@ -194,6 +199,36 @@ pub struct PocState {
     /// Shared Qwen engine + voice when `POC_TTS_BACKEND=qwen`.
     #[cfg(feature = "qwen-tts")]
     pub qwen: Option<tts_qwen::QwenShared>,
+}
+
+/// Every `prompt.<persona>.txt` next to `prompt.txt` → persona → text.
+fn load_persona_prompts(
+    dir: &std::path::Path,
+) -> Result<std::collections::HashMap<String, String>, Box<dyn std::error::Error>> {
+    let mut prompts = std::collections::HashMap::new();
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some(persona) = name
+            .strip_prefix("prompt.")
+            .and_then(|rest| rest.strip_suffix(".txt"))
+            .filter(|p| !p.is_empty())
+        else {
+            continue;
+        };
+        let text =
+            std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        if text.trim().is_empty() {
+            return Err(format!("{} is empty", path.display()).into());
+        }
+        prompts.insert(skills::prompt_key(persona), text);
+    }
+    let mut names: Vec<&String> = prompts.keys().collect();
+    names.sort();
+    tracing::info!(personas = ?names, "persona prompts loaded (prompt.<persona>.txt)");
+    Ok(prompts)
 }
 
 fn env_or(key: &str, default: &str) -> String {
@@ -339,6 +374,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "POC_PROMPT",
             &manifest_dir.join("prompt.txt").to_string_lossy(),
         ))?,
+        persona_prompts: load_persona_prompts(manifest_dir)?,
         vad_model: env_or(
             "POC_VAD_MODEL",
             &poc_dir.join("models/silero_vad.onnx").to_string_lossy(),

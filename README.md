@@ -27,8 +27,10 @@ on the client's librespot "Babel" endpoint as before. Config is `POC_*` env in
   detects on-device instead, on by default: `make call` loads
   `models/wakeword` (`--wake-dir` / `FLOWCAT_WAKE_DIR` to change, `--no-wake`
   for always-on push mode), sends audio only after a wake word and tells the
-  server which persona woke. Plan and conventions:
-  `docs/plans/wakeword-in-server.md`.
+  server which persona woke. Selecting a persona (wake word, client wake or
+  `switch_persona`) also switches the system prompt to
+  `crates/server/prompt.<persona>.txt` when that file exists (`prompt.txt`
+  otherwise). Plan and conventions: `docs/plans/wakeword-in-server.md`.
 
 The PoC targets live on in `Makefile.old` (`make -f Makefile.old poc-chatterbox`).
 
