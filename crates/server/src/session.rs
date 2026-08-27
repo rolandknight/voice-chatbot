@@ -24,10 +24,10 @@ pub struct SkillSession {
 }
 
 impl SkillSession {
-    pub fn new(skills: Registry, artifact_dir: PathBuf) -> Self {
+    pub fn new(skills: Registry, calls: CallRegistry, artifact_dir: PathBuf) -> Self {
         Self {
             skills,
-            calls: Arc::new(CallRegistry::default()),
+            calls: Arc::new(calls),
             artifact_dir,
         }
     }

@@ -135,5 +135,66 @@
       },
       "required": ["show"]
     }
+  },
+  {
+    "name": "play_spotify_playlist",
+    "description": "Play a Spotify playlist by name. Use when the user names a playlist explicitly: 'play my Discover Weekly', 'play Release Radar', 'put on my workout playlist', 'play the Jazz Classics playlist'. For arbitrary songs/artists/albums use play_spotify.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "The playlist name the user named, verbatim. e.g. 'Discover Weekly', 'Release Radar', 'workout', 'Jazz Classics'."
+        }
+      },
+      "required": [
+        "name"
+      ]
+    }
+  },
+  {
+    "name": "resume_spotify",
+    "description": "Resume previously-paused Spotify playback. Use when the user says 'resume', 'unpause', 'keep playing', 'go on', 'continue the music'.",
+    "parameters": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    }
+  },
+  {
+    "name": "skip_spotify",
+    "description": "Skip to the next or previous track on Spotify. Use for 'skip', 'next track', 'next song', 'previous track', 'go back', 'last song again'.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "direction": {
+          "type": "string",
+          "enum": [
+            "next",
+            "previous"
+          ],
+          "description": "'next' to advance to the next track (default), 'previous' to go back to the prior track."
+        }
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "stop_spotify",
+    "description": "Stop Spotify playback completely (not just pause). Use when the user says 'stop Spotify', 'stop the music', 'kill Spotify', 'turn the music off'.",
+    "parameters": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    }
+  },
+  {
+    "name": "whats_playing",
+    "description": "Say which Spotify track is currently playing. Use for 'what's playing?', 'what is this song?', 'who's this?', 'what's the name of this track?'.",
+    "parameters": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    }
   }
 ]

@@ -35,12 +35,15 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
-dotenvy = "0.15"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 futures = "0.3"
 qwen-tts = { path = "../qwen-tts", optional = true }
 voice-chatbot-protocol = { path = "../protocol" }
 roxmltree = "0.20"
+# spotify-login (PKCE): challenge hashing, base64url, verifier randomness.
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.9"
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 
 [dev-dependencies]

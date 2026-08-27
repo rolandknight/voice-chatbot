@@ -10,6 +10,8 @@
 pub mod alias;
 pub mod radio;
 pub mod shows;
+pub mod spotify;
+pub mod spotify_client;
 pub mod time;
 pub mod timer;
 pub mod weather;
@@ -37,6 +39,8 @@ pub struct CallCtx {
     pub frames: Option<mpsc::UnboundedSender<Frame>>,
     /// Media playback on this call's client. `None` outside a live call.
     pub media: Option<Arc<MediaController>>,
+    /// Process-wide Spotify control, when configured.
+    pub spotify: Option<Arc<spotify_client::SpotifyClient>>,
 }
 
 impl CallCtx {
@@ -46,6 +50,7 @@ impl CallCtx {
             run_id,
             frames: None,
             media: None,
+            spotify: None,
         }
     }
 
@@ -58,9 +63,15 @@ impl CallCtx {
         self.stop_spotify().await;
     }
 
-    /// Stop Spotify if it is playing; true when it was. Wired in tier D.
+    /// Stop Spotify if it is playing; true when it was.
     pub async fn stop_spotify(&self) -> bool {
-        false
+        match &self.spotify {
+            Some(s) if s.is_playing() => {
+                s.stop().await;
+                true
+            }
+            _ => false,
+        }
     }
 }
 
@@ -76,9 +87,17 @@ pub struct CallHandle {
 #[derive(Default)]
 pub struct CallRegistry {
     calls: Mutex<HashMap<i64, CallHandle>>,
+    spotify: Option<Arc<spotify_client::SpotifyClient>>,
 }
 
 impl CallRegistry {
+    pub fn new(spotify: Option<Arc<spotify_client::SpotifyClient>>) -> Self {
+        Self {
+            calls: Mutex::new(HashMap::new()),
+            spotify,
+        }
+    }
+
     pub fn register(&self, run_id: i64, handle: CallHandle) {
         self.calls.lock().unwrap().insert(run_id, handle);
     }
@@ -93,6 +112,7 @@ impl CallRegistry {
             run_id,
             frames: handle.as_ref().map(|h| h.frames.clone()),
             media: handle.map(|h| h.media),
+            spotify: self.spotify.clone(),
         }
     }
 }

@@ -9,6 +9,7 @@
 
 mod brain;
 mod call;
+mod env_file;
 mod llm;
 mod llm_ollama;
 mod media;
@@ -21,6 +22,7 @@ mod ollama_serve;
 mod playground;
 mod session;
 mod skills;
+mod spotify_login;
 mod stt;
 mod tts_chatterbox;
 #[cfg(feature = "qwen-tts")]
@@ -209,7 +211,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
     // poc/.env when run from repo root or poc/; fall back silently otherwise.
-    let _ = dotenvy::from_filename("poc/.env").or_else(|_| dotenvy::from_filename(".env"));
+    // poc/.env holds the server profile; the repo-root .env holds the shared
+    // secrets (Spotify, search keys). Neither overrides variables already set.
+    env_file::load_if_unset(std::path::Path::new("poc/.env"));
+    env_file::load_if_unset(std::path::Path::new(".env"));
+    if let Some(pos) = std::env::args().position(|a| a == "spotify-login") {
+        let headless = std::env::args().skip(pos + 1).any(|a| a == "--headless");
+        return spotify_login::run(
+            &env_or("SPOTIPY_CLIENT_ID", ""),
+            &env_or("SPOTIPY_REDIRECT_URI", "http://127.0.0.1:8765/callback"),
+            headless,
+        )
+        .await
+        .map_err(Into::into);
+    }
 
     // crates/server. Runtime artifacts (downloaded models, stubs, logs) still
     // live under poc/ until the production layout for them is decided.
@@ -407,7 +422,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let session = SkillSession::new(build_skills()?, poc_dir.join("logs/artifacts"));
+    let (registry, calls) = build_skills()?;
+    let session = SkillSession::new(registry, calls, poc_dir.join("logs/artifacts"));
 
     // ADR-0007: the chatbot owns its LLM's lifecycle. Ensure a serve, pull the
     // model if missing, warm the exact prefix, verify residency — before the
@@ -780,7 +796,7 @@ async fn start_ollama(
 
 /// Construct the skills this process runs. Gating happens here, once: a skill
 /// that is not built is not advertised (docs/plans/skills-in-server.md).
-fn build_skills() -> Result<skills::Registry, Box<dyn std::error::Error>> {
+fn build_skills() -> Result<(skills::Registry, skills::CallRegistry), Box<dyn std::error::Error>> {
     use std::sync::Arc;
     let mut list: Vec<Arc<dyn skills::Skill>> = vec![
         Arc::new(skills::time::GetCurrentTime),
@@ -806,7 +822,26 @@ fn build_skills() -> Result<skills::Registry, Box<dyn std::error::Error>> {
     if env_flag("POC_SKILLS_SHOWS", true) {
         list.push(Arc::new(skills::shows::PlayBbcShow::new()));
     }
-    Ok(skills::Registry::new(include_str!("../skills.json"), list)?)
+    // Spotify needs a client id and a cached PKCE token (`spotify-login`);
+    // without them the seven tools are simply not advertised.
+    let spotify = if env_flag("POC_SKILLS_SPOTIFY", true) {
+        match skills::spotify_client::SpotifyClient::new(env_or("SPOTIPY_CLIENT_ID", "")) {
+            Ok(c) => Some(Arc::new(c)),
+            Err(reason) => {
+                tracing::warn!(%reason, "spotify skills disabled");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    if let Some(c) = &spotify {
+        list.extend(skills::spotify::all(c.clone()));
+    }
+    Ok((
+        skills::Registry::new(include_str!("../skills.json"), list)?,
+        skills::CallRegistry::new(spotify),
+    ))
 }
 
 async fn healthz(State(state): State<Arc<PocState>>) -> Json<serde_json::Value> {
