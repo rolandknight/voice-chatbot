@@ -13,7 +13,10 @@ const DETECTION_BUFFER_SIZE: usize = 12; // 12 detection ~ 1 secs
 
 #[derive(Debug)]
 pub struct OwwModel {
-    audio: AudioFeaturesTract,
+    /// Melspectrogram + embedding frontend. `None` for a head built with
+    /// [`OwwModel::head_from_path`], which is driven from a shared frontend
+    /// through [`OwwModel::detect`].
+    audio: Option<AudioFeaturesTract>,
     pub tract_model: ModelType,
     threshold: f32,
     pub last_detection_time: Instant,

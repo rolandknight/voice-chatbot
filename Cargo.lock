@@ -5103,6 +5103,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "voice-chatbot-protocol",
+ "voice-chatbot-wake",
 ]
 
 [[package]]
@@ -5142,7 +5143,16 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "voice-chatbot-protocol",
+ "voice-chatbot-wake",
  "whisper-rs",
+]
+
+[[package]]
+name = "voice-chatbot-wake"
+version = "0.1.0"
+dependencies = [
+ "oww-rs",
+ "tracing",
 ]
 
 [[package]]

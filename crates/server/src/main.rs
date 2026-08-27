@@ -20,6 +20,7 @@ mod nemotron;
 #[cfg(feature = "nemotron-native")]
 mod nemotron_native;
 mod ollama_serve;
+mod paced_transport;
 mod playground;
 mod session;
 mod skills;
@@ -138,14 +139,22 @@ pub struct PocConfig {
     pub kokoro_url: String,
     pub kokoro_voice: String,
     pub system_prompt: String,
+    /// Per-persona system prompts: `crates/server/prompt.<persona>.txt`, keyed by
+    /// persona (`babel`, `marvin`, `one-one`, …). Selected with the persona
+    /// (wake word, client wake, `switch_persona`); personas without a file use
+    /// `system_prompt`.
+    pub persona_prompts: std::collections::HashMap<String, String>,
     pub vad_model: String,
     /// Silence needed to close a speech turn. The default matches the Python
     /// chatbot's `wake.vad_stop_secs` setting.
     pub vad_stop_secs: f32,
-    /// Listen mode (Phase 1a): path to a wake-word head model (e.g.
-    /// models/wakeword/hey_babel.onnx). Empty → push mode (no server wake).
-    pub wake_model: String,
+    /// Listen mode: wake heads as `(path, persona)`, from `POC_WAKE_DIR` (every
+    /// `*.onnx`; persona = stem minus `hey_`, `_` as `-`) or the single
+    /// `POC_WAKE_MODEL`. Empty → push mode (no server wake).
+    pub wake_heads: Vec<(std::path::PathBuf, String)>,
     pub wake_threshold: f32,
+    /// Silence that ends a wake session (POC_WAKE_SESSION_SECS).
+    pub wake_session_secs: f32,
     /// TTS backend: "kokoro" (default) or "chatterbox" (Phase 1b cloned voice).
     pub tts_backend: String,
     pub chatterbox_url: String,
@@ -190,6 +199,36 @@ pub struct PocState {
     /// Shared Qwen engine + voice when `POC_TTS_BACKEND=qwen`.
     #[cfg(feature = "qwen-tts")]
     pub qwen: Option<tts_qwen::QwenShared>,
+}
+
+/// Every `prompt.<persona>.txt` next to `prompt.txt` → persona → text.
+fn load_persona_prompts(
+    dir: &std::path::Path,
+) -> Result<std::collections::HashMap<String, String>, Box<dyn std::error::Error>> {
+    let mut prompts = std::collections::HashMap::new();
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some(persona) = name
+            .strip_prefix("prompt.")
+            .and_then(|rest| rest.strip_suffix(".txt"))
+            .filter(|p| !p.is_empty())
+        else {
+            continue;
+        };
+        let text =
+            std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        if text.trim().is_empty() {
+            return Err(format!("{} is empty", path.display()).into());
+        }
+        prompts.insert(skills::prompt_key(persona), text);
+    }
+    let mut names: Vec<&String> = prompts.keys().collect();
+    names.sort();
+    tracing::info!(personas = ?names, "persona prompts loaded (prompt.<persona>.txt)");
+    Ok(prompts)
 }
 
 fn env_or(key: &str, default: &str) -> String {
@@ -241,7 +280,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // crates/server. Runtime artifacts (downloaded models, stubs, logs) still
     // live under poc/ until the production layout for them is decided.
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let poc_dir = manifest_dir.parent().unwrap().parent().unwrap().join("poc");
+    let repo_root = manifest_dir.parent().unwrap().parent().unwrap();
+    let poc_dir = repo_root.join("poc");
     let poc_dir = poc_dir.as_path();
     let stt_backend = SttBackend::parse(&env_or("POC_STT_BACKEND", "whisper"))?;
 
@@ -334,13 +374,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "POC_PROMPT",
             &manifest_dir.join("prompt.txt").to_string_lossy(),
         ))?,
+        persona_prompts: load_persona_prompts(manifest_dir)?,
         vad_model: env_or(
             "POC_VAD_MODEL",
             &poc_dir.join("models/silero_vad.onnx").to_string_lossy(),
         ),
         vad_stop_secs,
-        wake_model: env_or("POC_WAKE_MODEL", ""),
+        wake_heads: voice_chatbot_wake::resolve_heads(
+            repo_root,
+            &env_or("POC_WAKE_DIR", ""),
+            &env_or("POC_WAKE_MODEL", ""),
+        )?,
         wake_threshold: env_or("POC_WAKE_THRESHOLD", "0.5").parse().unwrap_or(0.5),
+        wake_session_secs: env_or("POC_WAKE_SESSION_SECS", "15")
+            .parse::<f32>()
+            .map_err(|error| format!("invalid POC_WAKE_SESSION_SECS: {error}"))?,
         tts_backend: env_or("POC_TTS_BACKEND", "kokoro"),
         chatterbox_url: env_or("POC_CHATTERBOX_URL", "http://127.0.0.1:8004"),
         chatterbox_voice: env_or("POC_CHATTERBOX_VOICE", "marvin.wav"),
@@ -401,6 +449,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if !std::path::Path::new(&cfg.vad_model).exists() {
         return Err(format!("silero vad model missing: {}", cfg.vad_model).into());
+    }
+    if cfg.wake_heads.is_empty() {
+        tracing::info!("wake: push mode (no POC_WAKE_DIR / POC_WAKE_MODEL)");
+    } else {
+        if !(0.0..=1.0).contains(&cfg.wake_threshold) {
+            return Err("POC_WAKE_THRESHOLD must be in [0, 1]".into());
+        }
+        if !(cfg.wake_session_secs > 0.0 && cfg.wake_session_secs.is_finite()) {
+            return Err("POC_WAKE_SESSION_SECS must be a positive number".into());
+        }
+        for (path, persona) in &cfg.wake_heads {
+            tracing::info!(head = %path.display(), %persona, "wake: listen mode head");
+        }
+        if cfg.tts_backend != "qwen" {
+            tracing::warn!(
+                tts = %cfg.tts_backend,
+                "wake: only the qwen TTS backend switches voice per persona; wake words will gate turns but the voice stays fixed"
+            );
+        }
     }
     require_nonempty(&cfg.llm_model, "POC_LLM_MODEL")?;
     require_nonempty(&cfg.llm_base_url, "OPENROUTER_BASE_URL")?;
@@ -708,6 +775,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn stream_events_until_closed(
     mut socket: axum::extract::ws::WebSocket,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+    state: &PocState,
+    pc_id: &str,
 ) {
     use axum::extract::ws::Message;
     loop {
@@ -722,8 +791,57 @@ async fn stream_events_until_closed(
             },
             incoming = socket.recv() => match incoming {
                 None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,
-                Some(Ok(_)) => {} // pings/pongs/client chatter
+                // The native client detects wake words on-device and reports
+                // them here; anything else is pings/pongs/client chatter.
+                Some(Ok(Message::Text(text))) => apply_client_wake(state, pc_id, &text),
+                Some(Ok(_)) => {}
             },
+        }
+    }
+}
+
+/// A `{"type":"wake","payload":WakeState}` frame from the client: select the
+/// persona's voice on the call (what the server-side gate does for browser
+/// clients) and, on sleep, revert `ask_claude`'s backend flip.
+fn apply_client_wake(state: &PocState, pc_id: &str, text: &str) {
+    use voice_chatbot_protocol::{WakeState, WAKE_EVENT};
+    let Ok(msg) = serde_json::from_str::<serde_json::Value>(text) else {
+        return;
+    };
+    if msg.get("type").and_then(|t| t.as_str()) != Some(WAKE_EVENT) {
+        return;
+    }
+    let wake = match WakeState::from_payload(msg.get("payload").unwrap_or(&serde_json::Value::Null))
+    {
+        Ok(w) => w,
+        Err(error) => {
+            tracing::warn!(%pc_id, %error, "client wake frame rejected");
+            return;
+        }
+    };
+    let run_id = pc_id
+        .strip_prefix("pc-")
+        .and_then(|s| s.parse::<i64>().ok());
+    let Some(call) = run_id.and_then(|id| state.session.calls().state(id)) else {
+        tracing::warn!(%pc_id, ?wake, "client wake before the call registered; ignored");
+        return;
+    };
+    match wake {
+        WakeState::Awake {
+            model,
+            score,
+            persona,
+        } => {
+            tracing::info!(%pc_id, %model, score, persona = persona.as_deref().unwrap_or("-"), "client wake");
+            if let Some(p) = persona {
+                call.set_voice(&p);
+            }
+        }
+        WakeState::Asleep => {
+            tracing::info!(%pc_id, "client wake session ended");
+            if call.backend() != skills::LlmBackend::Local {
+                call.set_backend(skills::LlmBackend::Local);
+            }
         }
     }
 }
@@ -818,13 +936,24 @@ async fn start_ollama(
     Ok(serve)
 }
 
-/// `POC_QWEN_VOICE` followed by `POC_QWEN_VOICES` (deduplicated), when the
-/// TTS backend is Qwen; otherwise just the one configured voice.
+/// `POC_QWEN_VOICE` followed by `POC_QWEN_VOICES` and the personas the wake
+/// heads select (deduplicated, `-`/`_`-insensitive), when the TTS backend is
+/// Qwen; otherwise just the one configured voice. Every wake persona is thus
+/// preloaded without listing it in `POC_QWEN_VOICES`, and a head whose persona
+/// is not in `voices/` fails startup in `start_qwen`.
 fn qwen_persona_names(cfg: &PocConfig) -> Vec<String> {
     let mut names = vec![cfg.qwen_voice.clone()];
     if cfg.tts_backend == "qwen" {
-        for v in &cfg.qwen_voices {
-            if !names.contains(v) {
+        let same = |a: &str, b: &str| {
+            a.replace('_', "-")
+                .eq_ignore_ascii_case(&b.replace('_', "-"))
+        };
+        let extra = cfg
+            .qwen_voices
+            .iter()
+            .chain(cfg.wake_heads.iter().map(|(_, persona)| persona));
+        for v in extra {
+            if !names.iter().any(|n| same(n, v)) {
                 names.push(v.clone());
             }
         }
@@ -931,7 +1060,7 @@ async fn events_ws(
 ) -> Response {
     match state.registry.take_receiver(&pc_id) {
         Some(rx) => ws.on_upgrade(move |socket| async move {
-            stream_events_until_closed(socket, rx).await;
+            stream_events_until_closed(socket, rx, &state, &pc_id).await;
             // Subscriber gone (hang-up) or call over: cancel the call now.
             let hook = state.hangups.lock().unwrap().remove(&pc_id);
             if let Some(hook) = hook {

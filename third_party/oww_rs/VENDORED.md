@@ -7,3 +7,6 @@ Local modifications for the PoC (docs/poc/flowcat-poc-plan.md Phase 1a):
 - mic-loop leftovers removed so the build is warning-free: unused imports in
   lib.rs, `Models::new`/`frame_length`, `model::new_model`/`new_oww_model`,
   `Model::frame_length` (2026-08-26)
+- `OwwModel::head_from_path` (frontend-less head; `audio` is now an `Option`) so
+  the server's multi-wake-word bank shares one melspectrogram/embedding
+  frontend across N heads via `OwwModel::detect(features)` (2026-08-26)

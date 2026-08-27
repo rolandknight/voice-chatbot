@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use futures::StreamExt;
+use futures::{SinkExt, StreamExt};
 use reqwest::Url;
 use serde_json::Value;
 use tokio::sync::watch;
@@ -11,7 +11,13 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::media::MediaPlayer;
 
-pub async fn run(url: Url, mut shutdown: watch::Receiver<bool>, mut media: Option<MediaPlayer>) {
+pub async fn run(
+    url: Url,
+    mut shutdown: watch::Receiver<bool>,
+    mut media: Option<MediaPlayer>,
+    mut outbound: tokio::sync::mpsc::UnboundedReceiver<String>,
+    activity: crate::wake::Activity,
+) {
     let (mut socket, _) = match tokio_tungstenite::connect_async(url.as_str()).await {
         Ok(connection) => connection,
         Err(error) => {
@@ -20,6 +26,9 @@ pub async fn run(url: Url, mut shutdown: watch::Receiver<bool>, mut media: Optio
         }
     };
     let mut housekeeping = tokio::time::interval(Duration::from_secs(1));
+    // Client → server frames (on-device wake reports). Once every sender is
+    // gone the branch is disabled instead of spinning on `None`.
+    let mut outbound_open = true;
 
     loop {
         tokio::select! {
@@ -34,9 +43,18 @@ pub async fn run(url: Url, mut shutdown: watch::Receiver<bool>, mut media: Optio
                     println!("{line}");
                 }
             }
+            frame = outbound.recv(), if outbound_open => match frame {
+                Some(text) => {
+                    if let Err(error) = socket.send(Message::Text(text.into())).await {
+                        tracing::warn!(%error, "failed to send a client frame");
+                    }
+                }
+                None => outbound_open = false,
+            },
             message = socket.next() => {
                 match message {
                     Some(Ok(Message::Text(text))) => {
+                        note_activity(&activity, &text);
                         match render(&text) {
                             Ok(Some(line)) => println!("{line}"),
                             Ok(None) => {}
@@ -57,6 +75,20 @@ pub async fn run(url: Url, mut shutdown: watch::Receiver<bool>, mut media: Optio
                 }
             }
         }
+    }
+}
+
+/// Conversation activity the wake session window re-arms on.
+fn note_activity(activity: &crate::wake::Activity, input: &str) {
+    let Ok(message) = serde_json::from_str::<Value>(input) else {
+        return;
+    };
+    let Some(kind) = message.get("type").and_then(Value::as_str) else {
+        return;
+    };
+    let payload = message.get("payload").cloned().unwrap_or(Value::Null);
+    if crate::wake::Activity::is_activity_event(kind, &payload) {
+        activity.note();
     }
 }
 
@@ -108,6 +140,17 @@ pub fn render(input: &str) -> anyhow::Result<Option<String>> {
                 .and_then(Value::as_str)
                 .unwrap_or("unknown")
         )),
+        voice_chatbot_protocol::WAKE_EVENT => {
+            match voice_chatbot_protocol::WakeState::from_payload(payload) {
+                Ok(voice_chatbot_protocol::WakeState::Awake {
+                    model,
+                    score,
+                    persona,
+                }) => Some(format!("[awake: {} {score:.2}]", persona.unwrap_or(model))),
+                Ok(voice_chatbot_protocol::WakeState::Asleep) => Some("[asleep]".to_string()),
+                Err(_) => None,
+            }
+        }
         _ => None,
     };
     Ok(rendered)
@@ -136,6 +179,18 @@ mod tests {
                 .unwrap()
                 .as_deref(),
             Some("assistant: Hi.")
+        );
+        assert_eq!(
+            render(r#"{"type":"wake","payload":{"state":"awake","model":"hey_marvin","score":0.874,"persona":"marvin"}}"#)
+                .unwrap()
+                .as_deref(),
+            Some("[awake: marvin 0.87]")
+        );
+        assert_eq!(
+            render(r#"{"type":"wake","payload":{"state":"asleep"}}"#)
+                .unwrap()
+                .as_deref(),
+            Some("[asleep]")
         );
     }
 
