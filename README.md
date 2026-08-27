@@ -20,6 +20,15 @@ on the client's librespot "Babel" endpoint as before. Config is `POC_*` env in
   host (`brew install yt-dlp`).
 - Personas: `POC_QWEN_VOICES=marvin,one-one` exposes `switch_persona`;
   `ANTHROPIC_API_KEY` exposes `ask_claude`. Both last for the current call.
+- Wake words: `POC_WAKE_DIR=models/wakeword` puts the server in Listen mode
+  with every `hey_<persona>.onnx` in that directory (`hey_one_one` → the
+  `one-one` voice); saying one selects that persona's voice for the session
+  and the client shows `[awake: marvin 0.87]` / `[asleep]`. The native client
+  detects on-device instead, on by default: `make call` loads
+  `models/wakeword` (`--wake-dir` / `FLOWCAT_WAKE_DIR` to change, `--no-wake`
+  for always-on push mode), sends audio only after a wake word and tells the
+  server which persona woke. Plan and conventions:
+  `docs/plans/wakeword-in-server.md`.
 
 The PoC targets live on in `Makefile.old` (`make -f Makefile.old poc-chatterbox`).
 

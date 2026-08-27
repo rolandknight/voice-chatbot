@@ -45,6 +45,38 @@ impl MediaCommand {
     }
 }
 
+/// `type` of the wake-state frame. In Listen mode the server publishes one on
+/// every wake-word fire (with the head, its score and the persona it selected)
+/// and one when the session window expires; mirrors the Pipecat ControlChannel
+/// `wake` message.
+pub const WAKE_EVENT: &str = "wake";
+
+/// Payload of a [`WAKE_EVENT`] frame.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum WakeState {
+    /// A wake word fired: `model` is the head file stem (`hey_marvin`),
+    /// `persona` the voice it selected (absent when the head maps to none).
+    Awake {
+        model: String,
+        score: f32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        persona: Option<String>,
+    },
+    /// The session window elapsed; a wake word is needed again.
+    Asleep,
+}
+
+impl WakeState {
+    pub fn to_payload(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("WakeState serializes")
+    }
+
+    pub fn from_payload(payload: &serde_json::Value) -> Result<Self, serde_json::Error> {
+        serde_json::from_value(payload.clone())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -72,5 +104,29 @@ mod tests {
             }
         );
         assert!(MediaCommand::from_payload(&json!({"action": "dance"})).is_err());
+    }
+
+    #[test]
+    fn wake_state_is_state_tagged() {
+        let awake = WakeState::Awake {
+            model: "hey_marvin".into(),
+            score: 0.875,
+            persona: Some("marvin".into()),
+        };
+        assert_eq!(
+            awake.to_payload(),
+            json!({"state": "awake", "model": "hey_marvin", "score": 0.875, "persona": "marvin"})
+        );
+        assert_eq!(WakeState::Asleep.to_payload(), json!({"state": "asleep"}));
+        assert_eq!(
+            WakeState::from_payload(&json!({"state": "awake", "model": "hey_babel", "score": 0.5}))
+                .unwrap(),
+            WakeState::Awake {
+                model: "hey_babel".into(),
+                score: 0.5,
+                persona: None
+            }
+        );
+        assert!(WakeState::from_payload(&json!({"state": "dreaming"})).is_err());
     }
 }

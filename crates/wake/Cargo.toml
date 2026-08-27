@@ -1,0 +1,10 @@
+[package]
+name = "voice-chatbot-wake"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "openWakeWord detector bank + Listen-mode state machine shared by the server gate and the native client"
+
+[dependencies]
+oww_rs = { package = "oww-rs", path = "../../third_party/oww_rs/crates/oww" }
+tracing = "0.1"

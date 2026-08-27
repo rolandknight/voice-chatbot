@@ -155,6 +155,16 @@ impl CallRegistry {
         self.calls.lock().unwrap().remove(&run_id);
     }
 
+    /// The per-call flags of a live call (None once it has ended / before it
+    /// registered).
+    pub fn state(&self, run_id: i64) -> Option<Arc<CallState>> {
+        self.calls
+            .lock()
+            .unwrap()
+            .get(&run_id)
+            .map(|h| h.state.clone())
+    }
+
     pub fn ctx(&self, run_id: i64) -> CallCtx {
         let handle = self.calls.lock().unwrap().get(&run_id).cloned();
         CallCtx {

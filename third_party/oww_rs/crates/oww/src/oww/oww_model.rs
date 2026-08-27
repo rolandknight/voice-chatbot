@@ -28,7 +28,15 @@ impl OwwModel {
     pub fn detection(&mut self, chunk_f32: Vec<f32>) -> Detection {
         let start = Instant::now();
 
-        let audio_features = match self.audio.get_audio_features(chunk_f32.as_slice()) {
+        let Some(audio) = self.audio.as_mut() else {
+            warn!("detection() on a frontend-less head; use detect(features)");
+            return crate::model::Detection {
+                detected: false,
+                probability: 0.0,
+                duration_ms: 0,
+            };
+        };
+        let audio_features = match audio.get_audio_features(chunk_f32.as_slice()) {
             Ok(features) => features,
             Err(e) => {
                 warn!("Embeddings error {:?}", e);
@@ -153,7 +161,7 @@ impl OwwModel {
             .into_runnable()
             .unwrap();
         Ok(OwwModel {
-            audio: AudioFeaturesTract::create_default(),
+            audio: Some(AudioFeaturesTract::create_default()),
             tract_model,
             threshold,
             last_detection_time: Instant::now(),
@@ -180,7 +188,7 @@ impl OwwModel {
             .into_runnable()
             .unwrap();
         Ok(OwwModel {
-            audio: AudioFeaturesTract::create_default(),
+            audio: Some(AudioFeaturesTract::create_default()),
             tract_model,
             threshold,
             last_detection_time: Instant::now(),
@@ -191,8 +199,33 @@ impl OwwModel {
 }
 
 impl OwwModel {
+    /// Head-only model (no melspectrogram/embedding frontend): several heads
+    /// can then share one [`AudioFeaturesTract`], each fed the same features
+    /// through [`OwwModel::detect`]. `detection()` is not usable on it.
+    pub fn head_from_path(path: &std::path::Path, threshold: f32) -> Result<OwwModel, String> {
+        let mut m = Self::new_from_path_inner(path, threshold, false)?;
+        // Start outside the refractory window: a freshly loaded head must be
+        // able to fire at once, not 2 s after construction.
+        m.last_detection_time = Instant::now()
+            .checked_sub(std::time::Duration::from_millis(NO_DETECTION_MS as u64 + 1))
+            .unwrap_or_else(Instant::now);
+        m.model_unlock_word = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "custom".to_string());
+        Ok(m)
+    }
+
     /// PoC probe: build from an arbitrary openWakeWord head model on disk.
     pub fn new_from_path(path: &std::path::Path, threshold: f32) -> Result<OwwModel, String> {
+        Self::new_from_path_inner(path, threshold, true)
+    }
+
+    fn new_from_path_inner(
+        path: &std::path::Path,
+        threshold: f32,
+        with_frontend: bool,
+    ) -> Result<OwwModel, String> {
         let bytes = fs::read(path).map_err(|e| e.to_string())?;
         let mut rdr = Cursor::new(bytes);
         let tract_model = tract_onnx::onnx()
@@ -203,7 +236,7 @@ impl OwwModel {
             .into_runnable()
             .map_err(|e| e.to_string())?;
         Ok(OwwModel {
-            audio: AudioFeaturesTract::create_default(),
+            audio: with_frontend.then(AudioFeaturesTract::create_default),
             tract_model: tract_model.into(),
             threshold,
             last_detection_time: Instant::now(),

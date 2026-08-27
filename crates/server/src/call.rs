@@ -269,21 +269,30 @@ pub async fn offer(
                 .into_response()
         }
     };
-    // Listen mode (Phase 1a): wake gate between VAD and SpeechGate when a
-    // wake head model is configured; push mode (empty) otherwise.
+    // Per-call flags the skills and the wake gate set (voice, backend); dropped
+    // with the call.
+    let call_state = Arc::new(crate::skills::CallState::default());
+    // Listen mode: wake gate between VAD and SpeechGate when wake heads are
+    // configured (POC_WAKE_DIR / POC_WAKE_MODEL); push mode otherwise. A fire
+    // selects the head's persona voice on `call_state` and publishes `wake`
+    // events on the call's channel.
     let mut input_processors: Vec<Box<dyn flowcat_core::processor::FrameProcessor>> = Vec::new();
-    if !cfg.wake_model.is_empty() {
-        let detector = match crate::wake::OpenWakeWord::load(&cfg.wake_model, cfg.wake_threshold) {
-            Ok(d) => d,
+    if !cfg.wake_heads.is_empty() {
+        let bank = match voice_chatbot_wake::WakeBank::load(&cfg.wake_heads, cfg.wake_threshold) {
+            Ok(b) => b,
             Err(e) => {
                 return (
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("load wake model: {e}"),
+                    format!("load wake heads: {e}"),
                 )
                     .into_response()
             }
         };
-        input_processors.push(Box::new(crate::wake::WakeGate::new(detector, 15.0)));
+        input_processors.push(Box::new(
+            crate::wake::WakeGate::new(bank, cfg.wake_session_secs)
+                .with_state(call_state.clone())
+                .with_events(events.clone()),
+        ));
     }
     // The selected local recognizer is loaded once per process (in PocState or
     // the local Nemotron sidecar). Each call gets isolated mutable state.
@@ -326,8 +335,6 @@ pub async fn offer(
                 .build(),
         ),
     };
-    // Per-call flags the skills set (voice, backend); dropped with the call.
-    let call_state = Arc::new(crate::skills::CallState::default());
     let claude = (!cfg.anthropic_key.trim().is_empty()).then(|| {
         crate::llm_claude::ClaudeLlm::new(cfg.anthropic_key.clone(), cfg.claude_model.clone())
     });
