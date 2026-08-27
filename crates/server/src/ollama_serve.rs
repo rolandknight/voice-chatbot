@@ -3,7 +3,9 @@
 //! The chatbot owns its LLM's lifetime: if nothing answers on the base URL it
 //! spawns `ollama serve` as a child (env `OLLAMA_KEEP_ALIVE=-1` and
 //! `OLLAMA_CONTEXT_LENGTH=<num_ctx>` as belt and braces — the native `/api/chat`
-//! requests carry both anyway), waits for `/api/tags`, and on shutdown
+//! requests carry both anyway; `OLLAMA_HOST=<host>:<port>` picks the bind
+//! address, `0.0.0.0` to share the model over the LAN), waits for `/api/tags`,
+//! and on shutdown
 //! terminates the child it started. A serve that is already running (brew,
 //! launchd, the Ollama.app) is used as-is: with the native API its environment
 //! no longer decides residency or context size.
@@ -55,6 +57,19 @@ pub fn plan(supervise: Supervise, port_answers: bool) -> Plan {
     }
 }
 
+/// The port in `base_url` (`http://host:port[/path]`), defaulting to Ollama's 11434.
+pub fn port_of(base_url: &str) -> u16 {
+    base_url
+        .split("//")
+        .nth(1)
+        .unwrap_or(base_url)
+        .split('/')
+        .next()
+        .and_then(|authority| authority.rsplit_once(':'))
+        .and_then(|(_, port)| port.parse().ok())
+        .unwrap_or(11434)
+}
+
 pub struct OllamaServe {
     base_url: String,
     child: Option<tokio::process::Child>,
@@ -77,12 +92,16 @@ impl OllamaServe {
             .unwrap_or(false)
     }
 
-    /// Make a serve available at `base_url` per the decision table.
+    /// Make a serve available at `base_url` per the decision table. A spawned
+    /// serve binds `bind_host` on `base_url`'s port (`127.0.0.1` keeps it
+    /// local; `0.0.0.0` exposes it to the network). Only a spawn honours it —
+    /// an existing serve's bind address is whatever it was started with.
     pub async fn ensure(
         base_url: &str,
         supervise: Supervise,
         bin: &str,
         num_ctx: u32,
+        bind_host: &str,
         log_path: &Path,
     ) -> Result<Self, String> {
         let base_url = base_url
@@ -112,9 +131,11 @@ impl OllamaServe {
                 let log_err = log
                     .try_clone()
                     .map_err(|e| format!("clone log handle: {e}"))?;
-                tracing::info!(bin, num_ctx, log = %log_path.display(), "ollama: starting `ollama serve`");
+                let ollama_host = format!("{bind_host}:{}", port_of(&base_url));
+                tracing::info!(bin, num_ctx, %ollama_host, log = %log_path.display(), "ollama: starting `ollama serve`");
                 let child = tokio::process::Command::new(bin)
                     .arg("serve")
+                    .env("OLLAMA_HOST", &ollama_host)
                     .env("OLLAMA_KEEP_ALIVE", "-1")
                     .env("OLLAMA_CONTEXT_LENGTH", num_ctx.to_string())
                     .stdout(std::process::Stdio::from(log))
@@ -207,6 +228,14 @@ mod tests {
         assert_eq!(Supervise::parse("AUTO").unwrap(), Supervise::Auto);
         assert_eq!(Supervise::parse(" never ").unwrap(), Supervise::Never);
         assert!(Supervise::parse("sometimes").is_err());
+    }
+
+    #[test]
+    fn port_of_base_url() {
+        assert_eq!(port_of("http://127.0.0.1:11434"), 11434);
+        assert_eq!(port_of("http://localhost:11500/v1"), 11500);
+        assert_eq!(port_of("http://localhost"), 11434);
+        assert_eq!(port_of("http://localhost/v1"), 11434);
     }
 
     #[tokio::test]

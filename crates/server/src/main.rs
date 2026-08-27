@@ -106,6 +106,9 @@ pub struct PocConfig {
     /// ADR-0007 Layer 2: `auto` | `never` | `always`.
     pub ollama_supervise: ollama_serve::Supervise,
     pub ollama_bin: String,
+    /// Bind address for a spawned serve: `127.0.0.1` (default) or `0.0.0.0` to
+    /// share the model with the rest of the LAN. Ignored for an existing serve.
+    pub ollama_host: String,
     /// Release the model on exit (`keep_alive: 0`) so its memory returns.
     pub ollama_unload_on_exit: bool,
     /// Keep-warm period: a one-token prefix request every N seconds while idle
@@ -285,6 +288,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map_err(|error| format!("invalid POC_LLM_NUM_CTX: {error}"))?,
         ollama_supervise: ollama_serve::Supervise::parse(&env_or("POC_OLLAMA_SUPERVISE", "auto"))?,
         ollama_bin: env_or("POC_OLLAMA_BIN", "ollama"),
+        ollama_host: env_or("POC_OLLAMA_HOST", "127.0.0.1"),
         ollama_unload_on_exit: env_or("POC_OLLAMA_UNLOAD_ON_EXIT", "true")
             .parse::<bool>()
             .map_err(|error| format!("invalid POC_OLLAMA_UNLOAD_ON_EXIT: {error}"))?,
@@ -760,6 +764,7 @@ async fn start_ollama(
         cfg.ollama_supervise,
         &cfg.ollama_bin,
         cfg.llm_num_ctx,
+        &cfg.ollama_host,
         &poc_dir.join("logs/ollama.log"),
     )
     .await?;
