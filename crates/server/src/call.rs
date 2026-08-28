@@ -333,6 +333,15 @@ pub async fn offer(
                 .with_events(events.clone()),
         ));
     }
+    // Both wake paths (server gate above, native client via apply_client_wake)
+    // arm this: the wake phrase and a command after a short pause become one
+    // turn instead of two racing ones.
+    if cfg.wake_grace_secs > 0.0 {
+        input_processors.push(Box::new(crate::wake::WakeGrace::new(
+            call_state.clone(),
+            std::time::Duration::from_secs_f32(cfg.wake_grace_secs),
+        )));
+    }
     // The selected local recognizer is loaded once per process (in PocState or
     // the local Nemotron sidecar). Each call gets isolated mutable state.
     // Streaming backends publish display-only interims; every backend publishes
@@ -375,7 +384,11 @@ pub async fn offer(
         ),
     };
     let claude = (!cfg.anthropic_key.trim().is_empty()).then(|| {
-        crate::llm_claude::ClaudeLlm::new(cfg.anthropic_key.clone(), cfg.claude_model.clone())
+        crate::llm_claude::ClaudeLlm::new(
+            cfg.anthropic_key.clone(),
+            cfg.claude_model.clone(),
+            cfg.claude_effort.clone(),
+        )
     });
     let inner = SwitchingLlm {
         local: inner,

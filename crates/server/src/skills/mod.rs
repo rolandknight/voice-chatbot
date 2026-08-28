@@ -101,6 +101,10 @@ pub struct CallState {
     /// persona → prompt text, loaded once at startup (`crates/server/prompt.*.txt`).
     prompts: HashMap<String, String>,
     claude: std::sync::atomic::AtomicBool,
+    /// When a wake word last fired (server gate or the native client's report).
+    /// Consumed once by `wake::WakeGrace` to hold the first end-of-speech edge
+    /// after the wake, so "Hey Marvin … what time is it" is one turn.
+    wake_armed_at: Mutex<Option<std::time::Instant>>,
 }
 
 /// `prompt.<persona>.txt` lookup key: lowercase, `_` as `-` (the persona
@@ -156,6 +160,21 @@ impl CallState {
             backend == LlmBackend::Claude,
             std::sync::atomic::Ordering::Relaxed,
         );
+    }
+
+    /// A wake word just fired: the next end-of-speech edge is the wake phrase's
+    /// own, and may be followed by the command after a short pause.
+    pub fn arm_wake_grace(&self) {
+        *self.wake_armed_at.lock().unwrap() = Some(std::time::Instant::now());
+    }
+
+    /// Consume the arm if it fired within `max_age` (a stale arm — a wake with
+    /// no speech edge behind it — must not hold a later, unrelated turn).
+    pub fn take_wake_grace(&self, max_age: std::time::Duration) -> bool {
+        match self.wake_armed_at.lock().unwrap().take() {
+            Some(at) => at.elapsed() <= max_age,
+            None => false,
+        }
     }
 }
 

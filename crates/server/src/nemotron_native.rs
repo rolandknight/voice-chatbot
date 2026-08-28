@@ -901,16 +901,15 @@ mod tests {
     #[test]
     #[ignore]
     fn native_probe() {
-        let poc = Path::new(env!("CARGO_MANIFEST_DIR"))
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
             .parent()
-            .unwrap()
-            .join("poc");
-        let model = poc.join("models/nemotron/nvidia/nemotron-speech-streaming-en-0.6b/ebe59e5a817142986528bbbee5dba8db7b38ed50/nemotron-speech-streaming-en-0.6b.q8_0.gguf");
+            .unwrap();
+        let model = root.join("models/nemotron/nvidia/nemotron-speech-streaming-en-0.6b/ebe59e5a817142986528bbbee5dba8db7b38ed50/nemotron-speech-streaming-en-0.6b.q8_0.gguf");
         let engine = load_engine(model.to_str().unwrap(), Device::Gpu(0), 6).expect("load");
         let mut stream = Stream::create(engine, &[]).expect("stream");
-        let wav = std::fs::read(poc.join("harness/fixtures/t1_time.wav")).expect("fixture");
+        let wav = std::fs::read(root.join("fixtures/t1_time.wav")).expect("fixture");
         let pcm: Vec<f32> = wav[44..]
             .chunks_exact(2)
             .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32_768.0)

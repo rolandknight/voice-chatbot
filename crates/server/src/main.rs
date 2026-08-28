@@ -155,6 +155,9 @@ pub struct PocConfig {
     pub wake_threshold: f32,
     /// Silence that ends a wake session (POC_WAKE_SESSION_SECS).
     pub wake_session_secs: f32,
+    /// How long the first end-of-speech after a wake is held for the command
+    /// to follow (POC_WAKE_GRACE_SECS; 0 disables). See `wake::WakeGrace`.
+    pub wake_grace_secs: f32,
     /// TTS backend: "kokoro" (default) or "chatterbox" (Phase 1b cloned voice).
     pub tts_backend: String,
     pub chatterbox_url: String,
@@ -174,6 +177,9 @@ pub struct PocConfig {
     /// `ask_claude`: Anthropic API key (empty → the tool is not advertised) and model.
     pub anthropic_key: String,
     pub claude_model: String,
+    /// `output_config.effort` for the Claude turns; empty omits the field (for
+    /// models that reject it). See `llm_claude::DEFAULT_EFFORT`.
+    pub claude_effort: String,
     pub qwen_interval_s: f64,
     /// Host ICE candidate address to advertise (POC_ADVERTISE_IP). None →
     /// the interface that routes back to each caller.
@@ -281,10 +287,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or_else(|_| "info,str0m=warn".into()),
         )
         .init();
-    // poc/.env when run from repo root or poc/; fall back silently otherwise.
-    // poc/.env holds the server profile; the repo-root .env holds the shared
-    // secrets (Spotify, search keys). Neither overrides variables already set.
-    env_file::load_if_unset(std::path::Path::new("poc/.env"));
+    // The repo-root .env (run from the repo root; silently skipped otherwise)
+    // holds both the server profile (POC_*) and the shared secrets (Spotify,
+    // search keys). It never overrides variables already set.
     env_file::load_if_unset(std::path::Path::new(".env"));
     if let Some(pos) = std::env::args().position(|a| a == "spotify-login") {
         let headless = std::env::args().skip(pos + 1).any(|a| a == "--headless");
@@ -297,12 +302,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(Into::into);
     }
 
-    // crates/server. Runtime artifacts (downloaded models, stubs, logs) still
-    // live under poc/ until the production layout for them is decided.
+    // crates/server. Runtime artifacts live under the repo root: models/
+    // (downloaded STT/VAD models next to the wake heads), .deps/ (native
+    // libs), logs/.
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let repo_root = manifest_dir.parent().unwrap().parent().unwrap();
-    let poc_dir = repo_root.join("poc");
-    let poc_dir = poc_dir.as_path();
+    let runtime_dir = repo_root;
     let stt_backend = SttBackend::parse(&env_or("POC_STT_BACKEND", "whisper"))?;
 
     // Use the physical-core count as a practical default on SMT machines,
@@ -358,12 +363,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         stt_backend,
         whisper_model: env_or(
             "POC_WHISPER_MODEL",
-            &poc_dir.join("models/ggml-base.en.bin").to_string_lossy(),
+            &runtime_dir.join("models/ggml-base.en.bin").to_string_lossy(),
         ),
         whisper_threads,
         moonshine_model: env_or(
             "POC_MOONSHINE_MODEL",
-            &poc_dir
+            &runtime_dir
                 .join(
                     "models/moonshine/download.moonshine.ai/model/medium-streaming-en/quantized_26_07_30",
                 )
@@ -374,7 +379,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         nemotron_url: env_or("POC_NEMOTRON_URL", "http://127.0.0.1:8178"),
         nemotron_model: env_or(
             "POC_NEMOTRON_MODEL",
-            &poc_dir
+            &runtime_dir
                 .join("models/nemotron/nvidia/nemotron-speech-streaming-en-0.6b/ebe59e5a817142986528bbbee5dba8db7b38ed50/nemotron-speech-streaming-en-0.6b.q8_0.gguf")
                 .to_string_lossy(),
         ),
@@ -397,7 +402,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         persona_prompts: load_persona_prompts(manifest_dir)?,
         vad_model: env_or(
             "POC_VAD_MODEL",
-            &poc_dir.join("models/silero_vad.onnx").to_string_lossy(),
+            &runtime_dir.join("models/silero_vad.onnx").to_string_lossy(),
         ),
         vad_stop_secs,
         wake_heads: voice_chatbot_wake::resolve_heads(
@@ -409,6 +414,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         wake_session_secs: env_or("POC_WAKE_SESSION_SECS", "15")
             .parse::<f32>()
             .map_err(|error| format!("invalid POC_WAKE_SESSION_SECS: {error}"))?,
+        wake_grace_secs: env_or("POC_WAKE_GRACE_SECS", "0.8")
+            .parse::<f32>()
+            .map_err(|error| format!("invalid POC_WAKE_GRACE_SECS: {error}"))?,
         tts_backend: env_or("POC_TTS_BACKEND", "kokoro"),
         chatterbox_url: env_or("POC_CHATTERBOX_URL", "http://127.0.0.1:8004"),
         chatterbox_voice: env_or("POC_CHATTERBOX_VOICE", "marvin.wav"),
@@ -427,6 +435,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         voice_presets: voice_presets(&repo_root.join("voices")),
         anthropic_key: env_or("ANTHROPIC_API_KEY", ""),
         claude_model: env_or("POC_CLAUDE_MODEL", "claude-opus-5"),
+        claude_effort: env_or("POC_CLAUDE_EFFORT", llm_claude::DEFAULT_EFFORT),
         qwen_size: env_or("POC_QWEN_SIZE", "1.7B"),
         qwen_interval_s: env_or("POC_QWEN_INTERVAL_S", "0.32")
             .parse::<f64>()
@@ -470,6 +479,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if !std::path::Path::new(&cfg.vad_model).exists() {
         return Err(format!("silero vad model missing: {}", cfg.vad_model).into());
+    }
+    if !(cfg.wake_grace_secs >= 0.0 && cfg.wake_grace_secs <= 3.0) {
+        return Err("POC_WAKE_GRACE_SECS must be in [0, 3]".into());
     }
     if cfg.wake_heads.is_empty() {
         tracing::info!("wake: push mode (no POC_WAKE_DIR / POC_WAKE_MODEL)");
@@ -530,16 +542,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let sfx_dir = poc_dir.join("logs/sfx");
+    let sfx_dir = runtime_dir.join("logs/sfx");
     let (registry, calls) = build_skills(&cfg, sfx_dir.clone())?;
-    let session = SkillSession::new(registry, calls, poc_dir.join("logs/artifacts"));
+    let session = SkillSession::new(registry, calls, runtime_dir.join("logs/artifacts"));
 
     // ADR-0007: the chatbot owns its LLM's lifecycle. Ensure a serve, pull the
     // model if missing, warm the exact prefix, verify residency — before the
     // audio engines load, so `--warm-only` (make ollama) is quick.
     let warm_only = std::env::args().any(|a| a == "--warm-only");
     let ollama_serve = if cfg.llm_provider == "ollama" {
-        Some(start_ollama(&cfg, &session, poc_dir).await?)
+        Some(start_ollama(&cfg, &session, runtime_dir).await?)
     } else {
         None
     };
@@ -559,7 +571,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ready_pcm = if cfg.tts_backend == "chatterbox" {
         let path = env_or(
             "POC_GREETING_WAV",
-            &poc_dir.join("logs/chatterbox-health.wav").to_string_lossy(),
+            &runtime_dir
+                .join("logs/chatterbox-health.wav")
+                .to_string_lossy(),
         );
         match tts_chatterbox::load_ready_wav(&path) {
             Ok(pcm) => {
@@ -593,7 +607,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             #[cfg(not(feature = "moonshine"))]
             {
                 return Err(
-                    "POC_STT_BACKEND=moonshine requires a Moonshine build; run POC_STT_BACKEND=moonshine make poc-build"
+                    "POC_STT_BACKEND=moonshine requires a Moonshine build; build with the moonshine feature: SERVER_FEATURES=moonshine,... make server-build"
                         .into(),
                 );
             }
@@ -857,6 +871,9 @@ fn apply_client_wake(state: &PocState, pc_id: &str, text: &str) {
             if let Some(p) = persona {
                 call.set_voice(&p);
             }
+            // The client's wake phrase is about to end a VAD turn here; hold
+            // that edge for the command (wake::WakeGrace).
+            call.arm_wake_grace();
         }
         WakeState::Asleep => {
             tracing::info!(%pc_id, "client wake session ended");
@@ -893,7 +910,7 @@ async fn shutdown_signal() {
 async fn start_ollama(
     cfg: &PocConfig,
     session: &SkillSession,
-    poc_dir: &std::path::Path,
+    runtime_dir: &std::path::Path,
 ) -> Result<ollama_serve::OllamaServe, Box<dyn std::error::Error>> {
     use flowcat_core::SessionSource;
 
@@ -904,7 +921,7 @@ async fn start_ollama(
         &cfg.ollama_bin,
         cfg.llm_num_ctx,
         &cfg.ollama_host,
-        &poc_dir.join("logs/ollama.log"),
+        &runtime_dir.join("logs/ollama.log"),
     )
     .await?;
     let llm = llm_ollama::OllamaLlm::new(serve.base_url(), cfg.llm_model.clone())

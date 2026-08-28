@@ -17,11 +17,11 @@ fn main() {
     );
     let lib_dir = env::var_os("MOONSHINE_LIB_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| manifest_dir.join("../../poc/.deps/moonshine/v0.1.3/lib"));
+        .unwrap_or_else(|| manifest_dir.join("../../.deps/moonshine/v0.1.3/lib"));
     let lib_dir = lib_dir.canonicalize().unwrap_or_else(|error| {
         panic!(
             "Moonshine feature enabled but native library directory {} is unavailable: {error}. \
-             Run the PoC setup or set MOONSHINE_LIB_DIR.",
+             Run ./scripts/setup_moonshine.sh or set MOONSHINE_LIB_DIR.",
             lib_dir.display()
         )
     });
@@ -40,7 +40,7 @@ fn main() {
             // libmoonshine.so has a $ORIGIN runpath for this co-located SONAME.
             require_file(&lib_dir, "libonnxruntime.so.1");
             println!("cargo:rustc-link-lib=dylib=moonshine");
-            // Use an absolute development rpath so `make poc-up` can launch the
+            // Use an absolute development rpath so `make server` can launch the
             // Cargo output directly. Packaged binaries should copy both shared
             // libraries beside the executable and use an $ORIGIN rpath instead.
             println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib_dir.display());
@@ -106,7 +106,7 @@ fn nemotron_native_link() {
     );
     let lib_dir = env::var_os("NEMO_SPEECH_LIB_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| manifest_dir.join("../../poc/.deps/nemo-speech/v0.1.0/lib"));
+        .unwrap_or_else(|| manifest_dir.join("../../.deps/nemo-speech/v0.1.0/lib"));
     let lib_dir = lib_dir.canonicalize().unwrap_or_else(|error| {
         panic!(
             "nemotron-native enabled but {} is unavailable: {error}. Run ./scripts/setup_nemotron.sh or set NEMO_SPEECH_LIB_DIR.",

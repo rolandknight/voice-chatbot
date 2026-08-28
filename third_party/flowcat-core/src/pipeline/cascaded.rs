@@ -91,6 +91,11 @@ struct RollingContext {
     system_prompt: Option<String>,
     /// Tools advertised to the LLM (carried into each `LlmContext`).
     tools: Vec<Value>,
+    /// The user-turn generation: bumped by [`push_user`](Self::push_user) for every
+    /// final transcription. A tool-result re-run whose call was made in an older
+    /// turn is stale (the caller has moved on) and is not re-run — see
+    /// [`CascadedToolBridge`].
+    turn: u64,
 }
 
 impl RollingContext {
@@ -99,6 +104,7 @@ impl RollingContext {
             messages: Vec::new(),
             system_prompt,
             tools,
+            turn: 0,
         }
     }
 
@@ -106,6 +112,18 @@ impl RollingContext {
     fn push(&mut self, role: &str, content: &str) {
         self.messages
             .push(json!({ "role": role, "content": content }));
+    }
+
+    /// Append a user message and start a new turn; returns the new generation.
+    fn push_user(&mut self, content: &str) -> u64 {
+        self.push("user", content);
+        self.turn += 1;
+        self.turn
+    }
+
+    /// The current user-turn generation (0 before the first user message).
+    fn turn(&self) -> u64 {
+        self.turn
     }
 
     /// Build an immutable [`LlmContext`] snapshot to run the LLM over (system
@@ -719,11 +737,12 @@ impl FrameProcessor for UserContextAggregator {
             }
             // Accrue the user message + snapshot the context under the lock; drop the
             // guard before awaiting the push (no std Mutex held across await).
-            let (snapshot, len) = {
+            let (snapshot, len, turn) = {
                 let mut c = self.ctx.lock().unwrap();
-                c.push("user", text);
-                (c.snapshot(), c.len())
+                let turn = c.push_user(text);
+                (c.snapshot(), c.len(), turn)
             };
+            tracing::debug!(turn, "user turn");
             // Fire the summarizer hook off the hot path (pipecat transition summarize).
             self.maybe_summarize(len);
             // Lock the turn (mute STT until the reply plays out) so a second question
@@ -1064,7 +1083,9 @@ struct CascadedToolBridge {
     /// [`ToolResult`] returns — so the rolling context can record the
     /// `assistant`+`tool_calls` turn OpenAI requires before the `tool` result.
     /// Transition/end ACKs drop their entry without emitting a tool message.
-    pending: std::collections::HashMap<String, (String, Value)>,
+    /// The third element is the user-turn generation the call was made in
+    /// ([`RollingContext::turn`]).
+    pending: std::collections::HashMap<String, (String, Value, u64)>,
 }
 
 impl CascadedToolBridge {
@@ -1089,12 +1110,14 @@ impl FrameProcessor for CascadedToolBridge {
             // the reused BrainProcessor consumes it unchanged. Consume the original
             // (don't forward it past the brain into the assistant aggregator / TTS).
             Frame::FunctionCallsStarted(calls) => {
+                let turn = self.ctx.lock().unwrap().turn();
                 for c in calls {
                     // Track the call so its result can be paired into a valid
-                    // assistant→tool_calls→tool exchange when it returns.
+                    // assistant→tool_calls→tool exchange when it returns, and
+                    // stamp the turn so a late result can't re-run a superseded turn.
                     self.pending.insert(
                         c.tool_call_id.clone(),
-                        (c.function_name.clone(), c.arguments.clone()),
+                        (c.function_name.clone(), c.arguments.clone(), turn),
                     );
                     link.push_down(Frame::Custom(Arc::new(ModelToolCall {
                         id: c.tool_call_id.clone(),
@@ -1141,13 +1164,35 @@ impl FrameProcessor for CascadedToolBridge {
                         // Record the assistant `tool_calls` turn (if we tracked it)
                         // so the tool result has a valid call to answer, then the
                         // result itself, then re-run for the continuation.
-                        if let Some((name, args)) = self.pending.remove(&tr.id) {
-                            ctx.push_assistant_tool_call(&tr.id, &name, &args);
-                        }
+                        let call_turn = match self.pending.remove(&tr.id) {
+                            Some((name, args, turn)) => {
+                                ctx.push_assistant_tool_call(&tr.id, &name, &args);
+                                turn
+                            }
+                            None => ctx.turn(),
+                        };
                         ctx.push_tool_result(&tr.id, &tr.result);
-                        ctx.snapshot()
+                        // Stale: the caller said something new since this call was
+                        // made. That newer turn runs (or ran) over a context that
+                        // carries this result, so re-running here would answer the
+                        // same question twice (the "double reply" after a wake
+                        // phrase + question split into two finals). The exchange
+                        // stays in the history so the pairing is valid.
+                        if call_turn != ctx.turn() {
+                            tracing::info!(
+                                tool_call_id = %tr.id,
+                                call_turn,
+                                current_turn = ctx.turn(),
+                                "stale tool result: turn superseded, not re-running the LLM"
+                            );
+                            None
+                        } else {
+                            Some(ctx.snapshot())
+                        }
                     };
-                    link.push_up(Frame::LlmContext(Arc::new(snapshot))).await;
+                    if let Some(snapshot) = snapshot {
+                        link.push_up(Frame::LlmContext(Arc::new(snapshot))).await;
+                    }
                 } else {
                     // Transition/stay/end ACK — no `tool` message is appended (the
                     // transition re-runs via its paired Reprompt); drop the tracked
@@ -2591,6 +2636,139 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("cardiology"));
+    }
+
+    // ---- tool-result re-run generation guard ---------------------------------
+    // A tool result for a call made in an OLDER user turn must not re-run the LLM:
+    // the newer turn already answers over a context carrying the result. Live bug:
+    // "Hey Babel!" / "What time is it?" landing as two finals produced the same
+    // reply twice (once from the second turn, once from the first turn's tool
+    // re-run).
+
+    /// Captures what the bridge pushes UPSTREAM (the LLM side).
+    #[derive(Clone, Default)]
+    struct UpCapture(Arc<Mutex<Vec<&'static str>>>);
+    #[async_trait]
+    impl FrameProcessor for UpCapture {
+        fn name(&self) -> &str {
+            "UpCapture"
+        }
+        async fn process_frame(&mut self, env: Envelope, link: &Link) -> Result<()> {
+            if env.direction == crate::processor::frame::Direction::Upstream {
+                self.0.lock().unwrap().push(env.frame.name());
+            }
+            link.push(env.meta, env.frame, env.direction).await;
+            Ok(())
+        }
+    }
+
+    /// A stand-in brain: answers every `ModelToolCall` with a workflow result,
+    /// optionally landing a new user final on the shared context first.
+    struct FakeBrain {
+        ctx: SharedContext,
+        new_final_before_result: bool,
+    }
+    #[async_trait]
+    impl FrameProcessor for FakeBrain {
+        fn name(&self) -> &str {
+            "FakeBrain"
+        }
+        async fn process_frame(&mut self, env: Envelope, link: &Link) -> Result<()> {
+            if let Frame::Custom(c) = &env.frame {
+                if let Some(tc) = c.as_any().downcast_ref::<ModelToolCall>() {
+                    if self.new_final_before_result {
+                        self.ctx.lock().unwrap().push_user("what time is it?");
+                    }
+                    link.push_up(Frame::Custom(Arc::new(ToolResult {
+                        id: tc.id.clone(),
+                        result: json!({ "time": "20:40" }),
+                    })))
+                    .await;
+                    return Ok(());
+                }
+            }
+            link.push(env.meta, env.frame, env.direction).await;
+            Ok(())
+        }
+    }
+
+    async fn run_bridge(new_final_before_result: bool) -> (Vec<&'static str>, LlmContext) {
+        let ctx: SharedContext = Arc::new(Mutex::new(RollingContext::new(None, vec![])));
+        ctx.lock().unwrap().push_user("hey babel");
+        let up = UpCapture::default();
+        let task = PipelineTask::new(
+            Pipeline::new(vec![
+                Box::new(up.clone()),
+                Box::new(CascadedToolBridge::new(ctx.clone())),
+                Box::new(FakeBrain {
+                    ctx: ctx.clone(),
+                    new_final_before_result,
+                }),
+            ]),
+            PipelineTaskParams::default(),
+            vec![],
+        );
+        let sender = task.queue_sender();
+        // Run the chain live: the tool round trip (down to the brain, back up
+        // to the capture) must settle BEFORE the End drains the chain, else the
+        // End reaches the head-side capture first and it exits.
+        let running = tokio::spawn(task.run());
+        sender
+            .send(Frame::FunctionCallsStarted(vec![FunctionCall {
+                function_name: "get_current_time".into(),
+                tool_call_id: "call_1".into(),
+                arguments: json!({}),
+            }]))
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        sender.send(Frame::End { reason: None }).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), running)
+            .await
+            .expect("bridge pipeline timed out")
+            .expect("join")
+            .expect("run ok");
+        let seen = up.0.lock().unwrap().clone();
+        let snap = ctx.lock().unwrap().snapshot();
+        (seen, snap)
+    }
+
+    #[tokio::test]
+    async fn current_turn_tool_result_reruns_the_llm() {
+        let (up, snap) = run_bridge(false).await;
+        assert_eq!(
+            up.iter().filter(|n| **n == "LlmContext").count(),
+            1,
+            "a tool result for the current turn re-runs the LLM once; saw {up:?}"
+        );
+        assert_eq!(snap.messages.last().unwrap()["role"], "tool");
+    }
+
+    #[tokio::test]
+    async fn stale_turn_tool_result_does_not_rerun_the_llm() {
+        let (up, snap) = run_bridge(true).await;
+        assert_eq!(
+            up.iter().filter(|n| **n == "LlmContext").count(),
+            0,
+            "a tool result for a superseded turn must not re-run the LLM; saw {up:?}"
+        );
+        // The exchange is still recorded so the history stays a valid
+        // assistant(tool_calls) → tool pairing for the next run.
+        let roles: Vec<&str> = snap
+            .messages
+            .iter()
+            .map(|m| m["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(roles, vec!["user", "user", "assistant", "tool"]);
+    }
+
+    #[test]
+    fn push_user_bumps_the_turn_generation() {
+        let mut ctx = RollingContext::new(None, vec![]);
+        assert_eq!(ctx.turn(), 0);
+        assert_eq!(ctx.push_user("a"), 1);
+        assert_eq!(ctx.push_user("b"), 2);
+        ctx.push("assistant", "reply");
+        assert_eq!(ctx.turn(), 2, "only user finals start a turn");
     }
 
     // ----------------------------------------------------------------------

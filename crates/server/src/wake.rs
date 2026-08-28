@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 
-use flowcat_core::processor::frame::{AudioFrame, Frame, StartParams};
+use flowcat_core::processor::frame::{AudioFrame, Frame, FrameMeta, StartParams};
 use flowcat_core::processor::{Envelope, FrameProcessor, Link, ProcessorSetup};
 use flowcat_core::Result;
 use flowcat_server::events::CallEvents;
@@ -92,6 +92,9 @@ impl<D: WakeDetector> WakeGate<D> {
         );
         if let Some(state) = &self.state {
             state.set_voice(&persona);
+            if open {
+                state.arm_wake_grace();
+            }
         }
         self.publish(WakeState::Awake {
             model: name,
@@ -181,5 +184,249 @@ impl<D: WakeDetector> FrameProcessor for WakeGate<D> {
             _ => link.push(env.meta, env.frame, env.direction).await,
         }
         Ok(())
+    }
+}
+
+// ===========================================================================
+// WakeGrace — one turn for "wake phrase … pause … command"
+// ===========================================================================
+
+/// A wake arm older than this is ignored: the wake event and the speech edge
+/// it belongs to arrive within a second of each other (the native client
+/// reports over the events socket while the audio rides WebRTC).
+const WAKE_ARM_MAX_AGE: Duration = Duration::from_secs(5);
+
+/// Sits after the wake gate (or alone, for the native client that detects
+/// on-device) and ahead of the SpeechGate. With the default 0.2 s VAD stop, a
+/// caller who pauses after the wake phrase — "Hey Marvin. … What time is it?"
+/// — produces two finals: the bare wake phrase gets a reply of its own, and
+/// the two turns then race each other (the double reply in docs/todo.md).
+///
+/// When [`CallState::arm_wake_grace`] has fired (the server gate, or the
+/// client's `wake` event via `main.rs::apply_client_wake`), the FIRST
+/// `UserStoppedSpeaking` is held for `grace`. Audio keeps flowing, so the
+/// SpeechGate stays open and the STT keeps accumulating. Speech resuming inside
+/// the window swallows both edges (one utterance); silence past the window
+/// releases the held edge so a bare "Hey Marvin" still gets its answer. Later
+/// turns in the session are untouched — no added latency there.
+pub struct WakeGrace {
+    state: Arc<CallState>,
+    grace: Duration,
+    /// The held end-of-speech edge and when it must be released.
+    held: Option<(FrameMeta, Instant)>,
+}
+
+impl WakeGrace {
+    pub fn new(state: Arc<CallState>, grace: Duration) -> Self {
+        Self {
+            state,
+            grace,
+            held: None,
+        }
+    }
+
+    async fn release(&mut self, link: &Link, why: &str) {
+        if let Some((meta, _)) = self.held.take() {
+            tracing::debug!(why, "wake grace: releasing the held end-of-speech edge");
+            link.push(
+                meta,
+                Frame::UserStoppedSpeaking,
+                flowcat_core::processor::frame::Direction::Downstream,
+            )
+            .await;
+        }
+    }
+}
+
+#[async_trait]
+impl FrameProcessor for WakeGrace {
+    fn name(&self) -> &str {
+        "WakeGrace"
+    }
+
+    /// Barge-in: nothing to hold on to.
+    async fn on_interruption(&mut self) -> Result<()> {
+        self.held = None;
+        Ok(())
+    }
+
+    async fn process_frame(&mut self, env: Envelope, link: &Link) -> Result<()> {
+        match &env.frame {
+            Frame::InputAudio(_) => {
+                // Lazy expiry on the audio clock (frames keep arriving while the
+                // caller is silent), the same way the wake session expires.
+                if matches!(self.held, Some((_, deadline)) if Instant::now() >= deadline) {
+                    self.release(link, "silence past the grace window").await;
+                }
+                link.push(env.meta, env.frame, env.direction).await;
+            }
+            Frame::UserStoppedSpeaking => {
+                if self.held.is_some() {
+                    // Can't happen (a Started clears the hold) — never hold two.
+                    self.release(link, "second edge while holding").await;
+                }
+                if self.state.take_wake_grace(WAKE_ARM_MAX_AGE) {
+                    tracing::debug!(
+                        grace_ms = self.grace.as_millis() as u64,
+                        "wake grace: holding the wake phrase's end-of-speech edge"
+                    );
+                    self.held = Some((env.meta, Instant::now() + self.grace));
+                } else {
+                    link.push(env.meta, env.frame, env.direction).await;
+                }
+            }
+            Frame::UserStartedSpeaking if self.held.is_some() => {
+                // The command followed the wake phrase inside the window: merge
+                // the two into one utterance by dropping both edges.
+                tracing::debug!("wake grace: speech resumed, merging into one turn");
+                self.held = None;
+            }
+            _ => link.push(env.meta, env.frame, env.direction).await,
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod grace_tests {
+    use super::*;
+    use flowcat_core::pipeline::{Pipeline, PipelineTask, PipelineTaskParams};
+    use std::sync::Mutex;
+
+    /// Records the turn edges that make it past the grace stage.
+    #[derive(Clone, Default)]
+    struct EdgeCapture(Arc<Mutex<Vec<&'static str>>>);
+    #[async_trait]
+    impl FrameProcessor for EdgeCapture {
+        fn name(&self) -> &str {
+            "EdgeCapture"
+        }
+        async fn process_frame(&mut self, env: Envelope, link: &Link) -> Result<()> {
+            if matches!(
+                env.frame,
+                Frame::UserStartedSpeaking | Frame::UserStoppedSpeaking
+            ) {
+                self.0.lock().unwrap().push(env.frame.name());
+            }
+            link.push(env.meta, env.frame, env.direction).await;
+            Ok(())
+        }
+    }
+
+    fn audio() -> Frame {
+        Frame::InputAudio(Arc::new(AudioFrame::mono(vec![0i16; 320], 16_000)))
+    }
+
+    /// Feed `steps` through WakeGrace → EdgeCapture; a `None` step sleeps past
+    /// the grace window.
+    async fn run(
+        state: Arc<CallState>,
+        grace_ms: u64,
+        steps: Vec<Option<Frame>>,
+    ) -> Vec<&'static str> {
+        let cap = EdgeCapture::default();
+        let task = PipelineTask::new(
+            Pipeline::new(vec![
+                Box::new(WakeGrace::new(state, Duration::from_millis(grace_ms))),
+                Box::new(cap.clone()),
+            ]),
+            PipelineTaskParams::default(),
+            vec![],
+        );
+        // Drive the chain live (the grace deadline is wall-clock, so the sleep
+        // step must happen while the stage is running, not before).
+        let sender = task.queue_sender();
+        let running = tokio::spawn(task.run());
+        for step in steps {
+            match step {
+                Some(f) => sender.send(f).unwrap(),
+                None => tokio::time::sleep(Duration::from_millis(grace_ms * 3)).await,
+            }
+        }
+        sender.send(Frame::End { reason: None }).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), running)
+            .await
+            .expect("grace pipeline timed out")
+            .expect("join")
+            .expect("run ok");
+        let out = cap.0.lock().unwrap().clone();
+        out
+    }
+
+    #[tokio::test]
+    async fn command_after_a_pause_merges_into_the_wake_turn() {
+        let state = Arc::new(CallState::default());
+        state.arm_wake_grace();
+        let edges = run(
+            state,
+            50,
+            vec![
+                Some(Frame::UserStartedSpeaking), // "Hey Marvin"
+                Some(audio()),
+                Some(Frame::UserStoppedSpeaking), // pause → held
+                Some(audio()),
+                Some(Frame::UserStartedSpeaking), // "what time is it" → both edges dropped
+                Some(audio()),
+                Some(Frame::UserStoppedSpeaking), // the real end of the turn
+            ],
+        )
+        .await;
+        assert_eq!(edges, vec!["UserStartedSpeaking", "UserStoppedSpeaking"]);
+    }
+
+    #[tokio::test]
+    async fn a_bare_wake_phrase_is_released_after_the_window() {
+        let state = Arc::new(CallState::default());
+        state.arm_wake_grace();
+        let edges = run(
+            state,
+            50,
+            vec![
+                Some(Frame::UserStartedSpeaking),
+                Some(audio()),
+                Some(Frame::UserStoppedSpeaking), // held
+                None,                             // silence past the window
+                Some(audio()),                    // the audio clock releases it
+                Some(Frame::UserStartedSpeaking), // a later, separate turn
+                Some(Frame::UserStoppedSpeaking),
+            ],
+        )
+        .await;
+        assert_eq!(
+            edges,
+            vec![
+                "UserStartedSpeaking",
+                "UserStoppedSpeaking",
+                "UserStartedSpeaking",
+                "UserStoppedSpeaking"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn without_a_wake_the_edges_pass_straight_through() {
+        let edges = run(
+            Arc::new(CallState::default()),
+            50,
+            vec![
+                Some(Frame::UserStartedSpeaking),
+                Some(Frame::UserStoppedSpeaking),
+                Some(Frame::UserStartedSpeaking),
+                Some(Frame::UserStoppedSpeaking),
+            ],
+        )
+        .await;
+        assert_eq!(edges.len(), 4);
+    }
+
+    #[test]
+    fn a_stale_arm_is_ignored() {
+        let state = CallState::default();
+        assert!(!state.take_wake_grace(WAKE_ARM_MAX_AGE));
+        state.arm_wake_grace();
+        assert!(!state.take_wake_grace(Duration::ZERO), "older than max age");
+        state.arm_wake_grace();
+        assert!(state.take_wake_grace(WAKE_ARM_MAX_AGE));
+        assert!(!state.take_wake_grace(WAKE_ARM_MAX_AGE), "consumed once");
     }
 }

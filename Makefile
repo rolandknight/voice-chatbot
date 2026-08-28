@@ -1,10 +1,11 @@
 # voice-chatbot — server + native WebRTC client (Cargo workspace in crates/).
-# The PoC targets live on in Makefile.old.
+# The PoC targets live on in archive/Makefile.old.
 #
-# Runtime artifacts (models, logs) and poc/.env are still read from poc/; skills
-# run in-process (crates/server/src/skills, docs/plans/skills-in-server.md).
+# Runtime artifacts live at the repo root (models/, .deps/, logs/; config in
+# .env). The PoC trees are archived under archive/ (targets in
+# archive/Makefile.old). Skills run in-process (crates/server/src/skills, docs/plans/skills-in-server.md).
 # SERVER_FEATURES mirrors the Mac build profile: in-process Nemotron STT
-# (poc/.deps/nemo-speech) and Qwen3-TTS via PyO3 against crates/qwen-tts/.venv
+# (.deps/nemo-speech) and Qwen3-TTS via PyO3 against crates/qwen-tts/.venv
 # (make -C crates/qwen-tts setup).
 
 .DEFAULT_GOAL := help
@@ -16,7 +17,7 @@ CLIENT_BIN := target/release/voice-chatbot-client
 SERVER_URL ?= http://127.0.0.1:6210
 LOG_LEVEL ?= info
 QWEN_PYTHON := $(abspath crates/qwen-tts/.venv/bin/python)
-NEMO_SPEECH_LIB_DIR := $(abspath poc/.deps/nemo-speech/v0.1.0/lib)
+NEMO_SPEECH_LIB_DIR := $(abspath .deps/nemo-speech/v0.1.0/lib)
 SERVER_BUILD_ENV := PYO3_PYTHON=$(QWEN_PYTHON) NEMO_SPEECH_LIB_DIR=$(NEMO_SPEECH_LIB_DIR)
 # Package-qualified features for workspace-wide cargo invocations.
 comma := ,
@@ -32,7 +33,7 @@ server-build:  ## Build crates/server with SERVER_FEATURES
 client-build:  ## Build crates/client
 	$(CARGO) build --release -p voice-chatbot-client
 
-server: server-build  ## Build if needed, then run the server (reads poc/.env)
+server: server-build  ## Build if needed, then run the server (reads .env)
 	./$(SERVER_BIN)
 
 call: client-build   ## Build the client if needed, then call the server (SERVER_URL) with native audio

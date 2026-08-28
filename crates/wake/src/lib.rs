@@ -413,9 +413,9 @@ mod tests {
     fn bank_fires_only_the_babel_head_on_the_babel_fixture() {
         let root = repo_root();
         let dir = root.join("models/wakeword");
-        let wav = root.join("poc/harness/fixtures/t13_wake.wav");
+        let wav = root.join("fixtures/t13_wake.wav");
         if !dir.join("hey_babel.onnx").exists() || !wav.exists() {
-            eprintln!("skipping: models/wakeword or t13_wake.wav missing");
+            eprintln!("skipping: models/wakeword or fixtures/t13_wake.wav missing");
             return;
         }
         let heads = resolve_heads(&root, dir.to_str().unwrap(), "").unwrap();

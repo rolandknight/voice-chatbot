@@ -5,8 +5,8 @@ __pycache__/
 .hermit/
 
 # Chatterbox-TTS-Server clone, its venv, and any model caches it pulls.
-# (Anchored to the repo root: poc/vendor/ holds the committed flowcat-core
-# patch and must NOT be ignored.)
+# (Anchored to the repo root: archive/poc/vendor/ holds a committed
+# flowcat-core patch and must NOT be ignored.)
 /vendor/
 
 # Reference clips for cloned personas. Keep these out of git unless you
@@ -18,24 +18,29 @@ __pycache__/
 scripts/microwakeword/_work/
 scripts/wakeword/_work/
 
-# PoC runtime artifacts (docs/poc/flowcat-poc-plan.md): downloaded models,
-# process logs, Rust build output. Fixtures (poc/harness/fixtures/*.wav) ARE
-# committed.
-poc/models/
-poc/logs/
-poc/flowcat/target/
-poc/flowcat-client/target/
-poc/.deps/
+# Server runtime artifacts: downloaded STT/VAD models (the trained wake heads
+# in models/wakeword ARE committed), native libs, process logs. fixtures/*.wav
+# ARE committed.
+/models/*
+!/models/wakeword/
+!/models/wakeword-archive/
+/logs/
+/.deps/
+# Archived PoC trees (archive/): their models, logs, venvs and build output.
+archive/poc/models/
+archive/poc/logs/
+archive/poc/.deps/
+archive/poc/.venv/
+archive/**/target/
 
 # Self-signed certs for the LAN dev servers (smoke + main backend).
 .certs/
 webrtc_smoke/.certs/
-poc/vendor/flowcat-core/target/
-poc/vendor/oww_rs/**/target/
+third_party/flowcat-core/target/
 
 # CUDA toolkit installers. Multi-gigabyte vendor downloads, kept out of the
 # tree so a stray `git add -A` cannot commit one. The toolkit itself installs
-# outside the repo (see poc-tts/.env for the CUDA_HOME pointer).
+# outside the repo (see archive/poc-tts/.env for the CUDA_HOME pointer).
 cuda_*.run
 
 # Workspace build output (crates/server, crates/client).

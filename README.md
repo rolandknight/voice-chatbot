@@ -8,8 +8,9 @@ from the `skills/` package below (`crates/server/src/skills/`, plan in
 `docs/plans/skills-in-server.md`). Anything that plays audio (BBC radio,
 shows, sound effects) plays on the native client through `mpv`
 (`brew install mpv` / `apt install mpv` where the client runs); Spotify plays
-on the client's librespot "Babel" endpoint as before. Config is `POC_*` env in
-`poc/.env` (see `poc/.env.example`); secrets come from the repo-root `.env`.
+on the client's librespot "Babel" endpoint as before. Config is `POC_*` env in the
+repo-root `.env` (see `.env.example`), next to the secrets. Runtime artifacts
+live at the root too: `models/`, `.deps/`, `logs/`, `fixtures/`.
 
 - Spotify first-time auth: `target/release/voice-chatbot-server spotify-login`
   (`--headless` over SSH). The token is compatible with `scripts/spotify.py`.
@@ -34,7 +35,9 @@ on the client's librespot "Babel" endpoint as before. Config is `POC_*` env in
   `crates/server/prompt.<persona>.txt` when that file exists (`prompt.txt`
   otherwise). Plan and conventions: `docs/plans/wakeword-in-server.md`.
 
-The PoC targets live on in `Makefile.old` (`make -f Makefile.old poc-chatterbox`).
+The PoC trees and their Makefile are archived under `archive/`
+(`make -f archive/Makefile.old poc-chatterbox`, run from the repo root; the
+archived venvs and build dirs are stale).
 
 ## Pipecat Jabra Mac Prototype
 

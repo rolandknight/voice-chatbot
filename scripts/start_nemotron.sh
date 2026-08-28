@@ -3,7 +3,7 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-POC_DIR="$PROJECT_DIR/poc"
+POC_DIR="$PROJECT_DIR" # runtime root (models/, .deps/, .env); the PoC trees are archived
 
 DEVICE_OVERRIDE_SET="${POC_NEMOTRON_DEVICE+set}"
 DEVICE_OVERRIDE="${POC_NEMOTRON_DEVICE-}"

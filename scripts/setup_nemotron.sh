@@ -4,7 +4,7 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-POC_DIR="$PROJECT_DIR/poc"
+POC_DIR="$PROJECT_DIR" # runtime root (models/, .deps/, .env); the PoC trees are archived
 
 # Read the PoC profile for standalone use while preserving explicit shell or
 # Make overrides. run_poc.sh already exports this file before launching us.

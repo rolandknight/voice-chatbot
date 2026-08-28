@@ -31,7 +31,7 @@ and it is live at the next start.
 | Voice preload | `main.rs::qwen_persona_names` | `POC_QWEN_VOICE` + `POC_QWEN_VOICES` — the only voices that can be selected |
 | Python reference | `wakeword_detector.py` | one `openwakeword.Model` with N heads; per-model cooldown; fires → persona switch + `WakeWordDetectedFrame`; ControlChannel sends `{"type":"wake","state":"awake"/"asleep",…}` |
 | Heads | `models/wakeword/hey_{babel,marvin,one_one}.onnx` | trained via `scripts/wakeword/` |
-| Fixture | `poc/harness/fixtures/t13_wake.wav` | "Hey babel, what time is it?" (Kokoro) |
+| Fixture | `fixtures/t13_wake.wav` (was `poc/harness/fixtures/`) | "Hey babel, what time is it?" (Kokoro) |
 
 The vendored `oww_rs` (`third_party/oww_rs`, local mods listed in
 `VENDORED.md`) already exposes what a shared frontend needs:

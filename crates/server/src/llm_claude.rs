@@ -22,22 +22,40 @@ use flowcat_core::{FlowcatError, Result};
 
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
 const API_VERSION: &str = "2023-06-01";
-/// Spoken replies are one or two sentences; this is a ceiling, not a target.
-const MAX_TOKENS: u32 = 1024;
+/// Ceiling for one streamed turn, shared by adaptive thinking and the spoken
+/// reply. Opus 5 thinks by default (an omitted `thinking` field means adaptive),
+/// and at the old 1024 a hard question could spend the entire budget thinking
+/// and return `stop_reason: max_tokens` with no text at all — a silent turn.
+/// Reply length is governed by the system prompt, not by this ceiling.
+const MAX_TOKENS: u32 = 4096;
+
+/// Default `output_config.effort`. Spoken one-or-two-sentence answers do not
+/// need the API default (`high`); `low` measured ~0.7 s to first token against
+/// ~1.0 s. `thinking.budget_tokens` is rejected with a 400 on Opus 5, so effort
+/// is the only depth knob. Empty (`POC_CLAUDE_EFFORT=`) omits the field, for
+/// models that reject it.
+pub const DEFAULT_EFFORT: &str = "low";
+
+/// Spoken when a turn ends with neither text nor a tool call, so the call never
+/// just goes quiet on the caller.
+const EMPTY_TURN_FALLBACK: &str = "Sorry, I lost that one. Say it again?";
 
 pub struct ClaudeLlm {
     http: reqwest::Client,
     api_key: String,
     model: String,
+    /// `output_config.effort`; empty omits the field.
+    effort: String,
     tools: Vec<Tool>,
 }
 
 impl ClaudeLlm {
-    pub fn new(api_key: String, model: String) -> Self {
+    pub fn new(api_key: String, model: String, effort: String) -> Self {
         Self {
             http: reqwest::Client::new(),
             api_key,
             model,
+            effort,
             tools: Vec::new(),
         }
     }
@@ -78,6 +96,14 @@ impl ClaudeLlm {
         });
         if !system.is_empty() {
             body["system"] = json!(system);
+        }
+        // `thinking` is deliberately left unset: on Opus 5 that means adaptive.
+        // `{"type": "disabled"}` is not an option here — with thinking off the
+        // model sometimes writes a tool call into its visible text instead of a
+        // `tool_use` block, which on a voice call means Babel reads the tool
+        // name aloud instead of running it. Depth is tuned with effort instead.
+        if !self.effort.is_empty() {
+            body["output_config"] = json!({ "effort": self.effort });
         }
         let tools = self.tools_json(ctx);
         if !tools.is_empty() {
@@ -192,10 +218,15 @@ struct Folder {
     calls: Vec<FunctionCall>,
     input_tokens: u64,
     output_tokens: u64,
+    thinking_tokens: u64,
     cache_read: u64,
     cache_write: u64,
     requested_at: Instant,
-    first_token_at: Option<Instant>,
+    /// First output of any kind, thinking included — the real time-to-first-token.
+    first_output_at: Option<Instant>,
+    /// First *speakable* token. Adaptive thinking can put seconds between the
+    /// two, and only this one ends the caller's silence.
+    first_text_at: Option<Instant>,
     stop_reason: Option<String>,
 }
 
@@ -211,10 +242,12 @@ impl Folder {
             calls: Vec::new(),
             input_tokens: 0,
             output_tokens: 0,
+            thinking_tokens: 0,
             cache_read: 0,
             cache_write: 0,
             requested_at: Instant::now(),
-            first_token_at: None,
+            first_output_at: None,
+            first_text_at: None,
             stop_reason: None,
         }
     }
@@ -256,9 +289,18 @@ impl Folder {
                 match delta["type"].as_str().unwrap_or("") {
                     "text_delta" => {
                         if let Some(t) = delta["text"].as_str().filter(|t| !t.is_empty()) {
-                            self.first_token_at.get_or_insert_with(Instant::now);
+                            let now = Instant::now();
+                            self.first_output_at.get_or_insert(now);
+                            self.first_text_at.get_or_insert(now);
                             self.pending.push_back(Frame::LlmText(t.to_string()));
                         }
+                    }
+                    // Adaptive thinking (the Opus 5 default). Never a spoken
+                    // frame — it only moves the TTFT clock. `display` defaults
+                    // to "omitted", so the text is usually empty anyway; the
+                    // paired `signature_delta` needs nothing from us.
+                    "thinking_delta" => {
+                        self.first_output_at.get_or_insert_with(Instant::now);
                     }
                     "input_json_delta" => {
                         if let Some(b) = self.tool_blocks.get_mut(&idx) {
@@ -274,7 +316,9 @@ impl Folder {
                     if name.is_empty() {
                         return;
                     }
-                    self.first_token_at.get_or_insert_with(Instant::now);
+                    // Output, but not speech — `first_text_at` stays unset so
+                    // `text_ms` only ever measures time to something spoken.
+                    self.first_output_at.get_or_insert_with(Instant::now);
                     let arguments = if raw.trim().is_empty() {
                         json!({})
                     } else {
@@ -290,6 +334,9 @@ impl Folder {
             "message_delta" => {
                 if let Some(n) = ev["usage"]["output_tokens"].as_u64() {
                     self.output_tokens = n;
+                }
+                if let Some(n) = ev["usage"]["output_tokens_details"]["thinking_tokens"].as_u64() {
+                    self.thinking_tokens = n;
                 }
                 if let Some(r) = ev["delta"]["stop_reason"].as_str() {
                     self.stop_reason = Some(r.to_string());
@@ -313,18 +360,35 @@ impl Folder {
         if self.stop_reason.as_deref() == Some("refusal") {
             tracing::warn!("claude: request was refused (stop_reason=refusal)");
         }
+        // Nothing to say and nothing to run. The way this happens in practice is
+        // adaptive thinking eating the whole `max_tokens` budget
+        // (`stop_reason: max_tokens`, every output token a thinking token), which
+        // used to leave the caller in silence with no clue why.
+        if self.calls.is_empty() && self.first_text_at.is_none() {
+            tracing::warn!(
+                stop_reason = self.stop_reason.as_deref().unwrap_or(""),
+                output_tokens = self.output_tokens,
+                thinking_tokens = self.thinking_tokens,
+                max_tokens = MAX_TOKENS,
+                "claude: turn produced no speakable text; speaking the fallback"
+            );
+            self.pending
+                .push_back(Frame::LlmText(EMPTY_TURN_FALLBACK.to_string()));
+        }
         if !self.calls.is_empty() {
             self.pending
                 .push_back(Frame::FunctionCallsStarted(std::mem::take(&mut self.calls)));
         }
-        let ttft_ms = self
-            .first_token_at
-            .map(|t| t.duration_since(self.requested_at).as_millis() as u64);
+        let since_request = |t: Instant| t.duration_since(self.requested_at).as_millis() as u64;
+        let ttft_ms = self.first_output_at.map(since_request);
+        let text_ms = self.first_text_at.map(since_request);
         tracing::info!(
             input_tokens = self.input_tokens,
             output_tokens = self.output_tokens,
+            thinking_tokens = self.thinking_tokens,
             cache_read = self.cache_read,
             ttft_ms,
+            text_ms,
             stop_reason = self.stop_reason.as_deref().unwrap_or(""),
             "claude turn"
         );
@@ -485,7 +549,7 @@ mod tests {
 
     #[test]
     fn request_body_shape() {
-        let mut llm = ClaudeLlm::new("k".into(), "claude-opus-5".into());
+        let mut llm = ClaudeLlm::new("k".into(), "claude-opus-5".into(), "low".into());
         llm.set_tools(vec![Tool {
             name: "b".into(),
             description: "B".into(),
@@ -502,8 +566,91 @@ mod tests {
         assert_eq!(body["model"], "claude-opus-5");
         assert_eq!(body["system"], "S");
         assert_eq!(body["stream"], true);
+        assert_eq!(body["max_tokens"], MAX_TOKENS);
         assert_eq!(body["tools"][0]["input_schema"]["type"], "object");
         assert_eq!(body["messages"][0]["content"], "hi");
+        // Thinking stays unset (= adaptive on Opus 5); depth is tuned by effort.
+        assert_eq!(body["output_config"], json!({"effort": "low"}));
+        assert!(body.get("thinking").is_none(), "{body}");
+    }
+
+    fn plain_ctx() -> LlmContext {
+        LlmContext {
+            messages: vec![json!({"role": "user", "content": "hi"})],
+            tools: vec![],
+        }
+    }
+
+    #[test]
+    fn empty_effort_omits_output_config() {
+        let llm = ClaudeLlm::new("k".into(), "claude-haiku-4-5".into(), String::new());
+        let body = llm.request_body(&plain_ctx()).unwrap();
+        assert!(body.get("output_config").is_none(), "{body}");
+    }
+
+    fn frames_of(lines: &[&str]) -> Vec<Frame> {
+        let mut f = Folder::new("m".into());
+        f.feed((lines.join("\n") + "\n").as_bytes());
+        f.pending.drain(..).collect()
+    }
+
+    fn spoken(frames: &[Frame]) -> String {
+        frames
+            .iter()
+            .filter_map(|f| match f {
+                Frame::LlmText(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn thinking_blocks_are_never_spoken() {
+        // Opus 5 thinks by default and `display` defaults to "omitted", so the
+        // thinking text is empty — but the blocks still arrive.
+        let frames = frames_of(&[
+            r#"data: {"type":"message_start","message":{"usage":{"input_tokens":10}}}"#,
+            r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}"#,
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"weighing it up"}}"#,
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"abc"}}"#,
+            r#"data: {"type":"content_block_stop","index":0}"#,
+            r#"data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#,
+            r#"data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Paris."}}"#,
+            r#"data: {"type":"content_block_stop","index":1}"#,
+            r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":40,"output_tokens_details":{"thinking_tokens":33}}}"#,
+            r#"data: {"type":"message_stop"}"#,
+        ]);
+        assert_eq!(spoken(&frames), "Paris.", "thinking must not reach the TTS");
+    }
+
+    #[test]
+    fn a_turn_that_only_thinks_still_says_something() {
+        // The live failure: adaptive thinking spent the whole max_tokens budget,
+        // so the stream carried no text and the call went silent.
+        let frames = frames_of(&[
+            r#"data: {"type":"message_start","message":{"usage":{"input_tokens":4000}}}"#,
+            r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}"#,
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"..."}}"#,
+            r#"data: {"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{"output_tokens":4096,"output_tokens_details":{"thinking_tokens":4096}}}"#,
+            r#"data: {"type":"message_stop"}"#,
+        ]);
+        assert_eq!(spoken(&frames), EMPTY_TURN_FALLBACK);
+        assert!(matches!(frames.last(), Some(Frame::LlmResponseEnd)));
+    }
+
+    #[test]
+    fn a_tool_only_turn_stays_silent() {
+        // Tool calls speak through their result, so no fallback there.
+        let frames = frames_of(&[
+            r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"get_current_time","input":{}}}"#,
+            r#"data: {"type":"content_block_stop","index":0}"#,
+            r#"data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":9}}"#,
+            r#"data: {"type":"message_stop"}"#,
+        ]);
+        assert_eq!(spoken(&frames), "");
+        assert!(frames
+            .iter()
+            .any(|f| matches!(f, Frame::FunctionCallsStarted(_))));
     }
 }
 
@@ -517,7 +664,7 @@ mod network_tests {
     async fn network_claude_streams_a_short_reply() {
         crate::env_file::load_if_unset(std::path::Path::new("../../.env"));
         let key = std::env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY in .env");
-        let mut llm = ClaudeLlm::new(key, "claude-opus-5".into());
+        let mut llm = ClaudeLlm::new(key, "claude-opus-5".into(), DEFAULT_EFFORT.into());
         let ctx = LlmContext {
             messages: vec![
                 json!({"role": "system", "content": "Reply with exactly the word: pong"}),
@@ -536,5 +683,43 @@ mod network_tests {
         eprintln!("claude said: {text:?} ({} frames)", frames.len());
         assert!(text.to_lowercase().contains("pong"), "{text}");
         assert!(matches!(frames.last(), Some(Frame::LlmResponseEnd)));
+    }
+
+    /// The turn that was failing live: `ask_claude` has flipped the backend, so
+    /// the continuation of that same turn runs here, reading the skill's result
+    /// as its prompt. It has to answer the question — the old result string had
+    /// it re-announce the handover instead, burning the turn.
+    #[tokio::test]
+    #[ignore]
+    async fn network_claude_answers_within_the_ask_claude_turn() {
+        crate::env_file::load_if_unset(std::path::Path::new("../../.env"));
+        let key = std::env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY in .env");
+        let mut llm = ClaudeLlm::new(key, "claude-opus-5".into(), DEFAULT_EFFORT.into());
+        let ctx = LlmContext {
+            messages: vec![
+                json!({"role": "system", "content": include_str!("../prompt.babel.txt")}),
+                json!({"role": "assistant", "content": "Ready."}),
+                json!({"role": "user", "content": "Ask Claude what the capital of France is."}),
+                json!({"role": "assistant", "content": null, "tool_calls": [{
+                    "id": "call_1_0", "type": "function",
+                    "function": {"name": "ask_claude", "arguments": "{}"}}]}),
+                json!({"role": "tool", "tool_call_id": "call_1_0",
+                       "content": crate::skills::claude::HANDOVER}),
+            ],
+            tools: vec![],
+        };
+        let frames: Vec<Frame> = llm.run_llm(&ctx).await.expect("request").collect().await;
+        let text: String = frames
+            .iter()
+            .filter_map(|f| match f {
+                Frame::LlmText(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        eprintln!("claude said: {text:?}");
+        assert!(
+            text.to_lowercase().contains("paris"),
+            "answered the handover instead of the question: {text}"
+        );
     }
 }

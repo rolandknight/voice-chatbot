@@ -10,3 +10,6 @@ Local modifications for the PoC:
 - The shared media-transport facade uses a single-owner command actor so a
   pending inbound receive cannot block bot-first audio or playback clears.
 - `Cargo.lock` is retained for standalone validation of the vendored crate.
+- `RollingContext` carries a user-turn generation; `CascadedToolBridge` skips
+  the LLM re-run for a tool result whose call belongs to a superseded turn
+  (a wake phrase and its command landing as two finals answered twice).

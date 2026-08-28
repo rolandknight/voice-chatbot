@@ -7,7 +7,7 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-POC_DIR="$PROJECT_DIR/poc"
+POC_DIR="$PROJECT_DIR" # runtime root (models/, .deps/, .env); the PoC trees are archived
 
 MOONSHINE_VERSION="v0.1.3"
 MOONSHINE_PACKAGE_VERSION="${MOONSHINE_VERSION#v}"
