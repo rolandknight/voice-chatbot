@@ -11,10 +11,21 @@ instead of a JSON-IPC pause.
 Three things fall out of that, in priority order:
 
 1. **Media plays on the call's device.** Today a call holds the speakerphone
-   directly through CPAL, so a sound server cannot route `mpv` to the same
-   card and radio comes out of the *system default sink* instead
-   (`crates/client/README.md:130`, `README.md:24`). Mixing into the call's own
-   stream is the only fix that does not involve giving up exclusive access.
+   directly through CPAL, so radio comes out of the *system default sink*
+   instead (`crates/client/README.md:130`, `README.md:24`). Mixing into the
+   call's own stream is the only fix that does not involve giving up exclusive
+   access.
+
+   Measured 2026-08-28, and stronger than the READMEs imply: while the call
+   holds `plughw:CARD=UC,DEV=0` (what `alias_rank`, `audio.rs:571`, opens on
+   purpose), **no external process can reach that card by any path**. mpv aimed
+   at the raw alias exits 2; mpv aimed at PipeWire's *own node* for the same
+   card stalls indefinitely (killed at an 8 s timeout, having played nothing),
+   because PipeWire cannot open the card either. So this is not a routing
+   preference that a better `--audio-device` could fix -- an out-of-process
+   player is structurally incapable of playing on the call's device. See commit
+   `c28af33`, which makes the default-sink fallback deliberate rather than
+   accidental.
 2. **Ducking stops rebuffering live radio.** A pause/resume on a live HLS
    stream either goes stale or re-seeks to the live edge. A gain ramp keeps the
    decoder at the live edge and costs nothing.
