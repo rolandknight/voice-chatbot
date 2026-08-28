@@ -38,11 +38,15 @@ enum Command {
         #[arg(long, env = "FLOWCAT_URL", default_value = "http://127.0.0.1:6210")]
         server_url: String,
 
-        /// Input selector: default, 1-based index, stable ID, name, or unique substring.
+        /// Input selector: default, 1-based index, stable ID, name, or unique
+        /// substring. Unset, the Jabra speakerphone is used when one is
+        /// plugged in; pass `default` for the system default instead.
         #[arg(long, env = "FLOWCAT_INPUT_DEVICE")]
         input_device: Option<String>,
 
-        /// Output selector: default, 1-based index, stable ID, name, or unique substring.
+        /// Output selector: default, 1-based index, stable ID, name, or unique
+        /// substring. Unset, the Jabra speakerphone is used when one is
+        /// plugged in; pass `default` for the system default instead.
         #[arg(long, env = "FLOWCAT_OUTPUT_DEVICE")]
         output_device: Option<String>,
 

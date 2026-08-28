@@ -14,6 +14,21 @@ CARGO := bin/cargo
 SERVER_FEATURES ?= nemotron-native,qwen-tts
 SERVER_BIN := target/release/voice-chatbot-server
 CLIENT_BIN := target/release/voice-chatbot-client
+# Raspberry Pi (64-bit Pi OS) cross-build: `cross` in Docker, not bin/cargo —
+# Hermit's rustc carries x86_64 std only and is not rustup-managed, so cross
+# runs against the system rustup toolchain (same 1.97.1) with the standard
+# CARGO_HOME/RUSTUP_HOME instead of the Hermit ones it would otherwise inherit
+# and fail to install a target into. Image setup lives in Cross.toml.
+PI_TARGET ?= aarch64-unknown-linux-gnu
+PI_TOOLCHAIN ?= 1.97.1
+# Its own target dir: the container's host-side build scripts link against the
+# image's glibc, so sharing target/ with the native build makes each one
+# invalidate the other's artifacts.
+PI_TARGET_DIR ?= target/pi
+PI_CLIENT_BIN := $(PI_TARGET_DIR)/$(PI_TARGET)/release/voice-chatbot-client
+PI_CROSS_ENV := CARGO_HOME=$(HOME)/.cargo RUSTUP_HOME=$(HOME)/.rustup \
+    PATH=$(HOME)/.cargo/bin:$$PATH CARGO_TARGET_DIR=$(PI_TARGET_DIR) \
+    PKG_CONFIG_ALLOW_CROSS=1 PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig
 SERVER_URL ?= http://127.0.0.1:6210
 LOG_LEVEL ?= info
 QWEN_PYTHON := $(abspath crates/qwen-tts/.venv/bin/python)
@@ -23,7 +38,7 @@ SERVER_BUILD_ENV := PYO3_PYTHON=$(QWEN_PYTHON) NEMO_SPEECH_LIB_DIR=$(NEMO_SPEECH
 comma := ,
 WS_FEATURES := $(subst $(eval) ,$(comma),$(addprefix voice-chatbot-server/,$(subst $(comma), ,$(SERVER_FEATURES))))
 
-.PHONY: build server-build client-build server call devices sfx-up sfx-down sfx-status test check clean help
+.PHONY: build server-build client-build client-build-pi server call devices sfx-up sfx-down sfx-status test check clean help
 
 build: server-build client-build  ## Build server + client (release)
 
@@ -32,6 +47,14 @@ server-build:  ## Build crates/server with SERVER_FEATURES
 
 client-build:  ## Build crates/client
 	$(CARGO) build --release -p voice-chatbot-client
+
+client-build-pi:  ## Cross-build the client for a Raspberry Pi (aarch64; needs Docker + cross)
+	@command -v cross >/dev/null 2>&1 || { echo "cross not found; install it with: cargo install cross --locked"; exit 1; }
+	@command -v rustup >/dev/null 2>&1 || { echo "rustup not found; cross builds against the rustup toolchain, not Hermit's"; exit 1; }
+	@docker info >/dev/null 2>&1 || { echo "cross needs a running Docker daemon"; exit 1; }
+	$(PI_CROSS_ENV) cross +$(PI_TOOLCHAIN) build --release --target $(PI_TARGET) -p voice-chatbot-client
+	@echo "built $(PI_CLIENT_BIN)"
+	@file $(PI_CLIENT_BIN) 2>/dev/null || true
 
 server: server-build  ## Build if needed, then run the server (reads .env)
 	./$(SERVER_BIN)
@@ -92,4 +115,4 @@ clean:  ## Drop workspace build output
 
 help:  ## List targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
-		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
+		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'

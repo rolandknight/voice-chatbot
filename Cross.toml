@@ -1,0 +1,32 @@
+# Cross-compilation setup for `make client-build-pi` (crates/client on a
+# Raspberry Pi running 64-bit Pi OS). Hermit's rustc ships x86_64 std only, so
+# the Pi build goes through `cross` + Docker and the system rustup toolchain
+# rather than bin/cargo.
+#
+# The image needs the client's two native libraries built for the *target*
+# arch:
+#   libasound2-dev  cpal links ALSA directly.
+#   libopus-dev     audiopus_sys 0.1.8 probes pkg-config first, and otherwise
+#                   autotools-builds its vendored Opus *without* passing
+#                   --host — i.e. an x86_64 libopus that cannot link into an
+#                   aarch64 binary. Shipping the arm64 package keeps the build
+#                   script on its pkg-config path.
+#
+# PKG_CONFIG_ALLOW_CROSS / PKG_CONFIG_PATH are exported by the Make recipe and
+# passed through below: pkg-config otherwise refuses to answer for a target
+# that is not the host, which is exactly the silent fallback above.
+
+[target.aarch64-unknown-linux-gnu]
+# Pinned rather than cross's rolling `:main`, which is Ubuntu 24.04 — its
+# glibc 2.39 sysroot produces a binary that will not start on Raspberry Pi OS
+# Bookworm (glibc 2.36). This tag's older sysroot keeps the floor low enough
+# for Bookworm and Trixie alike, and pins the build for reproducibility.
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:0.2.5"
+pre-build = [
+    "dpkg --add-architecture $CROSS_DEB_ARCH",
+    "apt-get update",
+    "apt-get install --assume-yes pkg-config libasound2-dev:$CROSS_DEB_ARCH libopus-dev:$CROSS_DEB_ARCH",
+]
+
+[target.aarch64-unknown-linux-gnu.env]
+passthrough = ["PKG_CONFIG_ALLOW_CROSS", "PKG_CONFIG_PATH"]

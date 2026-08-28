@@ -8,6 +8,7 @@
 use std::cmp::Ordering;
 use std::fmt;
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -22,6 +23,32 @@ pub const INPUT_CHANNEL_CAPACITY: usize = 8;
 
 /// Number of mono playback chunks that may wait for the native output callback.
 pub const OUTPUT_CHANNEL_CAPACITY: usize = 8;
+
+/// Name fragment of the speakerphone to open when no device is asked for.
+///
+/// The Jabra USB speakerphone is this project's reference hardware: its
+/// hardware echo cancellation is what lets the wake word survive the
+/// assistant's own voice coming out of the same box. Starting a call on
+/// whatever the desktop happens to have set as its default -- laptop mic into
+/// laptop speakers -- gives a much worse call, so an unspecified device
+/// resolves to the speakerphone whenever the host has one plugged in.
+/// `--input-device default` / `--output-device default` asks for the system
+/// default explicitly.
+const PREFERRED_DEVICE_NAME: &str = "jabra";
+
+/// Period this client asks each device for, in both directions.
+///
+/// [`cpal::BufferSize::Default`] lets ALSA choose, and on a USB `plughw:` PCM
+/// it chooses about 241 frames: a 5 ms period, which CPAL double-buffers into
+/// a **10 ms** ring. The worker that has to refill that ring is an ordinary
+/// thread -- CPAL's `realtime` feature is off, and promoting it needs an
+/// `rtprio` allowance this project cannot assume (`ulimit -r` is 0 on a stock
+/// desktop, with rtkit inactive) -- so any scheduling hiccup longer than 10 ms
+/// overruns capture or underruns playback.
+///
+/// 20 ms is the granularity the call already runs on: it is one Opus frame, so
+/// it costs a frame of latency and buys a 40 ms ring, four times the slack.
+const TARGET_PERIOD: Duration = Duration::from_millis(20);
 
 /// The relevant part of a device's default CPAL stream configuration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -44,12 +71,28 @@ impl From<cpal::SupportedStreamConfig> for AudioStreamConfig {
 }
 
 impl AudioStreamConfig {
-    fn stream_config(self) -> cpal::StreamConfig {
+    fn stream_config(self, buffer_size: cpal::BufferSize) -> cpal::StreamConfig {
         cpal::StreamConfig {
             channels: self.channels,
             sample_rate: self.sample_rate,
-            buffer_size: cpal::BufferSize::Default,
+            buffer_size,
         }
+    }
+
+    /// [`TARGET_PERIOD`] in this device's frames, then CPAL's default.
+    ///
+    /// Both are returned because only building the stream validates a period
+    /// against the device. The `SupportedBufferSize` in a default config is
+    /// the *buffer* range, not the period range -- a `plughw:` PCM advertises
+    /// `4..=268435455` while accepting only `48..=48000` -- so the request
+    /// cannot be clamped up front. A `dmix:` PCM pins its period outright
+    /// (`1024..=1024`) and falls back to the default.
+    fn buffer_sizes(self) -> [cpal::BufferSize; 2] {
+        let frames = (u64::from(self.sample_rate) * TARGET_PERIOD.as_millis() as u64) / 1_000;
+        [
+            cpal::BufferSize::Fixed(frames.clamp(1, u64::from(u32::MAX)) as u32),
+            cpal::BufferSize::Default,
+        ]
     }
 }
 
@@ -136,9 +179,13 @@ impl AudioDevices {
 
     /// Open the selected devices using each device's default stream config.
     ///
-    /// `None`, an empty selector, or `"default"` selects the system default.
-    /// Other selectors are resolved in this order: exact stable ID, one-based
-    /// display index, exact name, then a unique case-insensitive name substring.
+    /// `None` or an empty selector asks for no device in particular: that
+    /// picks the [`PREFERRED_DEVICE_NAME`] speakerphone when one is plugged
+    /// in, and the system default otherwise. `"default"` always selects the
+    /// system default. Other selectors are resolved in this order: exact
+    /// stable ID, one-based display index, exact name, then a case-insensitive
+    /// name substring. A selector matching several ALSA aliases of one device
+    /// resolves by [`alias_rank`] rather than being reported as ambiguous.
     pub fn open(
         &self,
         input_selector: Option<&str>,
@@ -176,10 +223,9 @@ impl AudioDevices {
             .with_context(|| format!("cannot open output device {:?}", output.info.name))?;
 
         let (input_tx, input_rx) = tokio_mpsc::channel(input_capacity);
-        let (output_tx, output_rx) = mpsc::sync_channel(output_capacity);
 
         let input_stream = build_input_stream(input, input_tx)?;
-        let output_stream = build_output_stream(output, output_rx)?;
+        let (output_stream, output_tx) = build_output_stream(output, output_capacity)?;
 
         Ok(AudioIo {
             input_rate: input.info.config.sample_rate,
@@ -270,6 +316,9 @@ impl AudioIo {
 }
 
 /// Resolve a selector against device metadata without touching audio hardware.
+///
+/// See [`AudioDevices::open`] for what each selector means; `None` auto-selects
+/// the preferred speakerphone.
 pub fn select_device<'a>(
     devices: &'a [AudioDeviceInfo],
     selector: Option<&str>,
@@ -415,11 +464,23 @@ fn select_device_with_label<'a>(
         bail!("no {direction} devices are available");
     }
 
-    let selector = selector.unwrap_or("default").trim();
+    let selector = selector.unwrap_or_default().trim();
+    // Nothing asked for: take the speakerphone if this host has one.
+    if selector.is_empty() {
+        if let Some(preferred) = preferred_device(devices) {
+            tracing::debug!(
+                %direction,
+                device = %preferred.name,
+                id = %preferred.id,
+                "no selector given; auto-selected the preferred speakerphone"
+            );
+            return Ok(preferred);
+        }
+    }
     if selector.is_empty() || selector.eq_ignore_ascii_case("default") {
         return unique_match(
             devices.iter().filter(|device| device.is_default).collect(),
-            selector,
+            "default",
             direction,
             "system default",
         );
@@ -472,6 +533,75 @@ fn select_device_with_label<'a>(
     )
 }
 
+/// The best [`PREFERRED_DEVICE_NAME`] device, if this host has one.
+///
+/// One speakerphone appears once on CoreAudio but many times on ALSA -- once
+/// per PCM alias of its card, all carrying the same name -- so matching the
+/// name alone is ambiguous. Rank the aliases and take the best; equal ranks
+/// keep the deterministic display order.
+fn preferred_device(devices: &[AudioDeviceInfo]) -> Option<&AudioDeviceInfo> {
+    devices
+        .iter()
+        .filter(|device| device.name.to_lowercase().contains(PREFERRED_DEVICE_NAME))
+        .min_by_key(|device| (alias_rank(&device.id), device.index))
+}
+
+/// Preference among the ALSA PCM aliases of one card; lower is better.
+///
+/// `plughw` is the plug layer over the card's hardware PCM: it converts rate,
+/// format and channel count, and it lets ALSA size the period from the
+/// hardware, which is what makes full duplex work. `front` and `hw` reach the
+/// same hardware without conversion, so they only open when the device's own
+/// default format is usable.
+///
+/// `default` and `sysdefault` come last of the usable paths, even though they
+/// are the ones that mix with other raw-ALSA clients. They resolve to
+/// `dmix`/`dsnoop`, which pin the playback period at 1024 frames; CPAL's
+/// `BufferSize::Default` then double-buffers that into a 42.7 ms ring, while
+/// capture on the same card runs 64 ms periods. The playback ring drains
+/// before the worker is next serviced and the stream underruns once per
+/// capture period -- measured on a Jabra Speak2 40 as 93 XRUNs in 6 s of
+/// duplex, against none on `plughw`. The period is not negotiable: CPAL
+/// reports the supported range as exactly `1024..=1024`, so the ring cannot be
+/// widened to cover it.
+///
+/// Aliases that are not a plain analog path at all (`iec958`, `surround40`,
+/// ...) rank last. Non-ALSA IDs all rank first and equal: on those hosts the
+/// device is listed exactly once.
+fn alias_rank(id: &str) -> u8 {
+    let Some(pcm) = id.strip_prefix("alsa:") else {
+        return 0;
+    };
+    match pcm.split(':').next().unwrap_or_default() {
+        "plughw" => 0,
+        "front" => 1,
+        "hw" => 2,
+        "default" | "sysdefault" => 3,
+        _ => 4,
+    }
+}
+
+/// The best-ranked match when every candidate is an ALSA alias of one device.
+///
+/// ALSA lists a single card once per PCM alias, all under the same name, so a
+/// selector that hits several of them is not really ambiguous: it is one piece
+/// of hardware reachable by several paths, and [`alias_rank`] knows which path
+/// to take. Candidates that differ by name, or that come from a host which
+/// lists each device once, stay ambiguous for the caller to report.
+fn best_alias<'a>(matches: &[&'a AudioDeviceInfo]) -> Option<&'a AudioDeviceInfo> {
+    let first = matches.first()?;
+    if !matches
+        .iter()
+        .all(|device| device.name == first.name && device.id.starts_with("alsa:"))
+    {
+        return None;
+    }
+    matches
+        .iter()
+        .copied()
+        .min_by_key(|device| (alias_rank(&device.id), device.index))
+}
+
 fn unique_match<'a>(
     matches: Vec<&'a AudioDeviceInfo>,
     selector: &str,
@@ -479,22 +609,25 @@ fn unique_match<'a>(
     match_kind: &str,
 ) -> Result<&'a AudioDeviceInfo> {
     match matches.as_slice() {
-        [device] => Ok(*device),
+        [device] => return Ok(device),
         [] if match_kind == "system default" => {
             bail!("no system-default {direction} device is available")
         }
         [] => bail!("no {direction} device matches selector {selector:?}"),
-        _ => {
-            let candidates = matches
-                .iter()
-                .map(|device| format!("{}: {} ({})", device.index, device.name, device.id))
-                .collect::<Vec<_>>()
-                .join(", ");
-            bail!(
-                "{direction} device selector {selector:?} is ambiguous ({match_kind}); matches: {candidates}"
-            )
-        }
+        _ => {}
     }
+
+    // Several ALSA aliases of one device: rank them rather than refusing.
+    if let Some(device) = best_alias(&matches) {
+        return Ok(device);
+    }
+
+    let candidates = matches
+        .iter()
+        .map(|device| format!("{}: {} ({})", device.index, device.name, device.id))
+        .collect::<Vec<_>>()
+        .join(", ");
+    bail!("{direction} device selector {selector:?} is ambiguous ({match_kind}); matches: {candidates}")
 }
 
 fn ensure_pcm_format(format: SampleFormat, direction: Direction) -> Result<()> {
@@ -551,12 +684,15 @@ where
     T: SizedSample + Send + 'static,
     i16: FromSample<T>,
 {
-    let channels = usize::from(selected.info.config.channels);
-    let device_id = selected.info.id.clone();
-    selected
-        .device
-        .build_input_stream::<T, _, _>(
-            selected.info.config.stream_config(),
+    let config = selected.info.config;
+    let channels = usize::from(config.channels);
+
+    let mut refused = None;
+    for buffer_size in config.buffer_sizes() {
+        let sender = sender.clone();
+        let device_id = selected.info.id.clone();
+        match selected.device.build_input_stream::<T, _, _>(
+            config.stream_config(buffer_size),
             move |samples, _| {
                 let mono = downmix_to_mono_i16(samples, channels);
                 if !mono.is_empty() {
@@ -568,13 +704,25 @@ where
                 tracing::error!(%error, %device_id, "input audio stream error");
             },
             None,
-        )
-        .with_context(|| {
-            format!(
-                "failed to open input device {:?} ({}) with default config {}",
-                selected.info.name, selected.info.id, selected.info.config
-            )
-        })
+        ) {
+            Ok(stream) => return Ok(stream),
+            // Only a refused period is worth retrying at the device's own size.
+            Err(error) if matches!(error.kind(), cpal::ErrorKind::UnsupportedConfig) => {
+                tracing::debug!(%error, id = %selected.info.id, ?buffer_size, "input period refused");
+                refused = Some(error);
+            }
+            Err(error) => return Err(error).with_context(|| open_failure("input", selected)),
+        }
+    }
+    Err(refused.expect("a refusal for every candidate period"))
+        .with_context(|| open_failure("input", selected))
+}
+
+fn open_failure(direction: &str, selected: &AudioDevice) -> String {
+    format!(
+        "failed to open {direction} device {:?} ({}) with default config {}",
+        selected.info.name, selected.info.id, selected.info.config
+    )
 }
 
 fn downmix_to_mono_i16<T>(samples: &[T], channels: usize) -> Vec<i16>
@@ -598,24 +746,29 @@ where
         .collect()
 }
 
+/// Build the playback stream together with the queue that feeds it.
+///
+/// The queue is created here, not by the caller, because a refused period
+/// leaves its [`Receiver`] inside the dropped callback: each attempt needs a
+/// fresh channel, and only the successful one's sender may escape.
 fn build_output_stream(
     selected: &AudioDevice,
-    receiver: Receiver<Vec<i16>>,
-) -> Result<cpal::Stream> {
+    capacity: usize,
+) -> Result<(cpal::Stream, SyncSender<Vec<i16>>)> {
     let format = selected.info.config.sample_format;
     match format {
-        SampleFormat::I8 => build_output_stream_typed::<i8>(selected, receiver),
-        SampleFormat::I16 => build_output_stream_typed::<i16>(selected, receiver),
-        SampleFormat::I24 => build_output_stream_typed::<cpal::I24>(selected, receiver),
-        SampleFormat::I32 => build_output_stream_typed::<i32>(selected, receiver),
-        SampleFormat::I64 => build_output_stream_typed::<i64>(selected, receiver),
-        SampleFormat::U8 => build_output_stream_typed::<u8>(selected, receiver),
-        SampleFormat::U16 => build_output_stream_typed::<u16>(selected, receiver),
-        SampleFormat::U24 => build_output_stream_typed::<cpal::U24>(selected, receiver),
-        SampleFormat::U32 => build_output_stream_typed::<u32>(selected, receiver),
-        SampleFormat::U64 => build_output_stream_typed::<u64>(selected, receiver),
-        SampleFormat::F32 => build_output_stream_typed::<f32>(selected, receiver),
-        SampleFormat::F64 => build_output_stream_typed::<f64>(selected, receiver),
+        SampleFormat::I8 => build_output_stream_typed::<i8>(selected, capacity),
+        SampleFormat::I16 => build_output_stream_typed::<i16>(selected, capacity),
+        SampleFormat::I24 => build_output_stream_typed::<cpal::I24>(selected, capacity),
+        SampleFormat::I32 => build_output_stream_typed::<i32>(selected, capacity),
+        SampleFormat::I64 => build_output_stream_typed::<i64>(selected, capacity),
+        SampleFormat::U8 => build_output_stream_typed::<u8>(selected, capacity),
+        SampleFormat::U16 => build_output_stream_typed::<u16>(selected, capacity),
+        SampleFormat::U24 => build_output_stream_typed::<cpal::U24>(selected, capacity),
+        SampleFormat::U32 => build_output_stream_typed::<u32>(selected, capacity),
+        SampleFormat::U64 => build_output_stream_typed::<u64>(selected, capacity),
+        SampleFormat::F32 => build_output_stream_typed::<f32>(selected, capacity),
+        SampleFormat::F64 => build_output_stream_typed::<f64>(selected, capacity),
         SampleFormat::DsdU8 | SampleFormat::DsdU16 | SampleFormat::DsdU32 => {
             bail!("output format {format} is DSD; this client accepts PCM device formats only")
         }
@@ -625,19 +778,21 @@ fn build_output_stream(
 
 fn build_output_stream_typed<T>(
     selected: &AudioDevice,
-    receiver: Receiver<Vec<i16>>,
-) -> Result<cpal::Stream>
+    capacity: usize,
+) -> Result<(cpal::Stream, SyncSender<Vec<i16>>)>
 where
     T: SizedSample + FromSample<i16> + Send + 'static,
 {
-    let channels = usize::from(selected.info.config.channels);
-    let device_id = selected.info.id.clone();
-    let mut queued_audio = OutputQueue::new(receiver);
+    let config = selected.info.config;
+    let channels = usize::from(config.channels);
 
-    selected
-        .device
-        .build_output_stream::<T, _, _>(
-            selected.info.config.stream_config(),
+    let mut refused = None;
+    for buffer_size in config.buffer_sizes() {
+        let device_id = selected.info.id.clone();
+        let (sender, receiver) = mpsc::sync_channel(capacity);
+        let mut queued_audio = OutputQueue::new(receiver);
+        match selected.device.build_output_stream::<T, _, _>(
+            config.stream_config(buffer_size),
             move |output, _| {
                 fill_output_buffer(output, channels, || queued_audio.next_sample());
             },
@@ -645,13 +800,18 @@ where
                 tracing::error!(%error, %device_id, "output audio stream error");
             },
             None,
-        )
-        .with_context(|| {
-            format!(
-                "failed to open output device {:?} ({}) with default config {}",
-                selected.info.name, selected.info.id, selected.info.config
-            )
-        })
+        ) {
+            Ok(stream) => return Ok((stream, sender)),
+            // Only a refused period is worth retrying at the device's own size.
+            Err(error) if matches!(error.kind(), cpal::ErrorKind::UnsupportedConfig) => {
+                tracing::debug!(%error, id = %selected.info.id, ?buffer_size, "output period refused");
+                refused = Some(error);
+            }
+            Err(error) => return Err(error).with_context(|| open_failure("output", selected)),
+        }
+    }
+    Err(refused.expect("a refusal for every candidate period"))
+        .with_context(|| open_failure("output", selected))
 }
 
 struct OutputQueue {
@@ -713,6 +873,92 @@ fn fill_output_buffer<T>(
 }
 
 #[cfg(test)]
+mod live_tests {
+    //! Opens the real auto-selected speakerphone:
+    //! `cargo test -p voice-chatbot-client -- --ignored live`.
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
+
+    /// Counts the ERROR events the stream error callbacks emit on CPAL's
+    /// worker threads, which a thread-local subscriber would never see.
+    struct CountStreamErrors(Arc<AtomicUsize>);
+
+    impl<S: tracing::Subscriber> Layer<S> for CountStreamErrors {
+        fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
+            if *event.metadata().level() == tracing::Level::ERROR {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Full duplex on the auto-selected device, with no stream errors.
+    ///
+    /// A smoke test, not a reliable regression guard: on `sysdefault:` (dmix)
+    /// the underrun this checks for is *intermittent* -- measured at 93 XRUNs
+    /// in 6 s on two runs out of three, and none on the third -- so a pass
+    /// here does not prove the alias ranking is right. A failure does prove it
+    /// is wrong. `plughw:` was clean on every run. See [`alias_rank`].
+    #[test]
+    #[ignore]
+    fn live_duplex_on_the_auto_selected_device_does_not_underrun() {
+        let xruns = Arc::new(AtomicUsize::new(0));
+        // Global, because the callbacks fire on CPAL's threads. If another
+        // test in this binary already installed one we can only check capture.
+        let counting = tracing::subscriber::set_global_default(
+            tracing_subscriber::registry().with(CountStreamErrors(xruns.clone())),
+        )
+        .is_ok();
+
+        let devices = AudioDevices::new().unwrap();
+        let audio = devices
+            .open(None, None)
+            .expect("open auto-selected devices");
+        eprintln!(
+            "input:  {} ({}, {})\noutput: {} ({}, {})",
+            audio.input_device.name,
+            audio.input_device.id,
+            audio.input_device.config,
+            audio.output_device.name,
+            audio.output_device.id,
+            audio.output_device.config,
+        );
+
+        let parts = audio.into_parts();
+        parts.streams.start().expect("start streams");
+
+        let mut input_rx = parts.input_rx;
+        let captured = Arc::new(AtomicUsize::new(0));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
+        while std::time::Instant::now() < deadline {
+            let _ = parts.output_tx.try_send(vec![0i16; 480]);
+            if let Ok(chunk) = input_rx.try_recv() {
+                captured.fetch_add(chunk.len(), Ordering::Relaxed);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        drop(parts.streams);
+
+        let frames = captured.load(Ordering::Relaxed);
+        assert!(
+            frames > parts.input_rate as usize,
+            "expected over a second of capture, got {frames} samples at {} Hz",
+            parts.input_rate
+        );
+
+        if counting {
+            let xruns = xruns.load(Ordering::Relaxed);
+            assert_eq!(
+                xruns, 0,
+                "{xruns} stream errors in 6 s of duplex on {}; see alias_rank",
+                parts.output_device.id
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
@@ -737,6 +983,26 @@ mod tests {
     }
 
     #[test]
+    fn requested_period_is_twenty_milliseconds_of_the_device_rate() {
+        let sizes = |sample_rate| {
+            let config = AudioStreamConfig {
+                sample_rate,
+                ..config()
+            };
+            config.buffer_sizes()
+        };
+
+        for (rate, frames) in [(48_000, 960), (44_100, 882), (16_000, 320), (8_000, 160)] {
+            assert!(
+                matches!(sizes(rate)[0], cpal::BufferSize::Fixed(n) if n == frames),
+                "{rate} Hz should ask for {frames} frames"
+            );
+        }
+        // A device that refuses the period falls back to its own choice.
+        assert!(matches!(sizes(48_000)[1], cpal::BufferSize::Default));
+    }
+
+    #[test]
     fn selector_obeys_precedence_and_one_based_indexes() {
         let devices = vec![
             device(1, "host:alpha", "2", true),
@@ -755,6 +1021,178 @@ mod tests {
             2
         );
         assert_eq!(select_device(&devices, Some("mic pro")).unwrap().index, 3);
+    }
+
+    /// The ALSA aliases one Jabra card produces, plus an unrelated default.
+    fn jabra_host() -> Vec<AudioDeviceInfo> {
+        vec![
+            device(1, "alsa:default", "Default ALSA Output", true),
+            device(
+                2,
+                "alsa:front:CARD=UC,DEV=0",
+                "Jabra Speak2 40 UC, USB Audio",
+                false,
+            ),
+            device(
+                3,
+                "alsa:hw:CARD=2,DEV=0",
+                "Jabra Speak2 40 UC, USB Audio",
+                false,
+            ),
+            device(
+                4,
+                "alsa:iec958:CARD=UC,DEV=0",
+                "Jabra Speak2 40 UC, USB Audio",
+                false,
+            ),
+            device(
+                5,
+                "alsa:plughw:CARD=UC,DEV=0",
+                "Jabra Speak2 40 UC, USB Audio",
+                false,
+            ),
+            device(
+                6,
+                "alsa:sysdefault:CARD=UC",
+                "Jabra Speak2 40 UC, USB Audio",
+                false,
+            ),
+        ]
+    }
+
+    #[test]
+    fn unspecified_selector_prefers_the_speakerphone_over_the_system_default() {
+        let devices = jabra_host();
+
+        for selector in [None, Some(""), Some("   ")] {
+            let selected = select_device(&devices, selector).unwrap();
+            assert_eq!(selected.id, "alsa:plughw:CARD=UC,DEV=0");
+        }
+
+        // "default" is an explicit request, and still means the system default.
+        assert_eq!(
+            select_device(&devices, Some("default")).unwrap().id,
+            "alsa:default"
+        );
+        assert_eq!(
+            select_device(&devices, Some("DEFAULT")).unwrap().id,
+            "alsa:default"
+        );
+    }
+
+    #[test]
+    fn unspecified_selector_falls_back_to_the_system_default_without_a_speakerphone() {
+        let devices = vec![
+            device(1, "alsa:default", "Default ALSA Output", true),
+            device(
+                2,
+                "alsa:hw:CARD=PCH,DEV=0",
+                "HDA Intel PCH, ALC1220 Analog",
+                false,
+            ),
+        ];
+
+        assert_eq!(select_device(&devices, None).unwrap().id, "alsa:default");
+        assert!(select_device(
+            &[device(1, "alsa:hw:CARD=PCH,DEV=0", "ALC1220", false)],
+            None
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("no system-default"));
+    }
+
+    #[test]
+    fn speakerphone_alias_ranking_prefers_the_pcm_that_survives_duplex() {
+        // `plughw` lets ALSA size the period from the hardware. `sysdefault`
+        // resolves to dmix/dsnoop, whose 1024-frame period double-buffers into
+        // a 42.7 ms ring that underruns once per 64 ms capture period.
+        assert!(alias_rank("alsa:plughw:CARD=UC,DEV=0") < alias_rank("alsa:front:CARD=UC,DEV=0"));
+        assert!(alias_rank("alsa:front:CARD=UC,DEV=0") < alias_rank("alsa:hw:CARD=UC,DEV=0"));
+        assert!(alias_rank("alsa:hw:CARD=UC,DEV=0") < alias_rank("alsa:sysdefault:CARD=UC"));
+        assert!(alias_rank("alsa:sysdefault:CARD=UC") < alias_rank("alsa:iec958:CARD=UC,DEV=0"));
+        // A host that lists the device once needs no ranking at all.
+        assert_eq!(alias_rank("coreaudio:Jabra Speak2 40 UC"), 0);
+        // `default` resolves through the same mixing chain as `sysdefault`.
+        assert_eq!(
+            alias_rank("alsa:default"),
+            alias_rank("alsa:sysdefault:CARD=UC")
+        );
+
+        // Each tier wins once the better ones are gone, and equal ranks keep
+        // the deterministic display order.
+        let mut devices = jabra_host();
+        for expected in [
+            "alsa:plughw:CARD=UC,DEV=0",
+            "alsa:front:CARD=UC,DEV=0",
+            "alsa:hw:CARD=2,DEV=0",
+            "alsa:sysdefault:CARD=UC",
+            "alsa:iec958:CARD=UC,DEV=0",
+        ] {
+            assert_eq!(preferred_device(&devices).unwrap().id, expected);
+            devices.retain(|device| device.id != expected);
+        }
+        assert_eq!(preferred_device(&devices), None, "only the default is left");
+    }
+
+    #[test]
+    fn speakerphone_is_matched_case_insensitively_anywhere_in_the_name() {
+        let devices = vec![
+            device(1, "alsa:default", "Default ALSA Output", true),
+            device(2, "coreaudio:x", "JABRA Evolve2 65", false),
+        ];
+        assert_eq!(select_device(&devices, None).unwrap().index, 2);
+    }
+
+    #[test]
+    fn explicit_selectors_still_win_over_the_speakerphone() {
+        let devices = jabra_host();
+
+        assert_eq!(select_device(&devices, Some("3")).unwrap().index, 3);
+        assert_eq!(
+            select_device(&devices, Some("alsa:plughw:CARD=UC,DEV=0"))
+                .unwrap()
+                .index,
+            5
+        );
+    }
+
+    #[test]
+    fn naming_one_device_ranks_its_alsa_aliases_instead_of_refusing() {
+        let devices = jabra_host();
+
+        // A substring, and an exact name, that hit every alias of one card.
+        for selector in ["jabra", "JABRA", "Jabra Speak2 40 UC, USB Audio"] {
+            assert_eq!(
+                select_device(&devices, Some(selector)).unwrap().id,
+                "alsa:plughw:CARD=UC,DEV=0",
+                "{selector:?} names one device reachable by several PCM paths"
+            );
+        }
+    }
+
+    #[test]
+    fn ranking_never_papers_over_a_real_ambiguity() {
+        // Same name, but not ALSA aliases: these are two separate devices and
+        // the caller has to say which one.
+        let two_devices = vec![
+            device(1, "coreaudio:a", "USB Mic", false),
+            device(2, "coreaudio:b", "USB Mic", false),
+        ];
+        assert!(select_device(&two_devices, Some("USB Mic"))
+            .unwrap_err()
+            .to_string()
+            .contains("ambiguous"));
+
+        // ALSA aliases, but of devices that differ by name.
+        let two_cards = vec![
+            device(1, "alsa:plughw:CARD=UC,DEV=0", "Jabra Speak2 40 UC", false),
+            device(2, "alsa:plughw:CARD=PCH,DEV=0", "Jabra Evolve2 65", false),
+        ];
+        assert!(select_device(&two_cards, Some("jabra"))
+            .unwrap_err()
+            .to_string()
+            .contains("ambiguous"));
     }
 
     #[test]

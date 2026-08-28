@@ -12,6 +12,16 @@ on the client's librespot "Babel" endpoint as before. Config is `POC_*` env in t
 repo-root `.env` (see `.env.example`), next to the secrets. Runtime artifacts
 live at the root too: `models/`, `.deps/`, `logs/`, `fixtures/`.
 
+- Audio devices: `make devices` lists them; `make call` with no
+  `INPUT_DEVICE`/`OUTPUT_DEVICE` auto-selects the Jabra speakerphone on both
+  sides when one is plugged in (its hardware echo cancellation is what keeps
+  the wake word alive while the assistant speaks), and falls back to the system
+  defaults otherwise. `INPUT_DEVICE=default OUTPUT_DEVICE=default` asks for the
+  system defaults with the Jabra attached. Naming the speakerphone by hand
+  (`INPUT_DEVICE=Jabra`) works too: on Linux one card is listed once per ALSA
+  PCM alias, and the client ranks those instead of calling the name ambiguous.
+  While a call holds the speakerphone the rest of the desktop cannot route to
+  it, so `mpv` media plays on the system default sink instead.
 - Spotify first-time auth: `target/release/voice-chatbot-server spotify-login`
   (`--headless` over SSH). The token is compatible with `scripts/spotify.py`.
 - Sound effects: `make sfx-up` / `make sfx-down` / `make sfx-status` run the
