@@ -166,6 +166,10 @@ pub struct PocConfig {
     /// Extra preset voices to load for `switch_persona` (comma-separated;
     /// `qwen_voice` is always first).
     pub qwen_voices: Vec<String>,
+    /// Every preset in `voices/` (name = `.txt` sidecar stem). All are loaded
+    /// for the Qwen backend so a wake word or `switch_persona` can select any
+    /// of them (the engine primes them all at preload anyway).
+    pub voice_presets: Vec<String>,
     pub qwen_size: String,
     /// `ask_claude`: Anthropic API key (empty → the tool is not advertised) and model.
     pub anthropic_key: String,
@@ -199,6 +203,22 @@ pub struct PocState {
     /// Shared Qwen engine + voice when `POC_TTS_BACKEND=qwen`.
     #[cfg(feature = "qwen-tts")]
     pub qwen: Option<tts_qwen::QwenShared>,
+}
+
+/// Preset names in `voices/`: the stem of every `.txt` transcript sidecar.
+fn voice_presets(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("txt"))
+                .filter_map(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
 }
 
 /// Every `prompt.<persona>.txt` next to `prompt.txt` → persona → text.
@@ -404,6 +424,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty())
             .collect(),
+        voice_presets: voice_presets(&repo_root.join("voices")),
         anthropic_key: env_or("ANTHROPIC_API_KEY", ""),
         claude_model: env_or("POC_CLAUDE_MODEL", "claude-opus-5"),
         qwen_size: env_or("POC_QWEN_SIZE", "1.7B"),
@@ -936,11 +957,13 @@ async fn start_ollama(
     Ok(serve)
 }
 
-/// `POC_QWEN_VOICE` followed by `POC_QWEN_VOICES` and the personas the wake
-/// heads select (deduplicated, `-`/`_`-insensitive), when the TTS backend is
-/// Qwen; otherwise just the one configured voice. Every wake persona is thus
-/// preloaded without listing it in `POC_QWEN_VOICES`, and a head whose persona
-/// is not in `voices/` fails startup in `start_qwen`.
+/// `POC_QWEN_VOICE` followed by `POC_QWEN_VOICES`, the personas the server's
+/// wake heads select, and every preset in `voices/` (deduplicated,
+/// `-`/`_`-insensitive), when the TTS backend is Qwen; otherwise just the one
+/// configured voice. Every persona a wake word can name — from the server
+/// gate or the native client's on-device detector — is therefore loaded, and
+/// a server wake head whose persona is not in `voices/` fails startup in
+/// `start_qwen`.
 fn qwen_persona_names(cfg: &PocConfig) -> Vec<String> {
     let mut names = vec![cfg.qwen_voice.clone()];
     if cfg.tts_backend == "qwen" {
@@ -951,7 +974,8 @@ fn qwen_persona_names(cfg: &PocConfig) -> Vec<String> {
         let extra = cfg
             .qwen_voices
             .iter()
-            .chain(cfg.wake_heads.iter().map(|(_, persona)| persona));
+            .chain(cfg.wake_heads.iter().map(|(_, persona)| persona))
+            .chain(cfg.voice_presets.iter());
         for v in extra {
             if !names.iter().any(|n| same(n, v)) {
                 names.push(v.clone());

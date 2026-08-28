@@ -85,7 +85,7 @@ def test_catalogue(bridge):
     assert isinstance(bridge.speakers(), list) and bridge.speakers()
     names = [v["name"] for v in bridge.voices()]
     assert "one-one" in names
-    assert bridge.voice_path("one-one").endswith("one-one.mp3")
+    assert bridge.voice_path("one-one").endswith("one-one.wav")
 
 
 def test_model_for(bridge):

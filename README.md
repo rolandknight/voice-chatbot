@@ -18,8 +18,10 @@ on the client's librespot "Babel" endpoint as before. Config is `POC_*` env in
   until they are.
 - BBC shows not in the curated RSS list fall back to `yt-dlp` on the server
   host (`brew install yt-dlp`).
-- Personas: `POC_QWEN_VOICES=marvin,one-one` exposes `switch_persona`;
-  `ANTHROPIC_API_KEY` exposes `ask_claude`. Both last for the current call.
+- Personas: every preset in `voices/` (`<name>.mp3` + `<name>.txt`) is loaded
+  for the Qwen backend and exposed through `switch_persona`
+  (`POC_QWEN_VOICES` is no longer needed); `ANTHROPIC_API_KEY` exposes
+  `ask_claude`. Both last for the current call.
 - Wake words: `POC_WAKE_DIR=models/wakeword` puts the server in Listen mode
   with every `hey_<persona>.onnx` in that directory (`hey_one_one` → the
   `one-one` voice); saying one selects that persona's voice for the session

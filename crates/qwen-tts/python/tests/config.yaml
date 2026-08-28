@@ -34,5 +34,5 @@ transcribe:
   model: mlx-community/whisper-base.en-mlx
 
 bench:
-  voice: one-one.mp3
+  voice: one-one.wav
   repeats: 3
