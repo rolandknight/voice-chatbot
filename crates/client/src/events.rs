@@ -78,7 +78,8 @@ pub async fn run(
     }
 }
 
-/// Conversation activity the wake session window re-arms on.
+/// Conversation activity the wake session window re-arms on (and the speech
+/// boundaries that suspend it while someone is talking).
 fn note_activity(activity: &crate::wake::Activity, input: &str) {
     let Ok(message) = serde_json::from_str::<Value>(input) else {
         return;
@@ -86,9 +87,8 @@ fn note_activity(activity: &crate::wake::Activity, input: &str) {
     let Some(kind) = message.get("type").and_then(Value::as_str) else {
         return;
     };
-    let payload = message.get("payload").cloned().unwrap_or(Value::Null);
-    if crate::wake::Activity::is_activity_event(kind, &payload) {
-        activity.note();
+    if let Some(signal) = crate::wake::Activity::signal_for(kind) {
+        activity.note(signal);
     }
 }
 

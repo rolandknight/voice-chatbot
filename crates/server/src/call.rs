@@ -173,6 +173,72 @@ fn with_system_prompt(
     out
 }
 
+/// The tool whose exchanges the local model must not see (see [`strip_ask_claude`]).
+const ASK_CLAUDE: &str = "ask_claude";
+
+fn is_empty_content(v: &serde_json::Value) -> bool {
+    match v {
+        serde_json::Value::Null => true,
+        serde_json::Value::String(s) => s.trim().is_empty(),
+        serde_json::Value::Array(a) => a.is_empty(),
+        _ => false,
+    }
+}
+
+fn has_ask_claude(messages: &[serde_json::Value]) -> bool {
+    messages.iter().any(|m| {
+        m["tool_calls"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|c| c["function"]["name"] == ASK_CLAUDE)
+    })
+}
+
+/// Drop the `ask_claude` call/result pairs from a copy of the rolling context.
+///
+/// The tool flips the backend, and the flip reverts when the wake session goes
+/// to sleep — but the exchange stays in the context for the rest of the call.
+/// Reading it back, the local model concludes it *is* Claude and answers the
+/// next "Claude, …" itself instead of calling the tool again: measured at half
+/// of the phrasings that fire reliably on a clean context ("I am already
+/// Claude, though I suppose the distinction is largely…"). Hiding just this
+/// exchange restored every one of them. Claude's spoken answers stay — only the
+/// call and its result go, and only on the branch that runs the local model.
+fn strip_ask_claude(messages: &mut Vec<serde_json::Value>) {
+    let mut dropped: Vec<String> = Vec::new();
+    messages.retain_mut(|m| match m["role"].as_str().unwrap_or("") {
+        "assistant" => {
+            let Some(calls) = m["tool_calls"].as_array_mut() else {
+                return true;
+            };
+            calls.retain(|c| {
+                let hit = c["function"]["name"] == ASK_CLAUDE;
+                if hit {
+                    if let Some(id) = c["id"].as_str() {
+                        dropped.push(id.to_string());
+                    }
+                }
+                !hit
+            });
+            if !calls.is_empty() {
+                return true;
+            }
+            if let Some(o) = m.as_object_mut() {
+                o.remove("tool_calls");
+            }
+            // The pipeline records a call as its own `content: null` message, so
+            // that one goes; a turn that both spoke and called keeps its text.
+            !is_empty_content(&m["content"])
+        }
+        // Its call is gone, so this would be an orphan the adapters reject.
+        "tool" => !m["tool_call_id"]
+            .as_str()
+            .is_some_and(|id| dropped.iter().any(|d| d == id)),
+        _ => true,
+    });
+}
+
 #[async_trait::async_trait]
 impl flowcat_core::service::LlmService for SwitchingLlm {
     fn name(&self) -> &str {
@@ -193,8 +259,10 @@ impl flowcat_core::service::LlmService for SwitchingLlm {
         ctx: &'a flowcat_core::processor::frame::LlmContext,
     ) -> flowcat_core::Result<futures::stream::BoxStream<'a, flowcat_core::processor::frame::Frame>>
     {
-        // Persona prompt (prompt.<persona>.txt) selected by a wake word or
-        // switch_persona replaces the default system message for this run.
+        // Two rewrites, both landing in `scratch` so the returned stream can
+        // borrow it: the persona prompt (prompt.<persona>.txt, selected by a
+        // wake word or switch_persona) replacing the default system message,
+        // and — on the local branch only — hiding the ask_claude exchange.
         // Split borrows: the stream borrows `scratch` while `local`/`claude`
         // are borrowed mutably.
         let Self {
@@ -203,14 +271,24 @@ impl flowcat_core::service::LlmService for SwitchingLlm {
             state,
             scratch,
         } = self;
-        let ctx: &'a flowcat_core::processor::frame::LlmContext = match state.prompt() {
-            Some(prompt) => {
-                *scratch = with_system_prompt(ctx, &prompt);
+        let backend = state.backend();
+        let on_claude = claude.is_some() && backend == crate::skills::LlmBackend::Claude;
+        let prompt = state.prompt();
+        let hide_ask_claude = !on_claude && has_ask_claude(&ctx.messages);
+        let ctx: &'a flowcat_core::processor::frame::LlmContext =
+            if prompt.is_some() || hide_ask_claude {
+                *scratch = match &prompt {
+                    Some(p) => with_system_prompt(ctx, p),
+                    None => ctx.clone(),
+                };
+                if hide_ask_claude {
+                    strip_ask_claude(&mut scratch.messages);
+                }
                 scratch
-            }
-            None => ctx,
-        };
-        match (claude, state.backend()) {
+            } else {
+                ctx
+            };
+        match (claude, backend) {
             (Some(c), crate::skills::LlmBackend::Claude) => c.run_llm(ctx).await,
             _ => local.run_llm(ctx).await,
         }
@@ -523,6 +601,78 @@ mod prompt_tests {
         let out = with_system_prompt(&no_system, "marvin");
         assert_eq!(out.messages.len(), 2);
         assert_eq!(out.messages[0]["role"], "system");
+    }
+
+    fn call_msg(id: &str, name: &str) -> serde_json::Value {
+        json!({"role": "assistant", "content": null, "tool_calls": [{
+            "id": id, "type": "function",
+            "function": {"name": name, "arguments": "{}"}}]})
+    }
+
+    #[test]
+    fn the_local_model_never_sees_the_ask_claude_exchange() {
+        let mut msgs = vec![
+            json!({"role": "system", "content": "S"}),
+            json!({"role": "user", "content": "what time is it"}),
+            call_msg("call_1_0", "get_current_time"),
+            json!({"role": "tool", "tool_call_id": "call_1_0", "content": "8:39 PM"}),
+            json!({"role": "assistant", "content": "Eight thirty-nine."}),
+            json!({"role": "user", "content": "ask claude about Rome"}),
+            call_msg("call_2_0", "ask_claude"),
+            json!({"role": "tool", "tool_call_id": "call_2_0", "content": "You are now Claude…"}),
+            json!({"role": "assistant", "content": "The Republic outgrew its institutions."}),
+        ];
+        assert!(has_ask_claude(&msgs));
+        strip_ask_claude(&mut msgs);
+
+        assert!(!has_ask_claude(&msgs));
+        // The other tool exchange is untouched, and Claude's spoken answer stays.
+        let roles: Vec<&str> = msgs.iter().map(|m| m["role"].as_str().unwrap()).collect();
+        assert_eq!(
+            roles,
+            [
+                "system",
+                "user",
+                "assistant",
+                "tool",
+                "assistant",
+                "user",
+                "assistant"
+            ]
+        );
+        assert_eq!(msgs[3]["tool_call_id"], "call_1_0");
+        assert_eq!(msgs[6]["content"], "The Republic outgrew its institutions.");
+        // No orphan `tool` message: every result still answers a live call.
+        let ids: Vec<&str> = msgs
+            .iter()
+            .filter_map(|m| m["tool_call_id"].as_str())
+            .collect();
+        assert_eq!(ids, ["call_1_0"]);
+    }
+
+    #[test]
+    fn a_turn_that_spoke_and_called_ask_claude_keeps_its_words() {
+        let mut msgs = vec![json!({
+            "role": "assistant", "content": "One moment.",
+            "tool_calls": [{"id": "c1", "type": "function",
+                            "function": {"name": "ask_claude", "arguments": "{}"}}]})];
+        strip_ask_claude(&mut msgs);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["content"], "One moment.");
+        assert!(msgs[0].get("tool_calls").is_none(), "{:?}", msgs[0]);
+    }
+
+    #[test]
+    fn a_context_without_ask_claude_is_left_alone() {
+        let msgs = vec![
+            json!({"role": "user", "content": "weather"}),
+            call_msg("call_1_0", "get_weather"),
+            json!({"role": "tool", "tool_call_id": "call_1_0", "content": "clear, 20"}),
+        ];
+        assert!(!has_ask_claude(&msgs));
+        let mut stripped = msgs.clone();
+        strip_ask_claude(&mut stripped);
+        assert_eq!(stripped, msgs);
     }
 
     #[test]

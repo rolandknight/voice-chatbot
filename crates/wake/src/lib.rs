@@ -31,6 +31,11 @@ pub const SAMPLE_RATE: u32 = 16_000;
 /// twice, by the same head or by a near-miss neighbour.
 pub const CROSS_HEAD_COOLDOWN: Duration = Duration::from_secs(2);
 
+/// A speaking hold older than this is treated as stale. Start and stop edges
+/// are paired at the source (a barge-in emits the stop), but a dropped events
+/// socket or a killed TTS must not leave the session awake forever.
+pub const MAX_SPEAKING_HOLD: Duration = Duration::from_secs(120);
+
 // ===========================================================================
 // Head discovery
 // ===========================================================================
@@ -231,6 +236,14 @@ pub enum Effect {
     Sleep,
 }
 
+/// Whose speech is holding the session open. Each side is tracked separately
+/// so the bot's reply and the caller's turn can overlap (barge-in).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Speaker {
+    User,
+    Bot,
+}
+
 /// IDLE / AWAKE with a silence-based session window and a cross-head cooldown.
 /// Time is passed in so tests drive it deterministically.
 pub struct GateCore {
@@ -238,6 +251,10 @@ pub struct GateCore {
     last_voice: Instant,
     session_window: Duration,
     cooldown_until: Option<Instant>,
+    /// When each side started speaking, while it still is: the session window
+    /// is silence-based, so it must not run during speech. Indexed by
+    /// [`Speaker`].
+    speaking_since: [Option<Instant>; 2],
 }
 
 impl GateCore {
@@ -247,6 +264,7 @@ impl GateCore {
             last_voice: now,
             session_window,
             cooldown_until: None,
+            speaking_since: [None; 2],
         }
     }
 
@@ -254,10 +272,29 @@ impl GateCore {
         self.awake
     }
 
+    /// Is either side mid-utterance? A hold past [`MAX_SPEAKING_HOLD`] is
+    /// stale (its stop edge was lost) and no longer counts.
+    pub fn is_speaking(&self, now: Instant) -> bool {
+        self.speaking_since
+            .iter()
+            .flatten()
+            .any(|started| now.duration_since(*started) <= MAX_SPEAKING_HOLD)
+    }
+
     /// Lazy session expiry; call first for every frame.
     pub fn tick(&mut self, now: Instant) -> Option<Effect> {
-        if self.awake && now.duration_since(self.last_voice) > self.session_window {
+        if !self.awake {
+            return None;
+        }
+        // Speech in progress suspends the window: the countdown to sleep runs
+        // from the moment speaking stops, not from when it started.
+        if self.is_speaking(now) {
+            self.last_voice = now;
+            return None;
+        }
+        if now.duration_since(self.last_voice) > self.session_window {
             self.awake = false;
+            self.speaking_since = [None; 2];
             return Some(Effect::Sleep);
         }
         None
@@ -280,12 +317,30 @@ impl GateCore {
         })
     }
 
-    /// Voice activity while awake (the VAD's falling edge on the server, a
-    /// transcription or bot turn on the client) re-arms the session window.
+    /// Voice activity while awake (a transcription on the client) re-arms the
+    /// session window.
     pub fn on_activity(&mut self, now: Instant) {
         if self.awake {
             self.last_voice = now;
         }
+    }
+
+    /// `who` started speaking (the VAD's rising edge, the bot's first TTS
+    /// chunk): hold the session open until the matching
+    /// [`GateCore::on_speaking_end`]. Ignored while idle, where no session
+    /// exists to hold.
+    pub fn on_speaking_start(&mut self, who: Speaker, now: Instant) {
+        if self.awake {
+            self.speaking_since[who as usize] = Some(now);
+            self.last_voice = now;
+        }
+    }
+
+    /// `who` stopped speaking: release the hold and start the session window
+    /// from here.
+    pub fn on_speaking_end(&mut self, who: Speaker, now: Instant) {
+        self.speaking_since[who as usize] = None;
+        self.on_activity(now);
     }
 }
 
@@ -379,6 +434,72 @@ mod tests {
                 open: true
             })
         );
+    }
+
+    #[test]
+    fn the_session_window_runs_only_after_speaking_stops() {
+        let t0 = Instant::now();
+        let s = |secs: f32| t0 + Duration::from_secs_f32(secs);
+        let mut core = GateCore::new(Duration::from_secs(15), t0);
+        core.on_audio(fire(0), s(1.0));
+
+        // A 40 s reply is four times the session window, and the gate must
+        // not fall asleep in the middle of it.
+        core.on_speaking_start(Speaker::Bot, s(2.0));
+        assert_eq!(core.tick(s(20.0)), None);
+        assert_eq!(core.tick(s(42.0)), None);
+        assert!(core.is_awake());
+
+        // The window starts at the stop edge, not at the start of the reply.
+        core.on_speaking_end(Speaker::Bot, s(42.0));
+        assert_eq!(core.tick(s(56.0)), None);
+        assert_eq!(core.tick(s(57.1)), Some(Effect::Sleep));
+    }
+
+    #[test]
+    fn overlapping_speakers_each_hold_the_session() {
+        let t0 = Instant::now();
+        let s = |secs: f32| t0 + Duration::from_secs_f32(secs);
+        let mut core = GateCore::new(Duration::from_secs(15), t0);
+        core.on_audio(fire(0), s(1.0));
+
+        // Barge-in: the caller starts while the bot is still speaking, so the
+        // bot's stop edge must not release the session.
+        core.on_speaking_start(Speaker::Bot, s(2.0));
+        core.on_speaking_start(Speaker::User, s(5.0));
+        core.on_speaking_end(Speaker::Bot, s(6.0));
+        assert_eq!(core.tick(s(40.0)), None, "the caller is still speaking");
+        core.on_speaking_end(Speaker::User, s(40.0));
+        assert_eq!(core.tick(s(55.1)), Some(Effect::Sleep));
+    }
+
+    #[test]
+    fn a_lost_stop_edge_cannot_hold_the_session_forever() {
+        let t0 = Instant::now();
+        let s = |secs: u64| t0 + Duration::from_secs(secs);
+        let mut core = GateCore::new(Duration::from_secs(15), t0);
+        core.on_audio(fire(0), s(1));
+        core.on_speaking_start(Speaker::Bot, s(2));
+        // The stop edge never arrives (dropped events socket): the hold goes
+        // stale and the window runs again.
+        let stale = s(2) + MAX_SPEAKING_HOLD;
+        assert_eq!(core.tick(stale), None);
+        assert_eq!(
+            core.tick(stale + Duration::from_secs(16)),
+            Some(Effect::Sleep)
+        );
+        // A stale hold does not leak into the next session.
+        core.on_audio(fire(0), stale + Duration::from_secs(20));
+        assert!(!core.is_speaking(stale + Duration::from_secs(20)));
+    }
+
+    #[test]
+    fn speaking_while_idle_does_not_hold_anything() {
+        let t0 = Instant::now();
+        let mut core = GateCore::new(Duration::from_secs(1), t0);
+        core.on_speaking_start(Speaker::Bot, t0);
+        assert!(!core.is_speaking(t0), "no session to hold open");
+        assert_eq!(core.tick(t0 + Duration::from_secs(100)), None);
     }
 
     #[test]

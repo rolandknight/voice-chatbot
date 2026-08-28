@@ -22,7 +22,7 @@ use flowcat_core::processor::{Envelope, FrameProcessor, Link, ProcessorSetup};
 use flowcat_core::Result;
 use flowcat_server::events::CallEvents;
 use voice_chatbot_protocol::{WakeState, WAKE_EVENT};
-use voice_chatbot_wake::{Effect, GateCore, WakeBank, WakeDetector};
+use voice_chatbot_wake::{Effect, GateCore, Speaker, WakeBank, WakeDetector};
 
 use crate::skills::{CallState, LlmBackend};
 
@@ -36,8 +36,10 @@ use crate::skills::{CallState, LlmBackend};
 /// the persona's voice, replays ~0.5 s of pre-roll, emits a synthetic
 /// `UserStartedSpeaking` (the VAD's own rising edge was swallowed — without
 /// this the command in the same breath as the wake word would be lost), and
-/// stays AWAKE until `session_window` of silence. A different wake word while
-/// awake hands the conversation to that persona without a new edge.
+/// stays AWAKE until `session_window` of silence — speech in progress (the
+/// caller's turn, the bot's reply) holds the session open, so the countdown
+/// only starts once speaking stops. A different wake word while awake hands
+/// the conversation to that persona without a new edge.
 pub struct WakeGate<D: WakeDetector = WakeBank> {
     detector: D,
     core: GateCore,
@@ -174,12 +176,24 @@ impl<D: WakeDetector> FrameProcessor for WakeGate<D> {
             }
             Frame::UserStartedSpeaking | Frame::UserStoppedSpeaking => {
                 if self.core.is_awake() {
-                    if matches!(env.frame, Frame::UserStoppedSpeaking) {
-                        self.core.on_activity(now);
+                    if matches!(env.frame, Frame::UserStartedSpeaking) {
+                        self.core.on_speaking_start(Speaker::User, now);
+                    } else {
+                        self.core.on_speaking_end(Speaker::User, now);
                     }
                     link.push(env.meta, env.frame, env.direction).await;
                 }
                 // idle: swallow — no turns while asleep
+            }
+            // The bot's own edges ride the pipeline head (BotSpeakingNotifier),
+            // so a reply longer than the session window can't expire it.
+            Frame::BotStartedSpeaking => {
+                self.core.on_speaking_start(Speaker::Bot, now);
+                link.push(env.meta, env.frame, env.direction).await;
+            }
+            Frame::BotStoppedSpeaking => {
+                self.core.on_speaking_end(Speaker::Bot, now);
+                link.push(env.meta, env.frame, env.direction).await;
             }
             _ => link.push(env.meta, env.frame, env.direction).await,
         }

@@ -9,6 +9,9 @@
 //! voice (`main.rs::apply_client_wake` on the server). The session is
 //! re-armed by activity the server reports (transcriptions, bot turns) and
 //! ends after `session_secs` of silence, which is reported as `asleep`.
+//! Speech in progress holds the session open: a reply longer than
+//! `session_secs` used to put the client to sleep mid-sentence, so the
+//! countdown runs from the moment speaking stops.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -19,7 +22,7 @@ use anyhow::{Context, Result};
 use serde_json::json;
 use tokio::sync::mpsc;
 use voice_chatbot_protocol::{WakeState, WAKE_EVENT};
-use voice_chatbot_wake::{Effect, GateCore, WakeBank, WakeDetector, SAMPLE_RATE};
+use voice_chatbot_wake::{Effect, GateCore, Speaker, WakeBank, WakeDetector, SAMPLE_RATE};
 
 use crate::resampler::StreamingResampler;
 
@@ -31,30 +34,48 @@ pub struct WakeConfig {
     pub session_secs: f32,
 }
 
-/// Latest conversation activity seen by the events task (a final
-/// transcription, the bot starting or finishing a turn); the gate folds it
-/// into its session window.
+/// What one server event means to the session window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Signal {
+    /// A conversation beat: re-arm the window from here.
+    Turn,
+    /// Speech began; the window is suspended until [`Signal::SpeakingEnd`].
+    SpeakingStart(Speaker),
+    /// Speech ended; the window runs from here.
+    SpeakingEnd(Speaker),
+}
+
+/// Conversation activity seen by the events task, in arrival order (start and
+/// stop edges have to stay paired); the gate drains it on every captured
+/// block and folds it into its session window.
 #[derive(Clone, Default)]
-pub struct Activity(Arc<Mutex<Option<Instant>>>);
+pub struct Activity(Arc<Mutex<VecDeque<(Signal, Instant)>>>);
+
+/// Bound on the queue for the push-mode call, where no gate ever drains it.
+const ACTIVITY_CAP: usize = 64;
 
 impl Activity {
-    pub fn note(&self) {
-        *self.0.lock().unwrap() = Some(Instant::now());
+    pub fn note(&self, signal: Signal) {
+        let mut queue = self.0.lock().unwrap();
+        if queue.len() == ACTIVITY_CAP {
+            queue.pop_front();
+        }
+        queue.push_back((signal, Instant::now()));
     }
 
-    fn take(&self) -> Option<Instant> {
-        self.0.lock().unwrap().take()
+    fn drain(&self) -> Vec<(Signal, Instant)> {
+        self.0.lock().unwrap().drain(..).collect()
     }
 
-    /// Event kinds that count as conversation activity.
-    pub fn is_activity_event(kind: &str, payload: &serde_json::Value) -> bool {
+    /// What an event means to the window, if anything. Partial transcriptions
+    /// count too: they only arrive while the caller is talking, and are the
+    /// client's only sign of a turn still in progress.
+    pub fn signal_for(kind: &str) -> Option<Signal> {
         match kind {
-            "rtf-user-transcription" => payload
-                .get("final")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false),
-            "rtf-bot-started-speaking" | "rtf-bot-stopped-speaking" => true,
-            _ => false,
+            "rtf-user-transcription" => Some(Signal::Turn),
+            "rtf-bot-started-speaking" => Some(Signal::SpeakingStart(Speaker::Bot)),
+            "rtf-bot-stopped-speaking" => Some(Signal::SpeakingEnd(Speaker::Bot)),
+            _ => None,
         }
     }
 }
@@ -92,8 +113,12 @@ impl ClientWakeGate {
     /// asleep; pre-roll + block on the opening fire) and a state change to
     /// report, if any.
     pub fn process(&mut self, pcm: &[i16], now: Instant) -> Result<(Vec<i16>, Option<WakeState>)> {
-        if let Some(at) = self.activity.take() {
-            self.core.on_activity(at);
+        for (signal, at) in self.activity.drain() {
+            match signal {
+                Signal::Turn => self.core.on_activity(at),
+                Signal::SpeakingStart(who) => self.core.on_speaking_start(who, at),
+                Signal::SpeakingEnd(who) => self.core.on_speaking_end(who, at),
+            }
         }
         let mut report = None;
         if let Some(Effect::Sleep) = self.core.tick(now) {
@@ -195,20 +220,46 @@ mod tests {
     use super::*;
 
     #[test]
-    fn activity_events_are_finals_and_bot_turns() {
-        assert!(Activity::is_activity_event(
-            "rtf-user-transcription",
-            &json!({"final": true})
-        ));
-        assert!(!Activity::is_activity_event(
-            "rtf-user-transcription",
-            &json!({"final": false})
-        ));
-        assert!(Activity::is_activity_event(
-            "rtf-bot-stopped-speaking",
-            &json!({})
-        ));
-        assert!(!Activity::is_activity_event("media", &json!({})));
+    fn transcriptions_re_arm_and_bot_speech_holds() {
+        assert_eq!(
+            Activity::signal_for("rtf-user-transcription"),
+            Some(Signal::Turn)
+        );
+        assert_eq!(
+            Activity::signal_for("rtf-bot-started-speaking"),
+            Some(Signal::SpeakingStart(Speaker::Bot))
+        );
+        assert_eq!(
+            Activity::signal_for("rtf-bot-stopped-speaking"),
+            Some(Signal::SpeakingEnd(Speaker::Bot))
+        );
+        assert_eq!(Activity::signal_for("media"), None);
+    }
+
+    #[test]
+    fn signals_reach_the_gate_in_order() {
+        let activity = Activity::default();
+        activity.note(Signal::SpeakingStart(Speaker::Bot));
+        activity.note(Signal::SpeakingEnd(Speaker::Bot));
+        let drained: Vec<Signal> = activity.drain().into_iter().map(|(s, _)| s).collect();
+        assert_eq!(
+            drained,
+            vec![
+                Signal::SpeakingStart(Speaker::Bot),
+                Signal::SpeakingEnd(Speaker::Bot)
+            ]
+        );
+        assert!(activity.drain().is_empty(), "drained once");
+    }
+
+    /// Push mode leaves the queue undrained; it must not grow without bound.
+    #[test]
+    fn an_undrained_queue_is_capped() {
+        let activity = Activity::default();
+        for _ in 0..ACTIVITY_CAP * 3 {
+            activity.note(Signal::Turn);
+        }
+        assert_eq!(activity.drain().len(), ACTIVITY_CAP);
     }
 
     #[test]
