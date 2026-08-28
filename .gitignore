@@ -49,3 +49,4 @@ cuda_*.run
 # Python test/packaging droppings (crates/qwen-tts/python).
 .pytest_cache/
 *.egg-info/
+/wakeword/_work/

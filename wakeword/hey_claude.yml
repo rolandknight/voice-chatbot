@@ -1,0 +1,60 @@
+# Training config for the "hey claude" openWakeWord model.
+# Hyperparameters start at the values used by the other wake-word models and
+# can be tuned independently after evaluating the first training run.
+
+model_name: "hey_claude"
+
+target_phrase:
+  - "hey claude"
+
+# Phonetic neighbours and common words that could otherwise trigger the model.
+custom_negative_phrases:
+  - "hey cloud"
+  - "hey clawed"
+  - "hey clod"
+  - "hey clause"
+  - "hey claudia"
+  - "hey claire"
+  - "hey clyde"
+  - "hey cole"
+  - "hey cold"
+  - "cloud"
+
+n_samples: 50000
+n_samples_val: 2000
+
+# Piper TTS runs on the GPU; keep batches small enough for a 6 GB GPU.
+tts_batch_size: 16
+augmentation_batch_size: 8
+
+# Paths are relative to /work inside the training container.
+piper_sample_generator_path: "/opt/piper-sample-generator"
+output_dir: "/work/output/hey_claude"
+
+rir_paths:
+  - "/work/data/mit_rirs/16khz"
+
+background_paths:
+  - "/work/data/background_clips"
+
+background_paths_duplication_rate:
+  - 1
+
+false_positive_validation_data_path: "/work/data/validation_set_features.npy"
+
+augmentation_rounds: 2
+
+feature_data_files:
+  "ACAV100M_sample": "/work/data/openwakeword_features_ACAV100M_2000_hrs_16bit.npy"
+
+batch_n_per_class:
+  "ACAV100M_sample": 1024
+  "adversarial_negative": 50
+  "positive": 100
+
+model_type: "dnn"
+layer_size: 64
+
+steps: 50000
+max_negative_weight: 1000
+target_false_positives_per_hour: 0.5
