@@ -2,9 +2,9 @@
 
 ## Current clips
 
-- `babel.mp3` — the `babel` persona (wake word "hey babel").
-- `marvin.mp3` — the `marvin` persona (wake word "hey marvin").
-- `one-one.mp3` — the default/bench reference clip used by
+- `babel.wav` — the `babel` persona (wake word "hey babel").
+- `marvin.wav` — the `marvin` persona (wake word "hey marvin").
+- `one-one.wav` — the default/bench reference clip used by
   `poc-tts-streaming`'s `bench.voice` and `realtime.default_voice`, and by
   the Qwen3-TTS bench (`qwen-tts-tester`).
 
@@ -30,6 +30,9 @@ Drop a short reference clip per cloned persona here. Recommended:
 - **24 kHz** preferred (Chatterbox resamples if needed)
 - **WAV** preferred (MP3/FLAC also work)
 - **Clean** — no music, minimal room reverb, single speaker
+- **Level-matched** — all clips are gained to −20 LUFS integrated (pure gain,
+  no compression); the clone's output level follows the reference. Re-level
+  new clips the same way (`ffmpeg -af ebur128` to measure, `-af volume=XdB`).
 
 Once a clip is in place, add a persona entry to `../personas.yaml`:
 
