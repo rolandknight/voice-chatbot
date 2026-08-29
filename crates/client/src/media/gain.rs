@@ -1,10 +1,14 @@
-//! The media source's playback gain, shared between the control thread and the
-//! CPAL output callback.
+//! The media source's shared control state, between the control thread and
+//! the CPAL output callback: its level, plus two one-shot requests (jump,
+//! flush).
 //!
 //! The callback may not lock, so the target is an `f32` stored as bits in an
 //! `AtomicU32` and the ramp is walked one step per sample. A *jump* is the
 //! start-ducked case: a stream opening while the assistant already speaks has
-//! no earlier level to fade from, so it begins at the target outright.
+//! no earlier level to fade from, so it begins at the target outright. A
+//! *flush* is the source-switch case: whatever is already queued in the
+//! mixer belongs to the previous stream and must be discarded, not played out
+//! under the new one's gain.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
@@ -38,6 +42,7 @@ pub fn advance(current: f32, target: f32, step: f32) -> f32 {
 pub struct Gain {
     target: Arc<AtomicU32>,
     jump: Arc<AtomicBool>,
+    flush: Arc<AtomicBool>,
 }
 
 impl Gain {
@@ -45,6 +50,7 @@ impl Gain {
         Self {
             target: Arc::new(AtomicU32::new(value.to_bits())),
             jump: Arc::new(AtomicBool::new(false)),
+            flush: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -66,6 +72,18 @@ impl Gain {
     /// True once per [`Self::jump_to`]; clears the request.
     pub fn take_jump(&self) -> bool {
         self.jump.swap(false, Ordering::Acquire)
+    }
+
+    /// Discard whatever media is already queued in the mixer. Used when the
+    /// source changes: the buffered chunks belong to the previous stream and
+    /// must not be heard under the new one.
+    pub fn flush(&self) {
+        self.flush.store(true, Ordering::Release);
+    }
+
+    /// True once per [`Self::flush`]; clears the request.
+    pub fn take_flush(&self) -> bool {
+        self.flush.swap(false, Ordering::Acquire)
     }
 }
 

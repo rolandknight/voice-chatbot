@@ -28,7 +28,11 @@ use duck::{Duck, Transport};
 use gain::Gain;
 
 /// What to report for a decoder that exited on its own. `None` for a clean
-/// exit (the stream simply ended).
+/// exit (the stream simply ended). A failure is worth surfacing because it is
+/// otherwise silent: [`decoder::Decoder::spawn`] nulls ffmpeg's stderr and
+/// [`MediaPlayer::play`] only checks that the *spawn* succeeded, so a stream
+/// that ffmpeg immediately refused would otherwise read as a playing radio
+/// that makes no sound.
 fn exit_line(title: &str, code: Option<i32>) -> Option<String> {
     match code {
         Some(0) => None,
@@ -204,8 +208,13 @@ impl MediaPlayer {
         self.pending = None;
         let was_playing = self.decoder.take().is_some();
         self.duck.stop();
-        // The ramp to 0 covers whatever is already queued in the channel.
         self.gain.ramp_to(0.0);
+        // Discard whatever is already queued in the mixer: a ramp to 0 only
+        // covers gain, not the chunks themselves, and a station switch spawns
+        // the next decoder right after this returns -- those queued chunks
+        // are still the previous stream's audio and must not play out under
+        // the new one.
+        self.gain.flush();
         if was_playing {
             tracing::info!(title = %self.title, "media: stopped");
         }
@@ -227,6 +236,12 @@ impl MediaPlayer {
             tracing::warn!(title = %self.title, ?code, "media: decoder exited on its own");
             self.exit_report = Some(line);
         }
+    }
+}
+
+impl Drop for MediaPlayer {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 

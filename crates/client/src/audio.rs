@@ -900,6 +900,15 @@ impl OutputMixer {
     }
 
     fn next_sample(&mut self) -> Option<i16> {
+        if self.gain.take_flush() {
+            // Drop the previous source's audio rather than playing it under
+            // the new one. Bounded by the channel capacity; only ever runs on
+            // an explicit stop or station change, never per callback.
+            self.media.current.clear();
+            self.media.offset = 0;
+            while self.media.receiver.try_recv().is_ok() {}
+        }
+
         let voice = self.voice.next_sample();
         let media = self.media.next_sample();
 
@@ -1109,6 +1118,29 @@ mod tests {
         // A jump lands on the target immediately.
         gain.jump_to(0.0);
         assert_eq!(mixer.next_sample(), Some(0));
+    }
+
+    #[test]
+    fn a_flush_discards_media_queued_by_the_previous_source() {
+        let (voice_tx, voice_rx) = mpsc::sync_channel(4);
+        let (media_tx, media_rx) = mpsc::sync_channel(4);
+        media_tx.try_send(vec![1000; 2]).expect("queue media");
+        media_tx.try_send(vec![2000; 2]).expect("queue more media");
+        drop(voice_tx);
+        drop(media_tx);
+        let gain = crate::media::gain::Gain::new(1.0);
+        let mut mixer = OutputMixer::new(voice_rx, media_rx, gain.clone(), 1.0);
+
+        // One sample of the old source is consumed before the switch.
+        assert_eq!(mixer.next_sample(), Some(1000));
+
+        // Everything still queued belongs to the previous stream.
+        gain.flush();
+        assert_eq!(
+            mixer.next_sample(),
+            None,
+            "queued audio from the previous source must not be heard"
+        );
     }
 
     fn config() -> AudioStreamConfig {
