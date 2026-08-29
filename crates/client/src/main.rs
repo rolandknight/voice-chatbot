@@ -264,6 +264,8 @@ async fn run_session(
         output_device,
         input_rx,
         output_tx,
+        media_tx: _media_tx,
+        media_gain: _media_gain,
     } = audio.into_parts();
 
     if describe_devices {
