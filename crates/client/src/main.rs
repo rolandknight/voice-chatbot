@@ -265,6 +265,8 @@ async fn run_session(
         input_rx,
         output_tx,
         media_tx,
+        voice_recycle_rx,
+        media_recycle_rx,
         media_gain,
     } = audio.into_parts();
 
@@ -310,6 +312,7 @@ async fn run_session(
     let media = if MediaPlayer::is_available() {
         Some(MediaPlayer::new(
             media_tx,
+            media_recycle_rx,
             media_gain,
             output_rate,
             server_url,
@@ -370,12 +373,19 @@ async fn run_session(
     // its own timeout), and the peer must not wait on ICE to close.
     let mut hung_up = false;
     let call_result = peer
-        .run(input_rate, output_rate, input_rx, output_tx, async {
-            tokio::select! {
-                result = hangup.wait_for(|hung_up| *hung_up) => hung_up = result.is_ok(),
-                _ = &mut event_task => {}
-            }
-        })
+        .run(
+            input_rate,
+            output_rate,
+            input_rx,
+            output_tx,
+            voice_recycle_rx,
+            async {
+                tokio::select! {
+                    result = hangup.wait_for(|hung_up| *hung_up) => hung_up = result.is_ok(),
+                    _ = &mut event_task => {}
+                }
+            },
+        )
         .await;
     let call_result = match call_result {
         Ok(()) if !hung_up => Err(anyhow::anyhow!("server event stream closed")),

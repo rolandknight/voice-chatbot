@@ -15,8 +15,8 @@
 use std::io::Read;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{SyncSender, TrySendError};
-use std::sync::Arc;
+use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -68,11 +68,21 @@ impl Decoder {
         args
     }
 
+    /// `recycle` carries spent buffers back from the mixer. The feeder refills
+    /// those rather than allocating: the audio callback must not free a buffer,
+    /// so it returns them here instead, and this is the other half of that.
+    ///
+    /// It is shared rather than owned because each `Decoder` moves it into its
+    /// feeder thread and the next one needs it back. The mutex is uncontended
+    /// in practice -- `Drop` joins the outgoing feeder before a new one spawns,
+    /// so only one holder ever exists -- and it is never taken on the audio
+    /// thread, which only ever *sends* down the return channel.
     pub fn spawn(
         url: &str,
         sample_rate: u32,
         live: bool,
         tx: SyncSender<Vec<i16>>,
+        recycle: Arc<Mutex<Receiver<Vec<i16>>>>,
     ) -> std::io::Result<Self> {
         let mut child = Command::new("ffmpeg")
             .args(Self::command_args(url, sample_rate, live))
@@ -102,10 +112,21 @@ impl Decoder {
                     }
                     match stdout.read_exact(&mut bytes) {
                         Ok(()) => {
-                            let samples = bytes
-                                .chunks_exact(2)
-                                .map(|pair| i16::from_le_bytes([pair[0], pair[1]]))
-                                .collect();
+                            // Refill a buffer the mixer has finished with. Only
+                            // the first few chunks allocate; after that the same
+                            // buffers cycle round, so neither thread touches the
+                            // allocator in steady state.
+                            let mut samples = recycle
+                                .lock()
+                                .ok()
+                                .and_then(|spare| spare.try_recv().ok())
+                                .unwrap_or_default();
+                            samples.clear();
+                            samples.extend(
+                                bytes
+                                    .chunks_exact(2)
+                                    .map(|pair| i16::from_le_bytes([pair[0], pair[1]])),
+                            );
                             // Backpressure is what paces ffmpeg: no more of stdout
                             // is read until this chunk lands. A blocking `send`
                             // would do that too, but uncancellably — a feeder
@@ -184,6 +205,14 @@ impl Drop for Decoder {
 mod tests {
     use super::*;
 
+    /// A return path with nothing on it: the feeder allocates every buffer, as
+    /// it does before the mixer has handed any back. Tests that are not about
+    /// recycling use this.
+    fn no_recycling() -> Arc<Mutex<Receiver<Vec<i16>>>> {
+        let (_tx, rx) = std::sync::mpsc::sync_channel(1);
+        Arc::new(Mutex::new(rx))
+    }
+
     #[test]
     fn a_live_stream_starts_at_the_live_edge_and_reconnects() {
         let args = Decoder::command_args("http://example/x.m3u8", 48_000, true);
@@ -230,8 +259,14 @@ mod tests {
     fn live_decodes_a_generated_tone_into_the_channel() {
         let (tx, rx) = std::sync::mpsc::sync_channel(256);
         // lavfi is ffmpeg's built-in generator: 0.5 s of 440 Hz.
-        let mut decoder = Decoder::spawn("sine=frequency=440:duration=0.5", 48_000, false, tx)
-            .expect("spawn ffmpeg");
+        let mut decoder = Decoder::spawn(
+            "sine=frequency=440:duration=0.5",
+            48_000,
+            false,
+            tx,
+            no_recycling(),
+        )
+        .expect("spawn ffmpeg");
         std::thread::sleep(std::time::Duration::from_millis(1500));
         let samples: usize = rx.try_iter().map(|chunk| chunk.len()).sum();
         // 0.5 s at 48 kHz, allowing for the last partial chunk.
@@ -246,6 +281,40 @@ mod tests {
         );
     }
 
+    /// The mixer hands spent buffers back so the callback never has to free
+    /// one. That only pays off if the feeder actually refills them instead of
+    /// allocating, so assert the very allocation we supplied comes back out.
+    #[test]
+    #[ignore]
+    fn live_the_feeder_refills_a_recycled_buffer_instead_of_allocating() {
+        let (tx, rx) = std::sync::mpsc::sync_channel(8);
+        let (recycle_tx, recycle_rx) = std::sync::mpsc::sync_channel(8);
+        // A buffer already the right size, as the mixer would return.
+        let spare = vec![0i16; 960];
+        let spare_alloc = spare.as_ptr();
+        recycle_tx
+            .try_send(spare)
+            .expect("offer a buffer for reuse");
+
+        let _decoder = Decoder::spawn(
+            "sine=frequency=440:duration=5",
+            48_000,
+            false,
+            tx,
+            Arc::new(Mutex::new(recycle_rx)),
+        )
+        .expect("spawn ffmpeg");
+        let chunk = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a decoded chunk");
+        assert_eq!(
+            chunk.as_ptr(),
+            spare_alloc,
+            "the feeder allocated a fresh buffer instead of refilling the recycled one"
+        );
+        assert_eq!(chunk.len(), 960, "a full 20 ms chunk");
+    }
+
     /// Pausing is "stop reading stdout": the pipe fills, ffmpeg blocks on
     /// write, and the decoder holds its place. Nothing else asserts this, and
     /// inverting `set_running` passes every other test in the crate.
@@ -253,8 +322,14 @@ mod tests {
     #[ignore]
     fn live_pausing_stops_the_flow_and_resuming_restarts_it() {
         let (tx, rx) = std::sync::mpsc::sync_channel(64);
-        let decoder = Decoder::spawn("sine=frequency=440:duration=30", 48_000, false, tx)
-            .expect("spawn ffmpeg");
+        let decoder = Decoder::spawn(
+            "sine=frequency=440:duration=30",
+            48_000,
+            false,
+            tx,
+            no_recycling(),
+        )
+        .expect("spawn ffmpeg");
         std::thread::sleep(Duration::from_millis(400));
         let flowing: usize = rx.try_iter().count();
         assert!(flowing > 0, "nothing decoded before the pause");
@@ -280,8 +355,14 @@ mod tests {
     #[ignore]
     fn live_drop_returns_promptly_while_the_channel_is_full() {
         let (tx, _rx) = std::sync::mpsc::sync_channel(1);
-        let decoder = Decoder::spawn("sine=frequency=440:duration=30", 48_000, false, tx)
-            .expect("spawn ffmpeg");
+        let decoder = Decoder::spawn(
+            "sine=frequency=440:duration=30",
+            48_000,
+            false,
+            tx,
+            no_recycling(),
+        )
+        .expect("spawn ffmpeg");
         // Let it fill the one slot and park in the retry loop.
         std::thread::sleep(Duration::from_millis(500));
         let start = std::time::Instant::now();
