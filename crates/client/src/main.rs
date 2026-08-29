@@ -264,8 +264,8 @@ async fn run_session(
         output_device,
         input_rx,
         output_tx,
-        media_tx: _media_tx,
-        media_gain: _media_gain,
+        media_tx,
+        media_gain,
     } = audio.into_parts();
 
     if describe_devices {
@@ -304,17 +304,22 @@ async fn run_session(
         Err(error) => return SessionEnd::Unreachable(error),
     };
     let (event_shutdown_tx, event_shutdown_rx) = watch::channel(false);
-    // Radio/shows/sound effects the server's skills start play here via mpv,
-    // on the call's output device. Without mpv the call still works; media
-    // commands are logged and dropped.
+    // Radio, shows and sound effects mix into the call's own output stream, so
+    // they play on the call's device. Without ffmpeg the call still works;
+    // media commands are logged and dropped.
     let media = if MediaPlayer::is_available() {
         Some(MediaPlayer::new(
-            Some((&output_device.name, &output_device.id)),
+            media_tx,
+            media_gain,
+            output_rate,
             server_url,
         ))
     } else {
         if describe_devices {
-            tracing::warn!("mpv not found; BBC radio, shows and sound effects will not play (brew/apt install mpv)");
+            tracing::warn!(
+                "ffmpeg not found; BBC radio, shows and sound effects will not play \
+                 (brew/apt install ffmpeg)"
+            );
         }
         None
     };

@@ -1,6 +1,6 @@
 //! What the media source should be doing right now.
 //!
-//! Two independent concerns the mpv build conflated into one `pause`
+//! Two independent concerns the previous player conflated into one `pause`
 //! property: how loud media is (a gain the mixer ramps) and whether the
 //! decoder is running at all (transport). Keeping them apart is what lets a
 //! live stream duck without losing its place at the live edge, and what stops
@@ -58,6 +58,11 @@ impl Duck {
 
     pub fn is_playing(&self) -> bool {
         self.playing
+    }
+
+    /// Whether the assistant is mid-reply, for `after_speech` clips.
+    pub fn is_playing_speech(&self) -> bool {
+        self.bot_speaking
     }
 
     pub fn gain(&self) -> f32 {
@@ -157,7 +162,7 @@ mod tests {
         assert_eq!(duck.gain(), FULL);
     }
 
-    /// The bug the mpv build had: one `pause` property served both concerns,
+    /// The bug the previous player had: one `pause` property served both concerns,
     /// so the next `rtf-bot-stopped-speaking` resumed a deliberate pause.
     #[test]
     fn an_explicit_pause_survives_the_assistant_speaking_afterwards() {
