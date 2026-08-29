@@ -32,13 +32,22 @@ pub fn format_duration(minutes: f64) -> String {
     format!("{minutes} minutes")
 }
 
+/// Longest timer we accept. A hallucinated `1e12` should get a spoken error,
+/// not a task that sleeps for two million years.
+pub const MAX_MINUTES: f64 = 24.0 * 60.0;
+
 /// The LLM sometimes sends numbers as strings; accept both like Python's `float()`.
+///
+/// Rejects anything `Duration::from_secs_f64` would panic on. This matters
+/// because the caller's `minutes <= 0.0` guard is *false* for NaN, so without
+/// the `is_finite` check a `{"minutes": "NaN"}` tool call panics the task.
 fn parse_minutes(v: Option<&Value>) -> Option<f64> {
-    match v? {
-        Value::Number(n) => n.as_f64(),
-        Value::String(s) => s.trim().parse().ok(),
-        _ => None,
-    }
+    let n = match v? {
+        Value::Number(n) => n.as_f64()?,
+        Value::String(s) => s.trim().parse().ok()?,
+        _ => return None,
+    };
+    (n.is_finite() && n <= MAX_MINUTES).then_some(n)
 }
 
 pub fn alert_text(label: &str) -> String {
@@ -155,6 +164,32 @@ mod tests {
         assert_eq!(
             SetTimer.call(&json!({"minutes": 1}), &ctx).await,
             "I can't set a timer right now."
+        );
+    }
+
+    #[test]
+    fn minutes_rejects_non_finite_and_absurd_values() {
+        // `Duration::from_secs_f64` panics on these, and `n <= 0.0` is false
+        // for NaN, so the caller's guard would not catch them.
+        assert_eq!(parse_minutes(Some(&json!("NaN"))), None);
+        assert_eq!(parse_minutes(Some(&json!("inf"))), None);
+        assert_eq!(parse_minutes(Some(&json!("-inf"))), None);
+        assert_eq!(parse_minutes(Some(&json!(1e12))), None);
+        // Still accepts everything reasonable.
+        assert_eq!(parse_minutes(Some(&json!(0.5))), Some(0.5));
+        assert_eq!(parse_minutes(Some(&json!(1440))), Some(1440.0));
+    }
+
+    #[tokio::test]
+    async fn non_finite_duration_answers_instead_of_panicking() {
+        let ctx = CallCtx::detached(1);
+        assert_eq!(
+            SetTimer.call(&json!({"minutes": "NaN"}), &ctx).await,
+            "I couldn't understand the timer duration."
+        );
+        assert_eq!(
+            SetTimer.call(&json!({"minutes": "inf"}), &ctx).await,
+            "I couldn't understand the timer duration."
         );
     }
 }
