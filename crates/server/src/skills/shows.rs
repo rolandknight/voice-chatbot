@@ -381,7 +381,7 @@ impl Skill for PlayBbcShow {
             return format!("I couldn't play {}.", episode.display);
         };
         ctx.stop_other_audio().await;
-        media.play_stream(&episode.url, &episode.display);
+        media.play_stream(&episode.url, &episode.display, false);
         format!("Playing {}.", episode.display)
     }
 }

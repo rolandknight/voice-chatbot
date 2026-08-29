@@ -133,7 +133,11 @@ impl MediaPlayer {
 
     fn apply(&mut self, cmd: MediaCommand) -> Option<String> {
         match cmd {
-            MediaCommand::Play { url, title } => Some(self.play(&url, &title, true)),
+            MediaCommand::Play {
+                url,
+                title,
+                live: _,
+            } => Some(self.play(&url, &title, true)),
             MediaCommand::PlayFile { url, after_speech } => {
                 if after_speech && self.bot_speaking {
                     self.pending = Some((url, Instant::now()));
