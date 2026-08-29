@@ -6,8 +6,10 @@
 inside `voice-chatbot-server` — no skills stub, no Python at runtime — ported
 from the `skills/` package below (`crates/server/src/skills/`, plan in
 `docs/plans/skills-in-server.md`). Anything that plays audio (BBC radio,
-shows, sound effects) plays on the native client through `mpv`
-(`brew install mpv` / `apt install mpv` where the client runs); Spotify plays
+shows, sound effects) is decoded in-process by `ffmpeg` and mixed into the
+client's own call audio (`brew install ffmpeg` / `apt install ffmpeg` where
+the client runs — this is now a hard requirement, not an optional one:
+without it radio, shows and sound effects don't play at all); Spotify plays
 on the client's librespot "Babel" endpoint as before. Config is `POC_*` env in the
 repo-root `.env` (see `.env.example`), next to the secrets. Runtime artifacts
 live at the root too: `models/`, `.deps/`, `logs/`, `fixtures/`.
@@ -20,8 +22,9 @@ live at the root too: `models/`, `.deps/`, `logs/`, `fixtures/`.
   system defaults with the Jabra attached. Naming the speakerphone by hand
   (`INPUT_DEVICE=Jabra`) works too: on Linux one card is listed once per ALSA
   PCM alias, and the client ranks those instead of calling the name ambiguous.
-  While a call holds the speakerphone the rest of the desktop cannot route to
-  it, so `mpv` media plays on the system default sink instead.
+  Media (radio, shows, sound effects) is decoded by `ffmpeg` and mixed into the
+  call's own output stream, so it plays on the call's device — including the
+  speakerphone, which a second process could not open while the call holds it.
 - Spotify first-time auth: `target/release/voice-chatbot-server spotify-login`
   (`--headless` over SSH). The token is compatible with `scripts/spotify.py`.
 - Sound effects: `make sfx-up` / `make sfx-down` / `make sfx-status` run the

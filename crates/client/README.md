@@ -128,8 +128,9 @@ and gives four times the slack. Devices that pin their period, such as `dmix:`
 at `1024..=1024`, refuse the request and keep their own size.
 
 Either way the call owns the speakerphone for its duration: a sound server
-cannot route other desktop audio to a card that CPAL holds directly, so `mpv`
-media plays on the system default sink while a call is up.
+cannot route other desktop audio to a card that CPAL holds directly. Media is
+therefore not a second process at all -- `ffmpeg` decodes it to raw PCM and the
+output callback sums it with the call's voice, so it reaches the same device.
 
 ## Checks
 

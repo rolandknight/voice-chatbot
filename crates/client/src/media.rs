@@ -325,3 +325,76 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod live_tests {
+    //! Decodes ~3 s of BBC Radio 4 through the real ffmpeg:
+    //! `cargo test -p voice-chatbot-client -- --ignored live`.
+    use super::*;
+    use serde_json::json;
+
+    const RADIO_4: &str = "http://as-hls-ww-live.akamaized.net/pool_55057080/live/ww/bbc_radio_fourfm/bbc_radio_fourfm.isml/bbc_radio_fourfm-audio%3d96000.norewind.m3u8";
+
+    #[test]
+    #[ignore]
+    fn live_radio_reaches_the_mixer_and_ducks_without_stopping() {
+        assert!(MediaPlayer::is_available(), "ffmpeg not installed");
+        let (tx, rx) = std::sync::mpsc::sync_channel(512);
+        let gain = Gain::new(gain::FULL);
+        let mut player = MediaPlayer::new(tx, gain.clone(), 48_000, "http://127.0.0.1:6210");
+
+        let line = player.on_event(
+            MEDIA_EVENT,
+            &json!({"action": "play", "url": RADIO_4, "title": "BBC Radio 4", "live": true}),
+        );
+        assert_eq!(line.as_deref(), Some("[media: playing BBC Radio 4]"));
+
+        std::thread::sleep(Duration::from_secs(3));
+        let samples: Vec<i16> = rx.try_iter().flatten().collect();
+        assert!(
+            samples.len() > 48_000,
+            "expected at least a second of audio, got {}",
+            samples.len()
+        );
+        // Real programme audio, not silence and not clipping. Measured on
+        // 2026-08-28: RMS -20.3 dBFS, peak 18083.
+        let peak = samples
+            .iter()
+            .map(|s| i32::from(s.abs()))
+            .max()
+            .unwrap_or(0);
+        assert!((1_000..32_767).contains(&peak), "peak {peak}");
+
+        // A live stream ducks by gain and keeps decoding.
+        player.on_event("rtf-bot-started-speaking", &Value::Null);
+        assert_eq!(gain.target(), gain::DUCKED);
+        assert!(player.decoder.is_some(), "live radio must keep decoding");
+
+        player.on_event("rtf-bot-stopped-speaking", &Value::Null);
+        assert_eq!(gain.target(), gain::FULL);
+
+        assert!(player.stop());
+    }
+
+    /// The case the previous (subprocess-player) build got wrong: asked for
+    /// mid-reply, radio came up at full volume over the assistant.
+    #[test]
+    #[ignore]
+    fn live_radio_asked_for_mid_reply_starts_quiet() {
+        assert!(MediaPlayer::is_available(), "ffmpeg not installed");
+        let (tx, _rx) = std::sync::mpsc::sync_channel(512);
+        let gain = Gain::new(gain::FULL);
+        let mut player = MediaPlayer::new(tx, gain.clone(), 48_000, "http://127.0.0.1:6210");
+
+        player.on_event("rtf-bot-started-speaking", &Value::Null);
+        player.on_event(
+            MEDIA_EVENT,
+            &json!({"action": "play", "url": RADIO_4, "title": "BBC Radio 4", "live": true}),
+        );
+        assert_eq!(gain.target(), gain::DUCKED, "must start quiet");
+
+        player.on_event("rtf-bot-stopped-speaking", &Value::Null);
+        assert_eq!(gain.target(), gain::FULL, "and come up when the reply ends");
+        assert!(player.stop());
+    }
+}
