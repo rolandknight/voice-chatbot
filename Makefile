@@ -10,7 +10,7 @@
 
 .DEFAULT_GOAL := help
 
-CARGO := bin/cargo
+CARGO := cargo
 SERVER_FEATURES ?= nemotron-native,qwen-tts
 SERVER_BIN := target/release/voice-chatbot-server
 CLIENT_BIN := target/release/voice-chatbot-client
