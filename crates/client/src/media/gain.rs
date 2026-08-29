@@ -87,16 +87,23 @@ mod tests {
 
     #[test]
     fn a_full_scale_ramp_takes_eighty_milliseconds_of_samples() {
-        let rate = 48_000;
-        let step = step_for(rate);
-        let mut current = 0.0;
-        let mut samples = 0;
-        while current < 1.0 {
-            current = advance(current, 1.0, step);
-            samples += 1;
+        // An exact sample count would be brittle: `step_for` is not exactly
+        // representable in f32, so accumulating it lands a hair either side of
+        // the target. The property that matters is the duration.
+        for rate in [16_000, 44_100, 48_000] {
+            let step = step_for(rate);
+            let mut current = 0.0;
+            let mut samples = 0;
+            while current < 1.0 {
+                current = advance(current, 1.0, step);
+                samples += 1;
+            }
+            let ms = samples as f32 / rate as f32 * 1000.0;
+            assert!(
+                (79.0..=81.0).contains(&ms),
+                "a full-scale ramp at {rate} Hz took {ms} ms ({samples} samples)"
+            );
         }
-        // 80 ms at 48 kHz.
-        assert_eq!(samples, 3_840);
     }
 
     #[test]
