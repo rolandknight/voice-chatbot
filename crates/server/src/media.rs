@@ -32,14 +32,17 @@ impl MediaController {
         self.events.publish(MEDIA_EVENT, cmd.to_payload());
     }
 
-    /// Stream `url` on the client, replacing whatever was playing.
-    pub fn play_stream(&self, url: &str, title: &str) {
+    /// Stream `url` on the client, replacing whatever was playing. `live`
+    /// distinguishes a broadcast from a recorded programme; see
+    /// [`voice_chatbot_protocol::MediaCommand::Play`].
+    pub fn play_stream(&self, url: &str, title: &str, live: bool) {
         *self.playing.lock().unwrap() = Some(NowPlaying {
             title: title.to_string(),
         });
         self.send(&MediaCommand::Play {
             url: url.to_string(),
             title: title.to_string(),
+            live,
         });
     }
 

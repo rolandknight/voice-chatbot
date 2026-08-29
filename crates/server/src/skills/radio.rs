@@ -187,7 +187,7 @@ impl Skill for PlayBbcRadio {
             return format!("I couldn't start {}.", station.display);
         };
         ctx.stop_other_audio().await;
-        media.play_stream(&station.url, station.display);
+        media.play_stream(&station.url, station.display, true);
         format!("Playing {}.", station.display)
     }
 }

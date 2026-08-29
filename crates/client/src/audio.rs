@@ -225,7 +225,8 @@ impl AudioDevices {
         let (input_tx, input_rx) = tokio_mpsc::channel(input_capacity);
 
         let input_stream = build_input_stream(input, input_tx)?;
-        let (output_stream, output_tx) = build_output_stream(output, output_capacity)?;
+        let (output_stream, output_tx, media_tx, media_gain) =
+            build_output_stream(output, output_capacity)?;
 
         Ok(AudioIo {
             input_rate: input.info.config.sample_rate,
@@ -234,6 +235,8 @@ impl AudioDevices {
             output_device: output.info.clone(),
             input_rx,
             output_tx,
+            media_tx,
+            media_gain,
             streams: AudioStreams {
                 input_stream,
                 output_stream,
@@ -256,6 +259,10 @@ pub struct AudioIo {
     pub input_rx: tokio_mpsc::Receiver<Vec<i16>>,
     /// Mono `i16` playback chunks, duplicated to every hardware channel.
     pub output_tx: SyncSender<Vec<i16>>,
+    /// Mono `i16` media chunks, summed with `output_tx` under a ramped gain.
+    pub media_tx: SyncSender<Vec<i16>>,
+    /// Ramped gain applied to `media_tx` only.
+    pub media_gain: crate::media::gain::Gain,
     streams: AudioStreams,
 }
 
@@ -290,6 +297,8 @@ pub struct AudioIoParts {
     pub output_device: AudioDeviceInfo,
     pub input_rx: tokio_mpsc::Receiver<Vec<i16>>,
     pub output_tx: SyncSender<Vec<i16>>,
+    pub media_tx: SyncSender<Vec<i16>>,
+    pub media_gain: crate::media::gain::Gain,
 }
 
 impl AudioIo {
@@ -311,6 +320,8 @@ impl AudioIo {
             output_device: self.output_device,
             input_rx: self.input_rx,
             output_tx: self.output_tx,
+            media_tx: self.media_tx,
+            media_gain: self.media_gain,
         }
     }
 }
@@ -746,15 +757,21 @@ where
         .collect()
 }
 
+/// The stream plus its two feed channels and the media gain: `(stream,
+/// voice_tx, media_tx, gain)`.
+type OutputStreamParts = (
+    cpal::Stream,
+    SyncSender<Vec<i16>>,
+    SyncSender<Vec<i16>>,
+    crate::media::gain::Gain,
+);
+
 /// Build the playback stream together with the queue that feeds it.
 ///
 /// The queue is created here, not by the caller, because a refused period
 /// leaves its [`Receiver`] inside the dropped callback: each attempt needs a
 /// fresh channel, and only the successful one's sender may escape.
-fn build_output_stream(
-    selected: &AudioDevice,
-    capacity: usize,
-) -> Result<(cpal::Stream, SyncSender<Vec<i16>>)> {
+fn build_output_stream(selected: &AudioDevice, capacity: usize) -> Result<OutputStreamParts> {
     let format = selected.info.config.sample_format;
     match format {
         SampleFormat::I8 => build_output_stream_typed::<i8>(selected, capacity),
@@ -779,7 +796,7 @@ fn build_output_stream(
 fn build_output_stream_typed<T>(
     selected: &AudioDevice,
     capacity: usize,
-) -> Result<(cpal::Stream, SyncSender<Vec<i16>>)>
+) -> Result<OutputStreamParts>
 where
     T: SizedSample + FromSample<i16> + Send + 'static,
 {
@@ -790,7 +807,14 @@ where
     for buffer_size in config.buffer_sizes() {
         let device_id = selected.info.id.clone();
         let (sender, receiver) = mpsc::sync_channel(capacity);
-        let mut queued_audio = OutputQueue::new(receiver);
+        let (media_sender, media_receiver) = mpsc::sync_channel(capacity);
+        let gain = crate::media::gain::Gain::new(crate::media::gain::FULL);
+        let mut queued_audio = OutputMixer::new(
+            receiver,
+            media_receiver,
+            gain.clone(),
+            crate::media::gain::step_for(config.sample_rate),
+        );
         match selected.device.build_output_stream::<T, _, _>(
             config.stream_config(buffer_size),
             move |output, _| {
@@ -801,7 +825,7 @@ where
             },
             None,
         ) {
-            Ok(stream) => return Ok((stream, sender)),
+            Ok(stream) => return Ok((stream, sender, media_sender, gain)),
             // Only a refused period is worth retrying at the device's own size.
             Err(error) if matches!(error.kind(), cpal::ErrorKind::UnsupportedConfig) => {
                 tracing::debug!(%error, id = %selected.info.id, ?buffer_size, "output period refused");
@@ -814,13 +838,14 @@ where
         .with_context(|| open_failure("output", selected))
 }
 
-struct OutputQueue {
+/// One producer feeding the output callback: a queue plus a read cursor.
+struct Source {
     receiver: Receiver<Vec<i16>>,
     current: Vec<i16>,
     offset: usize,
 }
 
-impl OutputQueue {
+impl Source {
     fn new(receiver: Receiver<Vec<i16>>) -> Self {
         Self {
             receiver,
@@ -835,7 +860,6 @@ impl OutputQueue {
                 self.offset += 1;
                 return Some(sample);
             }
-
             match self.receiver.try_recv() {
                 Ok(chunk) => {
                     self.current = chunk;
@@ -844,6 +868,84 @@ impl OutputQueue {
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => return None,
             }
         }
+    }
+}
+
+/// Sums the call's voice with the media player, scaling media by a ramped
+/// gain. The hardware callback pulls this, so the ramp advances on the audio
+/// clock and needs no timer.
+struct OutputMixer {
+    voice: Source,
+    media: Source,
+    gain: crate::media::gain::Gain,
+    current_gain: f32,
+    step: f32,
+}
+
+impl OutputMixer {
+    fn new(
+        voice: Receiver<Vec<i16>>,
+        media: Receiver<Vec<i16>>,
+        gain: crate::media::gain::Gain,
+        step: f32,
+    ) -> Self {
+        let current_gain = gain.target();
+        Self {
+            voice: Source::new(voice),
+            media: Source::new(media),
+            gain,
+            current_gain,
+            step,
+        }
+    }
+
+    fn next_sample(&mut self) -> Option<i16> {
+        if self.gain.take_flush() {
+            // Drop the previous source's audio rather than playing it under
+            // the new one. Bounded by the channel capacity; only ever runs on
+            // an explicit stop or station change, never per callback.
+            self.media.current.clear();
+            self.media.offset = 0;
+            while self.media.receiver.try_recv().is_ok() {}
+        }
+
+        // Take the jump request before reading the target it applies to: its
+        // Acquire is what orders that load, so a `jump_to` landing between the
+        // two cannot make the jump adopt the previous target.
+        let jump = self.gain.take_jump();
+        let target = self.gain.target();
+
+        let voice = self.voice.next_sample();
+        // Silent and staying silent: leave the media queue alone. ffmpeg runs
+        // far ahead of realtime, so the channel is essentially always full;
+        // draining it at zero gain would throw away up to nine chunks
+        // (~180 ms) of programme that the decoder was deliberately stopped to
+        // keep in place — once per assistant reply, cumulatively. Treating it
+        // as dry hands the both-sources-silent path below the same `None` it
+        // would see from an empty queue.
+        //
+        // Residual: the 80 ms fade down to zero is still read as it plays, so
+        // a duck consumes ~80 ms of programme before this takes effect.
+        let media = if self.current_gain == 0.0 && target == 0.0 {
+            None
+        } else {
+            self.media.next_sample()
+        };
+
+        // Advance the ramp every sample, so a gap in the media queue cannot
+        // strand the gain mid-fade.
+        self.current_gain = if jump {
+            target
+        } else {
+            crate::media::gain::advance(self.current_gain, target, self.step)
+        };
+
+        if voice.is_none() && media.is_none() {
+            return None;
+        }
+        let media = f32::from(media.unwrap_or(0)) * self.current_gain;
+        let mixed = i32::from(voice.unwrap_or(0)) + media as i32;
+        Some(mixed.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16)
     }
 }
 
@@ -962,6 +1064,130 @@ mod live_tests {
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+
+    fn mixer_of(voice: Vec<i16>, media: Vec<i16>, gain_value: f32) -> OutputMixer {
+        let (voice_tx, voice_rx) = mpsc::sync_channel(4);
+        let (media_tx, media_rx) = mpsc::sync_channel(4);
+        if !voice.is_empty() {
+            voice_tx.try_send(voice).expect("queue voice");
+        }
+        if !media.is_empty() {
+            media_tx.try_send(media).expect("queue media");
+        }
+        drop(voice_tx);
+        drop(media_tx);
+        let gain = crate::media::gain::Gain::new(gain_value);
+        // A step of 1.0 settles the ramp on the first sample, so these tests
+        // assert mixing rather than ramp timing.
+        OutputMixer::new(voice_rx, media_rx, gain, 1.0)
+    }
+
+    #[test]
+    fn mixer_is_silent_only_when_both_sources_are_dry() {
+        let mut empty = mixer_of(vec![], vec![], 1.0);
+        assert_eq!(empty.next_sample(), None);
+
+        let mut voice_only = mixer_of(vec![100], vec![], 1.0);
+        assert_eq!(voice_only.next_sample(), Some(100));
+        assert_eq!(voice_only.next_sample(), None);
+
+        let mut media_only = mixer_of(vec![], vec![100], 1.0);
+        assert_eq!(media_only.next_sample(), Some(100));
+        assert_eq!(media_only.next_sample(), None);
+    }
+
+    #[test]
+    fn mixer_sums_both_sources_and_scales_only_the_media_one() {
+        let mut full = mixer_of(vec![1000], vec![1000], 1.0);
+        assert_eq!(full.next_sample(), Some(2000));
+
+        // The voice is untouched by the media gain.
+        let mut ducked = mixer_of(vec![1000], vec![1000], 0.5);
+        assert_eq!(ducked.next_sample(), Some(1500));
+
+        // Media ducked all the way out leaves the voice untouched.
+        let mut silent = mixer_of(vec![1000], vec![1000], 0.0);
+        assert_eq!(silent.next_sample(), Some(1000));
+    }
+
+    /// A ducked recorded show must resume in place. The decoder stops, but the
+    /// mixer used to keep draining the channel at zero gain, discarding ~180 ms
+    /// of programme on every assistant reply.
+    #[test]
+    fn media_that_is_silent_and_staying_silent_is_not_drained() {
+        let (voice_tx, voice_rx) = mpsc::sync_channel(4);
+        let (media_tx, media_rx) = mpsc::sync_channel(4);
+        media_tx.try_send(vec![1000; 2]).expect("queue media");
+        drop(voice_tx);
+        drop(media_tx);
+        let gain = crate::media::gain::Gain::new(0.0);
+        let mut mixer = OutputMixer::new(voice_rx, media_rx, gain.clone(), 1.0);
+
+        assert_eq!(
+            mixer.next_sample(),
+            None,
+            "nothing audible from either source"
+        );
+        assert_eq!(mixer.next_sample(), None);
+
+        // Coming back up plays the programme that was held, not what came next.
+        gain.ramp_to(1.0);
+        assert_eq!(mixer.next_sample(), Some(1000));
+        assert_eq!(mixer.next_sample(), Some(1000));
+        assert_eq!(mixer.next_sample(), None);
+    }
+
+    #[test]
+    fn mixer_saturates_instead_of_wrapping() {
+        let mut hot = mixer_of(vec![30000], vec![30000], 1.0);
+        assert_eq!(hot.next_sample(), Some(i16::MAX));
+
+        let mut cold = mixer_of(vec![-30000], vec![-30000], 1.0);
+        assert_eq!(cold.next_sample(), Some(i16::MIN));
+    }
+
+    #[test]
+    fn mixer_ramps_the_media_gain_and_a_jump_skips_the_ramp() {
+        let (voice_tx, voice_rx) = mpsc::sync_channel(4);
+        let (media_tx, media_rx) = mpsc::sync_channel(4);
+        media_tx.try_send(vec![1000; 4]).expect("queue media");
+        drop(voice_tx);
+        drop(media_tx);
+        let gain = crate::media::gain::Gain::new(0.0);
+        let mut mixer = OutputMixer::new(voice_rx, media_rx, gain.clone(), 0.25);
+
+        // Ramping up from 0: the first sample is one step in, not the target.
+        gain.ramp_to(1.0);
+        assert_eq!(mixer.next_sample(), Some(250));
+        assert_eq!(mixer.next_sample(), Some(500));
+
+        // A jump lands on the target immediately.
+        gain.jump_to(0.0);
+        assert_eq!(mixer.next_sample(), Some(0));
+    }
+
+    #[test]
+    fn a_flush_discards_media_queued_by_the_previous_source() {
+        let (voice_tx, voice_rx) = mpsc::sync_channel(4);
+        let (media_tx, media_rx) = mpsc::sync_channel(4);
+        media_tx.try_send(vec![1000; 2]).expect("queue media");
+        media_tx.try_send(vec![2000; 2]).expect("queue more media");
+        drop(voice_tx);
+        drop(media_tx);
+        let gain = crate::media::gain::Gain::new(1.0);
+        let mut mixer = OutputMixer::new(voice_rx, media_rx, gain.clone(), 1.0);
+
+        // One sample of the old source is consumed before the switch.
+        assert_eq!(mixer.next_sample(), Some(1000));
+
+        // Everything still queued belongs to the previous stream.
+        gain.flush();
+        assert_eq!(
+            mixer.next_sample(),
+            None,
+            "queued audio from the previous source must not be heard"
+        );
+    }
 
     fn config() -> AudioStreamConfig {
         AudioStreamConfig {

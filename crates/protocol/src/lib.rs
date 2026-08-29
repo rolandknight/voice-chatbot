@@ -15,9 +15,15 @@ pub const MEDIA_EVENT: &str = "media";
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum MediaCommand {
     /// Start streaming `url` (replaces whatever is playing). `title` is for logs/UI.
+    ///
+    /// `live` picks how the client ducks it while the assistant speaks: a live
+    /// stream drops its gain and keeps decoding so it stays at the live edge,
+    /// while a recorded one stops its decoder and resumes in place.
     Play {
         url: String,
         title: String,
+        #[serde(default = "live_by_default")]
+        live: bool,
     },
     /// Play a one-shot clip. With `after_speech`, the client waits for the
     /// assistant to finish speaking first (the tool reply is spoken before the
@@ -29,6 +35,11 @@ pub enum MediaCommand {
     Stop,
     Pause,
     Resume,
+}
+
+/// Radio is the common case, and a gain duck never stalls a decoder.
+fn live_by_default() -> bool {
+    true
 }
 
 /// Longest the client waits for the assistant to go quiet before a
@@ -87,10 +98,11 @@ mod tests {
         let cmd = MediaCommand::Play {
             url: "http://x/y.m3u8".into(),
             title: "BBC Radio 4".into(),
+            live: true,
         };
         assert_eq!(
             cmd.to_payload(),
-            json!({"action": "play", "url": "http://x/y.m3u8", "title": "BBC Radio 4"})
+            json!({"action": "play", "url": "http://x/y.m3u8", "title": "BBC Radio 4", "live": true})
         );
         assert_eq!(MediaCommand::Stop.to_payload(), json!({"action": "stop"}));
         assert_eq!(
@@ -128,5 +140,33 @@ mod tests {
             }
         );
         assert!(WakeState::from_payload(&json!({"state": "dreaming"})).is_err());
+    }
+
+    #[test]
+    fn play_carries_whether_the_stream_is_live() {
+        let cmd = MediaCommand::Play {
+            url: "http://example/x.m3u8".into(),
+            title: "BBC Radio 4".into(),
+            live: true,
+        };
+        let payload = cmd.to_payload();
+        assert_eq!(payload["action"], "play");
+        assert_eq!(payload["live"], true);
+        assert_eq!(MediaCommand::from_payload(&payload).unwrap(), cmd);
+    }
+
+    #[test]
+    fn a_play_from_an_older_server_is_treated_as_live() {
+        // Radio is the common case, and ducking a live stream by gain is the
+        // safe default: it never stalls a decoder that cannot be paused.
+        let payload = serde_json::json!({
+            "action": "play",
+            "url": "http://example/x.m3u8",
+            "title": "BBC Radio 4"
+        });
+        let MediaCommand::Play { live, .. } = MediaCommand::from_payload(&payload).unwrap() else {
+            panic!("expected a Play");
+        };
+        assert!(live);
     }
 }

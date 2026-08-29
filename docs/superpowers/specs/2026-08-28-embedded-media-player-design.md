@@ -132,21 +132,41 @@ property, so a deliberate "pause the radio" is silently resumed by the next
 
 | Event | Gain target | Decoder |
 | --- | --- | --- |
+| **`Play` starts while `bot_speaking`** | **starts at −18 dB, no ramp** | starts immediately |
 | bot speaking, **live** | −18 dB | keeps running — stays at the live edge |
 | bot speaking, **recorded** | 0 | feeder stops → ffmpeg blocks → resumes in place |
 | explicit `Pause` | 0 | feeder stops, sets `user_paused` |
 | `rtf-bot-stopped-speaking` | restore **unless `user_paused`** | restart feeder unless `user_paused` |
 | `Stop` | 0 | kill ffmpeg, stop feeder |
 
-`Stop` cannot drain the channel — a `std::sync::mpsc` has no sender-side
-drain, and the receiver lives in the CPAL callback. It does not need to: the
-ramp to 0 silences the ≤ 8 chunks (160 ms at a 20 ms period) already queued
-while they play out harmlessly. Every transition is audibly governed by the
-ramp, never by how much is in flight.
+`Stop` cannot drain the channel from the sender side — a `std::sync::mpsc` has
+no such API, and the receiver lives in the CPAL callback. So `stop()` sets a
+*flush* flag instead, and the mixer honours it by discarding the ≤ 8 chunks
+(160 ms at a 20 ms period) already queued. Those chunks belong to the previous
+source, and a station switch spawns the next decoder immediately afterwards:
+they must not be heard under the new one. The consequence is a **hard cut, not
+a fade, on stop and on station switches** — the same thing the mpv build did
+when it killed its process, so nothing regresses. The ramp still governs every
+*other* transition; it does not govern this one.
 
-One mechanism for every audible transition (the ramp); one flag for whether the
-decoder keeps running. Ducking a recorded show fades rather than cutting, and
-loses no content: the samples already in the pipe are still there on resume.
+One flag for whether the decoder keeps running; a ramp for every level change
+while it does. Ducking a recorded show fades rather than cutting, and loses no
+content: the samples already in the pipe are still there on resume, and the
+mixer stops reading the channel once media is fully silent so the queued chunks
+survive too.
+
+**Starting ducked is the common case, not an edge case.** Radio is asked for by
+voice, so the assistant is almost always still speaking the tool reply
+("Playing BBC Radio 4") at the moment the stream opens — observed on the mpv
+build, where radio comes up at full volume over the assistant. A stream that
+starts while `bot_speaking` therefore begins **at** the ducked gain rather than
+ramping down to it: there is no earlier level to fade from, and a fade-in from
+full would be the very overlap being avoided. The first `rtf-bot-stopped-speaking`
+ramps it up to full, using the same 80 ms ramp as every other transition.
+
+The existing mpv build already attempts this (`media.rs:181`, pausing when
+`bot_speaking`), so the requirement is not new — but a pause is the wrong
+instrument for a live stream, and it is what this design replaces with a gain.
 
 ## 5. Protocol — one field
 
@@ -246,6 +266,8 @@ not today:
 1. BBC Radio 4 plays **out of the Jabra during a call**, not the default sink.
 2. The assistant speaking fades radio to −18 dB over 80 ms and back, with no
    rebuffer and no drift from the live edge.
-3. A recorded show pauses on the assistant's speech and resumes in place.
-4. "Pause the radio" survives the assistant speaking afterwards.
-5. No `mpv` anywhere in `crates/`.
+3. Radio asked for mid-sentence **starts** quiet under the assistant's reply
+   and comes up only when it finishes — never in parallel at full volume.
+4. A recorded show pauses on the assistant's speech and resumes in place.
+5. "Pause the radio" survives the assistant speaking afterwards.
+6. No `mpv` anywhere in `crates/`.

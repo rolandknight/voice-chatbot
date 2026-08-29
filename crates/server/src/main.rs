@@ -1024,7 +1024,7 @@ fn build_skills(
         env_or("BRAVE_API_KEY", ""),
         env_or("TAVILY_API_KEY", ""),
     )));
-    // Playback happens on the native client (mpv); the browser playground has
+    // Playback happens on the native client; the browser playground has
     // no media, so these can be switched off for browser-only setups.
     if env_flag("POC_SKILLS_RADIO", true) {
         list.push(Arc::new(skills::radio::PlayBbcRadio::new()));
