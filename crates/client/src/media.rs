@@ -18,6 +18,8 @@ use voice_chatbot_protocol::{MediaCommand, AFTER_SPEECH_CAP_SECS, MEDIA_EVENT};
 
 pub mod gain;
 
+mod duck;
+
 pub struct MediaPlayer {
     /// Server base URL; relative media URLs (`/sfx/x.flac`) resolve against it.
     server_base: String,
