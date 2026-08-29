@@ -54,6 +54,10 @@ archived venvs and build dirs are stale).
 
 ## Pipecat Jabra Mac Prototype
 
+**Everything from here down documents the archived Python prototype under
+`archive/python-app/`, not the Rust client above — including its use of `mpv`,
+which the client replaced with in-process `ffmpeg` decoding.**
+
 Local voice-to-voice prototype for Apple Silicon Mac Studio + Jabra USB speakerphone.
 
 ## Install

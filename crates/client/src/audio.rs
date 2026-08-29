@@ -909,13 +909,32 @@ impl OutputMixer {
             while self.media.receiver.try_recv().is_ok() {}
         }
 
+        // Take the jump request before reading the target it applies to: its
+        // Acquire is what orders that load, so a `jump_to` landing between the
+        // two cannot make the jump adopt the previous target.
+        let jump = self.gain.take_jump();
+        let target = self.gain.target();
+
         let voice = self.voice.next_sample();
-        let media = self.media.next_sample();
+        // Silent and staying silent: leave the media queue alone. ffmpeg runs
+        // far ahead of realtime, so the channel is essentially always full;
+        // draining it at zero gain would throw away up to nine chunks
+        // (~180 ms) of programme that the decoder was deliberately stopped to
+        // keep in place — once per assistant reply, cumulatively. Treating it
+        // as dry hands the both-sources-silent path below the same `None` it
+        // would see from an empty queue.
+        //
+        // Residual: the 80 ms fade down to zero is still read as it plays, so
+        // a duck consumes ~80 ms of programme before this takes effect.
+        let media = if self.current_gain == 0.0 && target == 0.0 {
+            None
+        } else {
+            self.media.next_sample()
+        };
 
         // Advance the ramp every sample, so a gap in the media queue cannot
         // strand the gain mid-fade.
-        let target = self.gain.target();
-        self.current_gain = if self.gain.take_jump() {
+        self.current_gain = if jump {
             target
         } else {
             crate::media::gain::advance(self.current_gain, target, self.step)
@@ -1086,9 +1105,36 @@ mod tests {
         let mut ducked = mixer_of(vec![1000], vec![1000], 0.5);
         assert_eq!(ducked.next_sample(), Some(1500));
 
-        // Fully ducked media still keeps the stream alive.
-        let mut silent = mixer_of(vec![], vec![1000], 0.0);
-        assert_eq!(silent.next_sample(), Some(0));
+        // Media ducked all the way out leaves the voice untouched.
+        let mut silent = mixer_of(vec![1000], vec![1000], 0.0);
+        assert_eq!(silent.next_sample(), Some(1000));
+    }
+
+    /// A ducked recorded show must resume in place. The decoder stops, but the
+    /// mixer used to keep draining the channel at zero gain, discarding ~180 ms
+    /// of programme on every assistant reply.
+    #[test]
+    fn media_that_is_silent_and_staying_silent_is_not_drained() {
+        let (voice_tx, voice_rx) = mpsc::sync_channel(4);
+        let (media_tx, media_rx) = mpsc::sync_channel(4);
+        media_tx.try_send(vec![1000; 2]).expect("queue media");
+        drop(voice_tx);
+        drop(media_tx);
+        let gain = crate::media::gain::Gain::new(0.0);
+        let mut mixer = OutputMixer::new(voice_rx, media_rx, gain.clone(), 1.0);
+
+        assert_eq!(
+            mixer.next_sample(),
+            None,
+            "nothing audible from either source"
+        );
+        assert_eq!(mixer.next_sample(), None);
+
+        // Coming back up plays the programme that was held, not what came next.
+        gain.ramp_to(1.0);
+        assert_eq!(mixer.next_sample(), Some(1000));
+        assert_eq!(mixer.next_sample(), Some(1000));
+        assert_eq!(mixer.next_sample(), None);
     }
 
     #[test]

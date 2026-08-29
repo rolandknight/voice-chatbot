@@ -181,8 +181,10 @@ mod tests {
         assert_eq!(duck.transport(), Transport::Running);
     }
 
+    /// Stopping clears `playing`, and the stream started afterwards plays: a
+    /// pause the user asked for before the stop does not carry into it.
     #[test]
-    fn stopping_clears_play_state_including_a_user_pause() {
+    fn a_fresh_start_after_a_pause_is_playable() {
         let mut duck = Duck::new();
         duck.start(true);
         duck.set_user_paused(true);
@@ -193,5 +195,23 @@ mod tests {
         duck.start(true);
         assert_eq!(duck.transport(), Transport::Running);
         assert_eq!(duck.gain(), FULL);
+    }
+
+    /// A recorded show asked for mid-reply: silent and stopped until the
+    /// assistant finishes, and it needs no jump because it was never audible.
+    #[test]
+    fn a_recorded_stream_started_mid_reply_waits_silently() {
+        let mut duck = Duck::new();
+        duck.set_bot_speaking(true);
+        assert!(
+            !duck.start(false),
+            "nothing to jump from; it is silent anyway"
+        );
+        assert_eq!(duck.gain(), 0.0);
+        assert_eq!(duck.transport(), Transport::Stopped);
+
+        duck.set_bot_speaking(false);
+        assert_eq!(duck.gain(), FULL);
+        assert_eq!(duck.transport(), Transport::Running);
     }
 }

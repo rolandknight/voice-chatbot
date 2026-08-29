@@ -139,15 +139,21 @@ property, so a deliberate "pause the radio" is silently resumed by the next
 | `rtf-bot-stopped-speaking` | restore **unless `user_paused`** | restart feeder unless `user_paused` |
 | `Stop` | 0 | kill ffmpeg, stop feeder |
 
-`Stop` cannot drain the channel — a `std::sync::mpsc` has no sender-side
-drain, and the receiver lives in the CPAL callback. It does not need to: the
-ramp to 0 silences the ≤ 8 chunks (160 ms at a 20 ms period) already queued
-while they play out harmlessly. Every transition is audibly governed by the
-ramp, never by how much is in flight.
+`Stop` cannot drain the channel from the sender side — a `std::sync::mpsc` has
+no such API, and the receiver lives in the CPAL callback. So `stop()` sets a
+*flush* flag instead, and the mixer honours it by discarding the ≤ 8 chunks
+(160 ms at a 20 ms period) already queued. Those chunks belong to the previous
+source, and a station switch spawns the next decoder immediately afterwards:
+they must not be heard under the new one. The consequence is a **hard cut, not
+a fade, on stop and on station switches** — the same thing the mpv build did
+when it killed its process, so nothing regresses. The ramp still governs every
+*other* transition; it does not govern this one.
 
-One mechanism for every audible transition (the ramp); one flag for whether the
-decoder keeps running. Ducking a recorded show fades rather than cutting, and
-loses no content: the samples already in the pipe are still there on resume.
+One flag for whether the decoder keeps running; a ramp for every level change
+while it does. Ducking a recorded show fades rather than cutting, and loses no
+content: the samples already in the pipe are still there on resume, and the
+mixer stops reading the channel once media is fully silent so the queued chunks
+survive too.
 
 **Starting ducked is the common case, not an edge case.** Radio is asked for by
 voice, so the assistant is almost always still speaking the tool reply

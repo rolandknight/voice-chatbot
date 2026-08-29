@@ -145,6 +145,19 @@ impl Decoder {
         self.running.store(running, Ordering::Relaxed);
     }
 
+    /// True once the feeder has drained stdout to EOF: the last decoded sample
+    /// is in the channel, not still in flight in the pipe.
+    ///
+    /// ffmpeg exiting is NOT the end of playback — it means only that ffmpeg
+    /// finished *writing*, while the pipe and channel still hold audio nobody
+    /// has heard. A paused feeder never finishes, so a ducked recorded show is
+    /// never mistaken for one that ended.
+    pub fn drained(&self) -> bool {
+        self.feeder
+            .as_ref()
+            .is_some_and(|feeder| feeder.is_finished())
+    }
+
     /// `None` while it still runs; `Some(code)` once it has exited, where the
     /// inner `None` means it was killed by a signal.
     pub fn finished(&mut self) -> Option<Option<i32>> {
@@ -231,6 +244,33 @@ mod tests {
             Some(Some(0)),
             "ffmpeg should exit clean"
         );
+    }
+
+    /// Pausing is "stop reading stdout": the pipe fills, ffmpeg blocks on
+    /// write, and the decoder holds its place. Nothing else asserts this, and
+    /// inverting `set_running` passes every other test in the crate.
+    #[test]
+    #[ignore]
+    fn live_pausing_stops_the_flow_and_resuming_restarts_it() {
+        let (tx, rx) = std::sync::mpsc::sync_channel(64);
+        let decoder = Decoder::spawn("sine=frequency=440:duration=30", 48_000, false, tx)
+            .expect("spawn ffmpeg");
+        std::thread::sleep(Duration::from_millis(400));
+        let flowing: usize = rx.try_iter().count();
+        assert!(flowing > 0, "nothing decoded before the pause");
+
+        decoder.set_running(false);
+        // Let the in-flight chunk land, then drain so the count starts at zero.
+        std::thread::sleep(Duration::from_millis(200));
+        let _ = rx.try_iter().count();
+        std::thread::sleep(Duration::from_millis(400));
+        let while_paused: usize = rx.try_iter().count();
+        assert_eq!(while_paused, 0, "the feeder kept pulling while paused");
+
+        decoder.set_running(true);
+        std::thread::sleep(Duration::from_millis(400));
+        let after_resume: usize = rx.try_iter().count();
+        assert!(after_resume > 0, "the feeder did not resume");
     }
 
     /// A feeder parked on a full channel must still shut down. The Receiver is

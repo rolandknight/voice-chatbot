@@ -221,17 +221,29 @@ impl MediaPlayer {
         was_playing
     }
 
-    /// Notice a decoder that ended on its own, and say so when it failed.
+    /// Notice a decoder that ended on its own — once its last sample has
+    /// actually reached the mixer — and say so when it failed.
     fn reap(&mut self) {
         let Some(decoder) = self.decoder.as_mut() else {
             return;
         };
         let Some(code) = decoder.finished() else {
-            return; // still playing
+            return; // still decoding
         };
+        if !decoder.drained() {
+            // ffmpeg exiting means it finished *writing*, not that playback
+            // ended: the OS pipe (~0.68 s) and the channel (160 ms) still hold
+            // audio nobody has heard, and dropping the decoder discards all of
+            // it. Measured on a 3 s clip: ffmpeg exits with 0.725 s still in
+            // flight. Wait for the feeder to reach EOF instead.
+            return;
+        }
         self.decoder = None;
         self.duck.stop();
-        self.gain.ramp_to(0.0);
+        // No ramp to 0 here: the source has simply gone dry and the mixer's
+        // silence path takes it from there. Fading would cut the very tail
+        // this wait exists to preserve, and every `play`/`stop` sets the gain
+        // itself, so nothing downstream depends on it.
         if let Some(line) = exit_line(&self.title, code) {
             tracing::warn!(title = %self.title, ?code, "media: decoder exited on its own");
             self.exit_report = Some(line);

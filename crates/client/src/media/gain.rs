@@ -23,7 +23,7 @@ pub const FULL: f32 = 1.0;
 /// delay, long enough to avoid a zipper-noise step discontinuity.
 const RAMP: Duration = Duration::from_millis(80);
 
-/// Per-sample gain increment for `rate`.
+/// Per-sample gain increment for `sample_rate`.
 pub fn step_for(sample_rate: u32) -> f32 {
     1.0 / (RAMP.as_secs_f32() * sample_rate as f32)
 }
