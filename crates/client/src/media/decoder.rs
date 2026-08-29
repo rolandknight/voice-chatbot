@@ -12,7 +12,7 @@
 //! * Because of that, "pause" costs nothing: stop reading, the pipe fills,
 //!   ffmpeg blocks on write, and the decoder stalls exactly in place.
 
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
@@ -25,11 +25,61 @@ fn chunk_samples(sample_rate: u32) -> usize {
     sample_rate as usize / 50
 }
 
+/// How much of ffmpeg's stderr to keep. `-loglevel error` limits it to a few
+/// short lines; the cap only stops a pathological stream growing it forever.
+const STDERR_CAP: usize = 512;
+
+/// Whether the input is an HLS playlist, the only demuxer that knows
+/// `-live_start_index`. Anything else refuses to open when handed it, so the
+/// container decides this option — never the caller's `live` flag, which is
+/// about ducking and defaults to `true` for a server too old to send it.
+fn is_hls(url: &str) -> bool {
+    url.split('?').next().unwrap_or(url).ends_with(".m3u8")
+}
+
+/// Whether ffmpeg will accept the `-reconnect*` options for this input: they
+/// belong to the http protocol, and any other input refuses to open at all
+/// ("Option reconnect not found", exit 8) rather than ignoring them.
+fn is_http(url: &str) -> bool {
+    url.starts_with("http://") || url.starts_with("https://")
+}
+
+/// Read `stream` to EOF, keeping the first [`STDERR_CAP`] bytes of it in
+/// `sink` as one space-joined line.
+///
+/// Reading continues after the cap is reached and is deliberately not
+/// abandoned on a poisoned lock: this is draining a pipe, and whatever stops
+/// reading it blocks ffmpeg once the ~64 KB kernel buffer fills.
+fn drain_stderr(stream: impl BufRead, sink: &Mutex<String>) {
+    let mut full = false;
+    for line in stream.lines().map_while(Result::ok) {
+        if full {
+            continue;
+        }
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Ok(mut sink) = sink.lock() {
+            if !sink.is_empty() {
+                sink.push(' ');
+            }
+            sink.push_str(line);
+            full = sink.len() >= STDERR_CAP;
+        }
+    }
+}
+
 pub struct Decoder {
     child: Child,
     running: Arc<AtomicBool>,
     stopping: Arc<AtomicBool>,
     feeder: Option<JoinHandle<()>>,
+    /// What ffmpeg said on stderr, collapsed to one line. Filled as the lines
+    /// arrive rather than at EOF, so it is already there when a failed decoder
+    /// is reaped.
+    stderr: Arc<Mutex<String>>,
+    stderr_reader: Option<JoinHandle<()>>,
 }
 
 impl Decoder {
@@ -39,10 +89,18 @@ impl Decoder {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        if live {
+        if live && is_hls(url) {
+            // ffmpeg's HLS default is -3 segments; -1 is the live edge itself.
+            for arg in ["-live_start_index", "-1"] {
+                args.push(arg.to_string());
+            }
+        }
+        if is_http(url) {
+            // A recorded programme needs this as much as a live stream does:
+            // the feeder paces ffmpeg to realtime, so one HTTP connection is
+            // held open for the whole episode and the CDN will eventually
+            // drop it.
             for arg in [
-                "-live_start_index",
-                "-1",
                 "-reconnect",
                 "1",
                 "-reconnect_streamed",
@@ -88,9 +146,17 @@ impl Decoder {
             .args(Self::command_args(url, sample_rate, live))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            // Captured, never discarded: an unreadable stream is otherwise a
+            // bare exit code, and every cause of it looks identical.
+            .stderr(Stdio::piped())
             .spawn()?;
         let mut stdout = child.stdout.take().expect("stdout is piped");
+
+        let stderr = Arc::new(Mutex::new(String::new()));
+        let stderr_reader = child.stderr.take().map(|pipe| {
+            let sink = Arc::clone(&stderr);
+            std::thread::spawn(move || drain_stderr(BufReader::new(pipe), &sink))
+        });
 
         let running = Arc::new(AtomicBool::new(true));
         let stopping = Arc::new(AtomicBool::new(false));
@@ -158,6 +224,8 @@ impl Decoder {
             running,
             stopping,
             feeder: Some(feeder),
+            stderr,
+            stderr_reader,
         })
     }
 
@@ -179,6 +247,11 @@ impl Decoder {
             .is_some_and(|feeder| feeder.is_finished())
     }
 
+    /// What ffmpeg wrote to stderr, as one line ("" when it said nothing).
+    pub fn stderr_tail(&self) -> String {
+        self.stderr.lock().map(|s| s.clone()).unwrap_or_default()
+    }
+
     /// `None` while it still runs; `Some(code)` once it has exited, where the
     /// inner `None` means it was killed by a signal.
     pub fn finished(&mut self) -> Option<Option<i32>> {
@@ -197,6 +270,10 @@ impl Drop for Decoder {
         let _ = self.child.wait();
         if let Some(feeder) = self.feeder.take() {
             let _ = feeder.join();
+        }
+        // The write end went with the child, so the reader is already at EOF.
+        if let Some(reader) = self.stderr_reader.take() {
+            let _ = reader.join();
         }
     }
 }
@@ -226,10 +303,39 @@ mod tests {
     }
 
     #[test]
-    fn a_recorded_stream_gets_no_live_flags() {
+    fn a_recorded_stream_gets_no_live_edge_flag_but_still_reconnects() {
         let joined = Decoder::command_args("http://example/x.m4a", 48_000, false).join(" ");
+        // Seeking to the live edge is meaningless for a recorded programme...
         assert!(!joined.contains("-live_start_index"), "{joined}");
+        // ...but a 75-minute omnibus is read at realtime pace over one HTTP
+        // connection, so it needs the same reconnect cover a live stream gets.
+        assert!(joined.contains("-reconnect 1"), "{joined}");
+        assert!(joined.contains("-reconnect_streamed 1"), "{joined}");
+        assert!(joined.contains("-reconnect_delay_max 5"), "{joined}");
+    }
+
+    /// `-live_start_index` belongs to the *HLS* demuxer; an mp3 refuses to open
+    /// at all when handed it ("Option live_start_index not found", exit 8).
+    ///
+    /// `live` is a statement about ducking, not about the container, and it
+    /// arrives as `true` by default from a server too old to send the field —
+    /// so it must never be the thing that decides a demuxer option.
+    #[test]
+    fn a_live_flagged_non_hls_url_still_gets_no_hls_only_option() {
+        let joined = Decoder::command_args("http://bbc/omnibus.mp3", 48_000, true).join(" ");
+        assert!(!joined.contains("-live_start_index"), "{joined}");
+        assert!(joined.contains("-reconnect 1"), "{joined}");
+    }
+
+    /// `-reconnect` is an option of ffmpeg's *http* protocol. Handing it to any
+    /// other input makes ffmpeg refuse to start at all ("Option reconnect not
+    /// found", exit 8), which would take the sound effects down with it.
+    #[test]
+    fn a_non_http_source_gets_no_reconnect_flags() {
+        let joined =
+            Decoder::command_args("sine=frequency=440:duration=5", 48_000, false).join(" ");
         assert!(!joined.contains("-reconnect"), "{joined}");
+        assert!(joined.contains("-f lavfi"), "{joined}");
     }
 
     #[test]
@@ -245,11 +351,74 @@ mod tests {
         assert!(!joined.contains("-audio_device"), "{joined}");
     }
 
+    /// Capping what we *keep* must never cap what we *read*: ffmpeg's stderr
+    /// is a pipe, and an unread one fills at ~64 KB and blocks the process
+    /// mid-stream — turning a diagnostic into an outage.
+    #[test]
+    fn draining_stderr_reads_past_the_cap_so_ffmpeg_never_blocks() {
+        let noise = "Error opening input: something went wrong\n".repeat(500);
+        assert!(
+            noise.len() > STDERR_CAP * 4,
+            "the fixture must exceed the cap"
+        );
+        let mut stream = std::io::Cursor::new(noise.clone());
+        let sink = Mutex::new(String::new());
+
+        drain_stderr(&mut stream, &sink);
+
+        assert_eq!(
+            stream.position() as usize,
+            noise.len(),
+            "stopped reading early; the pipe would fill and block ffmpeg"
+        );
+        let kept = sink.lock().unwrap();
+        assert!(kept.contains("Error opening input"), "kept nothing useful");
+        assert!(
+            kept.len() < STDERR_CAP * 2,
+            "kept {} bytes, unbounded",
+            kept.len()
+        );
+    }
+
     #[test]
     fn twenty_millisecond_chunks_are_one_opus_frame_of_samples() {
         assert_eq!(chunk_samples(48_000), 960);
         assert_eq!(chunk_samples(44_100), 882);
         assert_eq!(chunk_samples(16_000), 320);
+    }
+
+    /// The reason a stream would not play must survive to the caller. Exit
+    /// status alone cannot carry it: ffmpeg answers 8 for a CDN 403, a DNS
+    /// failure and a rejected option alike.
+    #[test]
+    #[ignore]
+    fn live_a_refused_input_keeps_ffmpegs_reason() {
+        let (tx, _rx) = std::sync::mpsc::sync_channel(8);
+        let mut decoder = Decoder::spawn(
+            "sine=frequency=NOTANUMBER",
+            48_000,
+            false,
+            tx,
+            no_recycling(),
+        )
+        .expect("spawn ffmpeg");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while decoder.finished().is_none() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            matches!(decoder.finished(), Some(Some(code)) if code != 0),
+            "ffmpeg should refuse it, got {:?}",
+            decoder.finished()
+        );
+        // ffmpeg's own words, not a paraphrase: this is the whole payload.
+        let reason = decoder.stderr_tail();
+        assert!(
+            reason.contains("Unable to parse option value"),
+            "no reason captured, got {reason:?}"
+        );
+        // Several stderr lines collapsed into one, for a one-line report.
+        assert!(!reason.contains('\n'), "must be one line, got {reason:?}");
     }
 
     /// Uses the real ffmpeg to decode a generated tone, proving the argument

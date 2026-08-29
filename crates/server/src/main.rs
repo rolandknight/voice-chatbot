@@ -1202,9 +1202,33 @@ mod tests {
             SttBackend::parse(" MOONSHINE ").unwrap(),
             SttBackend::Moonshine
         );
-        assert_eq!(SttBackend::parse("nemotron").unwrap(), SttBackend::Nemotron);
-        assert_eq!(SttBackend::parse("NVIDIA").unwrap(), SttBackend::Nemotron);
+        // Spelling and case never change the answer, whichever engine the
+        // build ends up selecting for them.
+        assert_eq!(
+            SttBackend::parse("nemotron").unwrap(),
+            SttBackend::parse("NVIDIA").unwrap()
+        );
+        // Naming the sidecar outright is the one Nemotron spelling that does
+        // not depend on how the binary was built.
+        assert_eq!(
+            SttBackend::parse("nemotron-sidecar").unwrap(),
+            SttBackend::NemotronSidecar
+        );
         let error = SttBackend::parse("cloud").expect_err("cloud STT is unsupported");
         assert!(error.contains("POC_STT_BACKEND"));
+    }
+
+    /// `nemotron` means "in-process if this binary has it, else the sidecar",
+    /// so which variant it yields is a property of the build. Asserting one of
+    /// them unconditionally passes only under `make test`'s feature set and
+    /// fails a bare `cargo test`.
+    #[test]
+    fn nemotron_resolves_to_whichever_engine_the_build_has() {
+        let selected = SttBackend::parse("nemotron").unwrap();
+        if cfg!(feature = "nemotron-native") {
+            assert_eq!(selected, SttBackend::Nemotron);
+        } else {
+            assert_eq!(selected, SttBackend::NemotronSidecar);
+        }
     }
 }

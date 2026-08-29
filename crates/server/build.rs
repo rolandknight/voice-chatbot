@@ -20,8 +20,8 @@ fn main() {
         .unwrap_or_else(|| manifest_dir.join("../../.deps/moonshine/v0.1.3/lib"));
     let lib_dir = lib_dir.canonicalize().unwrap_or_else(|error| {
         panic!(
-            "Moonshine feature enabled but native library directory {} is unavailable: {error}. \
-             Run ./scripts/setup_moonshine.sh or set MOONSHINE_LIB_DIR.",
+            "moonshine feature enabled but native library directory {} is unavailable: \
+             {error}. {MOONSHINE_REMEDY}",
             lib_dir.display()
         )
     });
@@ -36,9 +36,14 @@ fn main() {
 
     match target_os.as_str() {
         "linux" => {
-            require_file(&lib_dir, "libmoonshine.so");
+            require_file(&lib_dir, "libmoonshine.so", "moonshine", MOONSHINE_REMEDY);
             // libmoonshine.so has a $ORIGIN runpath for this co-located SONAME.
-            require_file(&lib_dir, "libonnxruntime.so.1");
+            require_file(
+                &lib_dir,
+                "libonnxruntime.so.1",
+                "moonshine",
+                MOONSHINE_REMEDY,
+            );
             println!("cargo:rustc-link-lib=dylib=moonshine");
             // Use an absolute development rpath so `make server` can launch the
             // Cargo output directly. Packaged binaries should copy both shared
@@ -46,7 +51,7 @@ fn main() {
             println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib_dir.display());
         }
         "macos" => {
-            require_file(&lib_dir, "libmoonshine.a");
+            require_file(&lib_dir, "libmoonshine.a", "moonshine", MOONSHINE_REMEDY);
             println!("cargo:rustc-link-lib=static=moonshine");
             println!("cargo:rustc-link-lib=dylib=c++");
             println!("cargo:rustc-link-lib=framework=CoreFoundation");
@@ -56,12 +61,19 @@ fn main() {
     }
 }
 
-fn require_file(dir: &Path, name: &str) {
+/// How to get the missing artifacts. `require_file` is shared by two features
+/// with different setup scripts and different env vars, so the remedy travels
+/// with the caller rather than being baked into the helper — naming the wrong
+/// one sends people to the wrong script.
+const MOONSHINE_REMEDY: &str = "Run ./scripts/setup_moonshine.sh or set MOONSHINE_LIB_DIR \
+     to the extracted v0.1.3 release lib directory.";
+const NEMOTRON_REMEDY: &str = "Run ./scripts/setup_nemotron.sh or set NEMO_SPEECH_LIB_DIR.";
+
+fn require_file(dir: &Path, name: &str, feature: &str, remedy: &str) {
     let path = dir.join(name);
     if !path.is_file() {
         panic!(
-            "Moonshine feature enabled but {} is missing. Run the PoC setup or set \
-             MOONSHINE_LIB_DIR to the extracted v0.1.3 release lib directory.",
+            "{feature} feature enabled but {} is missing. {remedy}",
             path.display()
         );
     }
@@ -109,7 +121,7 @@ fn nemotron_native_link() {
         .unwrap_or_else(|| manifest_dir.join("../../.deps/nemo-speech/v0.1.0/lib"));
     let lib_dir = lib_dir.canonicalize().unwrap_or_else(|error| {
         panic!(
-            "nemotron-native enabled but {} is unavailable: {error}. Run ./scripts/setup_nemotron.sh or set NEMO_SPEECH_LIB_DIR.",
+            "nemotron-native feature enabled but {} is unavailable: {error}. {NEMOTRON_REMEDY}",
             lib_dir.display()
         )
     });
@@ -119,7 +131,7 @@ fn nemotron_native_link() {
         "linux" => "libnemo_speech_asr_c.so",
         other => panic!("nemotron-native supports macOS and Linux, not {other}"),
     };
-    require_file(&lib_dir, lib_name);
+    require_file(&lib_dir, lib_name, "nemotron-native", NEMOTRON_REMEDY);
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
     println!("cargo:rustc-link-lib=dylib=nemo_speech_asr_c");
     println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib_dir.display());

@@ -13,3 +13,7 @@ Local modifications for the PoC:
 - `RollingContext` carries a user-turn generation; `CascadedToolBridge` skips
   the LLM re-run for a tool result whose call belongs to a superseded turn
   (a wake phrase and its command landing as two finals answered twice).
+- `SpeechGate::on_interruption` no longer clears the pre-roll ring. The VAD
+  broadcasts `Interruption` before the new turn's `UserStartedSpeaking`, so
+  clearing there emptied the ring the rising edge was about to replay and the
+  STT lost the first word of every utterance spoken over the bot's reply.

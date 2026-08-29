@@ -30,20 +30,25 @@ use gain::Gain;
 
 /// What to report for a decoder that exited on its own. `None` for a clean
 /// exit (the stream simply ended). A failure is worth surfacing because it is
-/// otherwise silent: [`decoder::Decoder::spawn`] nulls ffmpeg's stderr and
-/// [`MediaPlayer::play`] only checks that the *spawn* succeeded, so a stream
-/// that ffmpeg immediately refused would otherwise read as a playing radio
-/// that makes no sound.
-fn exit_line(title: &str, code: Option<i32>) -> Option<String> {
-    match code {
-        Some(0) => None,
-        Some(code) => Some(format!(
-            "[media: {title} stopped unexpectedly (ffmpeg exit {code})]"
-        )),
-        None => Some(format!(
-            "[media: {title} stopped unexpectedly (ffmpeg killed by signal)]"
-        )),
-    }
+/// otherwise silent: [`MediaPlayer::play`] only checks that the *spawn*
+/// succeeded, so a stream that ffmpeg immediately refused would otherwise read
+/// as a playing radio that makes no sound.
+///
+/// `detail` is ffmpeg's own stderr ([`decoder::Decoder::stderr_tail`]). It is
+/// what separates the causes that all share one exit status — exit 8 covers a
+/// 403 from the CDN, a DNS failure and an option ffmpeg didn't recognise alike.
+fn exit_line(title: &str, code: Option<i32>, detail: &str) -> Option<String> {
+    let how = match code {
+        Some(0) => return None,
+        Some(code) => format!("ffmpeg exit {code}"),
+        None => "ffmpeg killed by signal".to_string(),
+    };
+    let detail = detail.trim();
+    Some(if detail.is_empty() {
+        format!("[media: {title} stopped unexpectedly ({how})]")
+    } else {
+        format!("[media: {title} stopped unexpectedly ({how}): {detail}]")
+    })
 }
 
 pub struct MediaPlayer {
@@ -250,14 +255,15 @@ impl MediaPlayer {
             // flight. Wait for the feeder to reach EOF instead.
             return;
         }
+        let detail = decoder.stderr_tail();
         self.decoder = None;
         self.duck.stop();
         // No ramp to 0 here: the source has simply gone dry and the mixer's
         // silence path takes it from there. Fading would cut the very tail
         // this wait exists to preserve, and every `play`/`stop` sets the gain
         // itself, so nothing downstream depends on it.
-        if let Some(line) = exit_line(&self.title, code) {
-            tracing::warn!(title = %self.title, ?code, "media: decoder exited on its own");
+        if let Some(line) = exit_line(&self.title, code, &detail) {
+            tracing::warn!(title = %self.title, ?code, ffmpeg = %detail, "media: decoder exited on its own");
             self.exit_report = Some(line);
         }
     }
@@ -345,15 +351,38 @@ mod tests {
 
     #[test]
     fn exit_line_is_quiet_about_a_clean_exit_and_loud_about_a_failure() {
-        assert_eq!(exit_line("BBC Radio 4", Some(0)), None);
+        assert_eq!(exit_line("BBC Radio 4", Some(0), ""), None);
         assert_eq!(
-            exit_line("BBC Radio 4", Some(1)).as_deref(),
+            exit_line("BBC Radio 4", Some(1), "").as_deref(),
             Some("[media: BBC Radio 4 stopped unexpectedly (ffmpeg exit 1)]")
         );
         assert_eq!(
-            exit_line("BBC Radio 4", None).as_deref(),
+            exit_line("BBC Radio 4", None, "").as_deref(),
             Some("[media: BBC Radio 4 stopped unexpectedly (ffmpeg killed by signal)]")
         );
+    }
+
+    /// The whole point of capturing stderr: without ffmpeg's own words a
+    /// failed stream is just an exit number, and every cause looks alike.
+    #[test]
+    fn exit_line_quotes_ffmpeg_when_it_said_why() {
+        assert_eq!(
+            exit_line(
+                "The Archers Omnibus",
+                Some(8),
+                "Server returned 403 Forbidden (access denied)"
+            )
+            .as_deref(),
+            Some(
+                "[media: The Archers Omnibus stopped unexpectedly (ffmpeg exit 8): \
+                 Server returned 403 Forbidden (access denied)]"
+            )
+        );
+    }
+
+    #[test]
+    fn a_clean_exit_stays_quiet_even_if_ffmpeg_wrote_to_stderr() {
+        assert_eq!(exit_line("x", Some(0), "some harmless warning"), None);
     }
 }
 
@@ -365,6 +394,44 @@ mod live_tests {
     use serde_json::json;
 
     const RADIO_4: &str = "http://as-hls-ww-live.akamaized.net/pool_55057080/live/ww/bbc_radio_fourfm/bbc_radio_fourfm.isml/bbc_radio_fourfm-audio%3d96000.norewind.m3u8";
+    /// The Archers Omnibus enclosure from the curated feed (b006qnkc.rss): a
+    /// plain mp3 behind BBC's redirector, i.e. not HLS.
+    const EPISODE: &str = "http://open.live.bbc.co.uk/mediaselector/6/redir/version/2.0/mediaset/audio-nondrm-download-rss/proto/http/vpid/p0p4zd76.mp3";
+
+    /// A BBC on-demand episode, played the way a server too old to send `live`
+    /// asks for it: no `live` key, so the client defaults it to `true`. That
+    /// default must not reach the argument list — it made ffmpeg refuse the
+    /// mp3 outright ("Option live_start_index not found", exit 8) and every
+    /// on-demand programme died on the first tick.
+    #[test]
+    #[ignore]
+    fn live_an_on_demand_episode_plays_when_the_server_omits_the_live_flag() {
+        assert!(MediaPlayer::is_available(), "ffmpeg not installed");
+        let (tx, rx) = std::sync::mpsc::sync_channel(512);
+        let (_recycle_tx, recycle_rx) = std::sync::mpsc::sync_channel(512);
+        let gain = Gain::new(gain::FULL);
+        let mut player = MediaPlayer::new(tx, recycle_rx, gain, 48_000, "http://127.0.0.1:6210");
+
+        let line = player.on_event(
+            MEDIA_EVENT,
+            // Note the absent "live": exactly what the old server sends.
+            &json!({"action": "play", "url": EPISODE, "title": "The Archers Omnibus"}),
+        );
+        assert_eq!(
+            line.as_deref(),
+            Some("[media: playing The Archers Omnibus]")
+        );
+
+        std::thread::sleep(Duration::from_secs(3));
+        assert_eq!(player.tick(), None, "ffmpeg refused the episode");
+        let samples: Vec<i16> = rx.try_iter().flatten().collect();
+        assert!(
+            samples.len() > 48_000,
+            "expected at least a second of audio, got {}",
+            samples.len()
+        );
+        assert!(player.stop());
+    }
 
     #[test]
     #[ignore]

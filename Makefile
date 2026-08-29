@@ -33,8 +33,24 @@ PI_CROSS_ENV := CARGO_HOME=$(HOME)/.cargo RUSTUP_HOME=$(HOME)/.rustup \
 # CARGO_HOME into .hermit/rust, so a bare `cargo install` would put the binary
 # somewhere PI_CROSS_ENV's PATH never looks.
 PI_CARGO := CARGO_HOME=$(HOME)/.cargo RUSTUP_HOME=$(HOME)/.rustup $(HOME)/.cargo/bin/cargo
-SERVER_URL ?= http://127.0.0.1:6210
-LOG_LEVEL ?= info
+# Runtime config lives in .env, which the server parses for itself
+# (crates/server/src/env_file.rs). make never reads it, so `make call` dialled
+# the built-in default even with SERVER_URL set there. Take the values the
+# `call` target hands the client from .env instead, as *defaults*: an exported
+# SERVER_URL or `make call SERVER_URL=...` still wins, mirroring env_file.rs's
+# "variables already set are never overridden". `include .env` is not an option
+# — the file is shared with the Python chatbot (python-dotenv grammar), where a
+# single line without an `=` is a fatal makefile syntax error. env_get mirrors
+# that lenient parse instead: optional `export ` prefix, surrounding quotes
+# stripped, an unquoted value ending at ` #`, first occurrence wins, anything
+# unparsable skipped.
+ENV_FILE ?= .env
+env_get = $(shell [ -f '$(ENV_FILE)' ] && sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}$(1)[[:space:]]*=[[:space:]]*//p' '$(ENV_FILE)' | head -n 1 | sed -e '/^["'\'']/!s/[[:space:]][[:space:]]*\#.*$$//' -e '/^["'\'']/!s/[[:space:]]*$$//' -e 's/^"\(.*\)"$$/\1/' -e "s/^'\(.*\)'$$/\1/")
+
+SERVER_URL ?= $(or $(call env_get,SERVER_URL),http://127.0.0.1:6210)
+LOG_LEVEL ?= $(or $(call env_get,LOG_LEVEL),info)
+INPUT_DEVICE ?= $(call env_get,INPUT_DEVICE)
+OUTPUT_DEVICE ?= $(call env_get,OUTPUT_DEVICE)
 QWEN_PYTHON := $(abspath crates/qwen-tts/.venv/bin/python)
 NEMO_SPEECH_LIB_DIR := $(abspath .deps/nemo-speech/v0.1.0/lib)
 SERVER_BUILD_ENV := PYO3_PYTHON=$(QWEN_PYTHON) NEMO_SPEECH_LIB_DIR=$(NEMO_SPEECH_LIB_DIR)
@@ -66,7 +82,7 @@ client-build-pi:  ## Cross-build the client for a Raspberry Pi (aarch64; needs D
 server: server-build  ## Build if needed, then run the server (reads .env)
 	./$(SERVER_BIN)
 
-call: client-build   ## Build the client if needed, then call the server (SERVER_URL) with native audio
+call: client-build   ## Build the client if needed, then call the server (SERVER_URL, defaulted from .env) with native audio
 	./$(CLIENT_BIN) --log-level "$(LOG_LEVEL)" call --server-url "$(SERVER_URL)" \
 	    $(if $(INPUT_DEVICE),--input-device "$(INPUT_DEVICE)",) \
 	    $(if $(OUTPUT_DEVICE),--output-device "$(OUTPUT_DEVICE)",)

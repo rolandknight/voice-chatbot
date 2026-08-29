@@ -495,13 +495,24 @@ impl FrameProcessor for SpeechGate {
         Ok(())
     }
 
-    /// Barge-in: drop the pre-roll ring. On the VAD's own barge-in this is a
-    /// no-op (its `UserStartedSpeaking` leads the broadcast, so the ring was
-    /// already drained into the turn); it matters when the interruption comes
-    /// from elsewhere — an [`InterruptionStrategy`](crate::audio::strategy) —
-    /// where the ring holds bot echo rather than the caller's next utterance.
+    /// Barge-in: **keep** the pre-roll ring.
+    ///
+    /// This deliberately does nothing. Clearing the ring here is what ate the
+    /// first word of every barged-in utterance:
+    /// [`VadProcessor`](crate::audio::VadProcessor) broadcasts `Interruption`
+    /// *before* the new turn's `UserStartedSpeaking` (so the runtime's drain
+    /// keeps the interrupting turn's frames), and both are `FrameClass::System`
+    /// frames on the same ordered channel — so the gate saw the clear, then
+    /// opened on a ring that had just been emptied of the very onset the VAD
+    /// needed in order to fire at all.
+    ///
+    /// There is also nothing for a clear to protect: the ring only fills while
+    /// the gate is *closed*, and an interruption raised from elsewhere (an
+    /// [`InterruptionStrategy`](crate::audio::strategy)) is decided from
+    /// transcribed words, i.e. with the gate already open and the ring already
+    /// drained. Guarded by
+    /// `speech_gate_keeps_the_preroll_across_a_barge_in`.
     async fn on_interruption(&mut self) -> Result<()> {
-        self.preroll.clear();
         Ok(())
     }
 
@@ -2863,6 +2874,56 @@ mod tests {
         ])
         .await;
         assert_eq!(out, vec![32]);
+    }
+
+    /// Feed `frames` through the gate on a *running* task, one at a time: an
+    /// `Interruption` queued before `run()` never reaches the processors, so the
+    /// barge-in case cannot use [`run_gate`]'s pre-queued form.
+    async fn run_gate_live(frames: Vec<Frame>) -> Vec<usize> {
+        let cap = AudioCapture::default();
+        let task = PipelineTask::new(
+            Pipeline::new(vec![Box::new(SpeechGate::new()), Box::new(cap.clone())]),
+            PipelineTaskParams::default(),
+            vec![],
+        );
+        let sender = task.queue_sender();
+        let running = tokio::spawn(task.run());
+        for f in frames {
+            sender.send(f).unwrap();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        sender.send(Frame::End { reason: None }).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), running)
+            .await
+            .expect("speech gate pipeline timed out")
+            .expect("join")
+            .expect("run ok");
+        let out = cap.0.lock().unwrap().clone();
+        out
+    }
+
+    /// Regression: a barge-in must NOT eat the pre-roll. The VAD broadcasts
+    /// `Interruption` *before* the new turn's `UserStartedSpeaking`
+    /// (`VadProcessor::drain_windows`) and both are `FrameClass::System`, so they
+    /// reach the gate in that order. When `on_interruption` cleared the ring, the
+    /// rising edge that followed drained nothing and the STT lost the leading
+    /// [`SPEECH_GATE_PREROLL_MS`] of the interrupting utterance — the caller's
+    /// first word or two, on every turn spoken over the bot's reply.
+    #[tokio::test]
+    async fn speech_gate_keeps_the_preroll_across_a_barge_in() {
+        let out = run_gate_live(vec![
+            audio(100), // the onset the VAD needed in order to fire at all
+            Frame::Interruption,
+            Frame::UserStartedSpeaking,
+            audio(50),
+            Frame::UserStoppedSpeaking,
+        ])
+        .await;
+        assert_eq!(
+            out,
+            vec![100, 50],
+            "the barge-in utterance's onset must survive the interruption"
+        );
     }
 
     /// The bot-speaking edges the cascaded chain never emitted: without them
