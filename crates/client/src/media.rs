@@ -16,6 +16,8 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use voice_chatbot_protocol::{MediaCommand, AFTER_SPEECH_CAP_SECS, MEDIA_EVENT};
 
+pub mod decoder;
+
 pub mod gain;
 
 pub mod duck;
