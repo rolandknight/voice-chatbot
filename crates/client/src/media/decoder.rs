@@ -6,14 +6,16 @@
 //!
 //! * ffmpeg drains an HLS playlist at network speed (measured `speed=401x` on
 //!   BBC Radio 4), so it does **not** pace itself. The OS pipe plus the bounded
-//!   channel are the jitter buffer, and pipe backpressure is what paces it.
+//!   channel are the jitter buffer: the feeder only reads the next chunk of
+//!   stdout once the current one has landed in the channel, and that's what
+//!   paces ffmpeg.
 //! * Because of that, "pause" costs nothing: stop reading, the pipe fills,
 //!   ffmpeg blocks on write, and the decoder stalls exactly in place.
 
 use std::io::Read;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::SyncSender;
+use std::sync::mpsc::{SyncSender, TrySendError};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -104,9 +106,24 @@ impl Decoder {
                                 .chunks_exact(2)
                                 .map(|pair| i16::from_le_bytes([pair[0], pair[1]]))
                                 .collect();
-                            // Blocking send is the backpressure that paces ffmpeg.
-                            if tx.send(samples).is_err() {
-                                return; // mixer gone
+                            // Backpressure is what paces ffmpeg: no more of stdout
+                            // is read until this chunk lands. A blocking `send`
+                            // would do that too, but uncancellably — a feeder
+                            // parked in it never sees `stopping`, and `Drop`'s
+                            // join would hang with it.
+                            let mut pending = samples;
+                            loop {
+                                if stopping.load(Ordering::Relaxed) {
+                                    return;
+                                }
+                                match tx.try_send(pending) {
+                                    Ok(()) => break,
+                                    Err(TrySendError::Full(returned)) => {
+                                        pending = returned;
+                                        std::thread::sleep(Duration::from_millis(5));
+                                    }
+                                    Err(TrySendError::Disconnected(_)) => return, // mixer gone
+                                }
                             }
                         }
                         Err(_) => return, // EOF or the stream died
@@ -213,6 +230,26 @@ mod tests {
             decoder.finished(),
             Some(Some(0)),
             "ffmpeg should exit clean"
+        );
+    }
+
+    /// A feeder parked on a full channel must still shut down. The Receiver is
+    /// alive but never drained, so a blocking `send` would never observe
+    /// `stopping` and `Drop`'s join would hang forever.
+    #[test]
+    #[ignore]
+    fn live_drop_returns_promptly_while_the_channel_is_full() {
+        let (tx, _rx) = std::sync::mpsc::sync_channel(1);
+        let decoder = Decoder::spawn("sine=frequency=440:duration=30", 48_000, false, tx)
+            .expect("spawn ffmpeg");
+        // Let it fill the one slot and park in the retry loop.
+        std::thread::sleep(Duration::from_millis(500));
+        let start = std::time::Instant::now();
+        drop(decoder);
+        let took = start.elapsed();
+        assert!(
+            took < Duration::from_secs(2),
+            "Drop blocked for {took:?}; the feeder never observed `stopping`"
         );
     }
 }
