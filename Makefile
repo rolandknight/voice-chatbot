@@ -29,6 +29,10 @@ PI_CLIENT_BIN := $(PI_TARGET_DIR)/$(PI_TARGET)/release/voice-chatbot-client
 PI_CROSS_ENV := CARGO_HOME=$(HOME)/.cargo RUSTUP_HOME=$(HOME)/.rustup \
     PATH=$(HOME)/.cargo/bin:$$PATH CARGO_TARGET_DIR=$(PI_TARGET_DIR) \
     PKG_CONFIG_ALLOW_CROSS=1 PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig
+# Installing cross needs the same homes the build runs it under. Hermit sets
+# CARGO_HOME into .hermit/rust, so a bare `cargo install` would put the binary
+# somewhere PI_CROSS_ENV's PATH never looks.
+PI_CARGO := CARGO_HOME=$(HOME)/.cargo RUSTUP_HOME=$(HOME)/.rustup $(HOME)/.cargo/bin/cargo
 SERVER_URL ?= http://127.0.0.1:6210
 LOG_LEVEL ?= info
 QWEN_PYTHON := $(abspath crates/qwen-tts/.venv/bin/python)
@@ -48,9 +52,12 @@ server-build:  ## Build crates/server with SERVER_FEATURES
 client-build:  ## Build crates/client
 	$(CARGO) build --release -p voice-chatbot-client
 
-client-build-pi:  ## Cross-build the client for a Raspberry Pi (aarch64; needs Docker + cross)
-	@command -v cross >/dev/null 2>&1 || { echo "cross not found; install it with: cargo install cross --locked"; exit 1; }
+client-build-pi:  ## Cross-build the client for a Raspberry Pi (aarch64; needs Docker; installs cross on first use)
 	@command -v rustup >/dev/null 2>&1 || { echo "rustup not found; cross builds against the rustup toolchain, not Hermit's"; exit 1; }
+	@command -v cross >/dev/null 2>&1 || [ -x "$(HOME)/.cargo/bin/cross" ] || { \
+	    echo "cross not found; installing it into $(HOME)/.cargo/bin (one-off, a few minutes)"; \
+	    $(PI_CARGO) install cross --locked; \
+	}
 	@docker info >/dev/null 2>&1 || { echo "cross needs a running Docker daemon"; exit 1; }
 	$(PI_CROSS_ENV) cross +$(PI_TOOLCHAIN) build --release --target $(PI_TARGET) -p voice-chatbot-client
 	@echo "built $(PI_CLIENT_BIN)"
