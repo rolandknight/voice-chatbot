@@ -32,6 +32,71 @@ pub fn format_duration(minutes: f64) -> String {
     format!("{minutes} minutes")
 }
 
+/// A timer name as the user's words reach us, reduced to something matchable.
+///
+/// This is the load-bearing piece for voice: the model passes `label: "pasta"`
+/// when the timer is set, but on "cancel the pasta timer" it will happily pass
+/// `"the pasta timer"`. Returns `None` when nothing identifying is left, so
+/// "cancel the timer" falls through to the "only one running" rule.
+pub fn normalize_name(raw: &str) -> Option<String> {
+    let lowered = raw.trim().to_ascii_lowercase();
+    let mut s = lowered.split_whitespace().collect::<Vec<_>>().join(" ");
+    if let Some(rest) = s.strip_prefix("the ") {
+        s = rest.to_string();
+    }
+    if let Some(rest) = s.strip_suffix(" timer") {
+        s = rest.to_string();
+    }
+    if s.is_empty() || s == "timer" {
+        return None;
+    }
+    Some(s)
+}
+
+/// How long is left, as a countdown reads aloud. Deliberately separate from
+/// `format_duration`, whose "2.5 minutes" form is right for "timer set for …"
+/// and wrong for "… left".
+pub fn format_remaining(left: Duration) -> String {
+    let secs = left.as_secs();
+    if secs == 0 {
+        return "no time".to_string();
+    }
+    if secs < 60 {
+        return if secs == 1 {
+            "1 second".to_string()
+        } else {
+            format!("{secs} seconds")
+        };
+    }
+    let mins = (left.as_secs_f64() / 60.0).round() as u64;
+    if mins == 1 {
+        "about a minute".to_string()
+    } else {
+        format!("about {mins} minutes")
+    }
+}
+
+/// Adjectival form of a requested duration: "the **5 minute** timer".
+pub fn duration_adjective(minutes: f64) -> String {
+    let d = format_duration(minutes);
+    // Written as a match, not `.map(..).unwrap_or(d)`: the latter is a borrow
+    // of `d` in the same expression that moves it.
+    match d.strip_suffix('s') {
+        Some(trimmed) => trimmed.to_string(),
+        None => d,
+    }
+}
+
+/// "a", "a and b", "a, b, and c" — a list that reads aloud.
+pub fn join_and(parts: &[String]) -> String {
+    match parts {
+        [] => String::new(),
+        [one] => one.clone(),
+        [a, b] => format!("{a} and {b}"),
+        [rest @ .., last] => format!("{}, and {last}", rest.join(", ")),
+    }
+}
+
 /// Longest timer we accept. A hallucinated `1e12` should get a spoken error,
 /// not a task that sleeps for two million years.
 pub const MAX_MINUTES: f64 = 24.0 * 60.0;
@@ -190,6 +255,51 @@ mod tests {
         assert_eq!(
             SetTimer.call(&json!({"minutes": "inf"}), &ctx).await,
             "I couldn't understand the timer duration."
+        );
+    }
+
+    #[test]
+    fn normalize_name_strips_voice_wrapping() {
+        assert_eq!(normalize_name("pasta"), Some("pasta".into()));
+        assert_eq!(normalize_name("  Pasta  "), Some("pasta".into()));
+        assert_eq!(normalize_name("The Pasta Timer"), Some("pasta".into()));
+        assert_eq!(normalize_name("the pasta"), Some("pasta".into()));
+        assert_eq!(normalize_name("pasta   sauce"), Some("pasta sauce".into()));
+        // Nothing that identifies a specific timer.
+        assert_eq!(normalize_name(""), None);
+        assert_eq!(normalize_name("   "), None);
+        assert_eq!(normalize_name("timer"), None);
+        assert_eq!(normalize_name("the timer"), None);
+    }
+
+    #[test]
+    fn remaining_reads_naturally() {
+        assert_eq!(format_remaining(Duration::from_secs(0)), "no time");
+        assert_eq!(format_remaining(Duration::from_secs(1)), "1 second");
+        assert_eq!(format_remaining(Duration::from_secs(30)), "30 seconds");
+        assert_eq!(format_remaining(Duration::from_secs(59)), "59 seconds");
+        assert_eq!(format_remaining(Duration::from_secs(60)), "about a minute");
+        assert_eq!(format_remaining(Duration::from_secs(200)), "about 3 minutes");
+        assert_eq!(format_remaining(Duration::from_secs(600)), "about 10 minutes");
+    }
+
+    #[test]
+    fn duration_adjective_drops_the_plural() {
+        // "the 5 minute timer", not "the 5 minutes timer".
+        assert_eq!(duration_adjective(5.0), "5 minute");
+        assert_eq!(duration_adjective(1.0), "1 minute");
+        assert_eq!(duration_adjective(0.5), "30 second");
+        assert_eq!(duration_adjective(2.5), "2.5 minute");
+    }
+
+    #[test]
+    fn join_and_speaks_a_list() {
+        assert_eq!(join_and(&[]), "");
+        assert_eq!(join_and(&["a".to_string()]), "a");
+        assert_eq!(join_and(&["a".to_string(), "b".to_string()]), "a and b");
+        assert_eq!(
+            join_and(&["a".to_string(), "b".to_string(), "c".to_string()]),
+            "a, b, and c"
         );
     }
 }
