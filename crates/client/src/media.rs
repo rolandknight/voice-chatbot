@@ -17,7 +17,8 @@ pub mod duck;
 pub mod gain;
 
 use std::process::{Command, Stdio};
-use std::sync::mpsc::SyncSender;
+use std::sync::mpsc::{Receiver, SyncSender};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -49,6 +50,9 @@ pub struct MediaPlayer {
     /// Server base URL; relative media URLs (`/sfx/x.flac`) resolve against it.
     server_base: String,
     media_tx: SyncSender<Vec<i16>>,
+    /// Spent buffers coming back from the mixer, handed to each decoder's
+    /// feeder so it refills them instead of allocating.
+    recycle: Arc<Mutex<Receiver<Vec<i16>>>>,
     gain: Gain,
     sample_rate: u32,
     decoder: Option<Decoder>,
@@ -62,6 +66,7 @@ pub struct MediaPlayer {
 impl MediaPlayer {
     pub fn new(
         media_tx: SyncSender<Vec<i16>>,
+        recycle: Receiver<Vec<i16>>,
         gain: Gain,
         sample_rate: u32,
         server_base: &str,
@@ -69,6 +74,7 @@ impl MediaPlayer {
         Self {
             server_base: server_base.trim_end_matches('/').to_string(),
             media_tx,
+            recycle: Arc::new(Mutex::new(recycle)),
             gain,
             sample_rate,
             decoder: None,
@@ -187,7 +193,13 @@ impl MediaPlayer {
         } else {
             self.gain.ramp_to(self.duck.gain());
         }
-        match Decoder::spawn(&url, self.sample_rate, live, self.media_tx.clone()) {
+        match Decoder::spawn(
+            &url,
+            self.sample_rate,
+            live,
+            self.media_tx.clone(),
+            Arc::clone(&self.recycle),
+        ) {
             Ok(decoder) => {
                 decoder.set_running(self.duck.transport() == Transport::Running);
                 self.decoder = Some(decoder);
@@ -265,8 +277,15 @@ mod tests {
 
     fn player() -> (MediaPlayer, std::sync::mpsc::Receiver<Vec<i16>>, Gain) {
         let (tx, rx) = std::sync::mpsc::sync_channel(8);
+        let (_recycle_tx, recycle_rx) = std::sync::mpsc::sync_channel(8);
         let gain = Gain::new(FULL);
-        let player = MediaPlayer::new(tx, gain.clone(), 48_000, "http://127.0.0.1:6210");
+        let player = MediaPlayer::new(
+            tx,
+            recycle_rx,
+            gain.clone(),
+            48_000,
+            "http://127.0.0.1:6210",
+        );
         (player, rx, gain)
     }
 
@@ -352,8 +371,15 @@ mod live_tests {
     fn live_radio_reaches_the_mixer_and_ducks_without_stopping() {
         assert!(MediaPlayer::is_available(), "ffmpeg not installed");
         let (tx, rx) = std::sync::mpsc::sync_channel(512);
+        let (_recycle_tx, recycle_rx) = std::sync::mpsc::sync_channel(512);
         let gain = Gain::new(gain::FULL);
-        let mut player = MediaPlayer::new(tx, gain.clone(), 48_000, "http://127.0.0.1:6210");
+        let mut player = MediaPlayer::new(
+            tx,
+            recycle_rx,
+            gain.clone(),
+            48_000,
+            "http://127.0.0.1:6210",
+        );
 
         let line = player.on_event(
             MEDIA_EVENT,
@@ -395,8 +421,15 @@ mod live_tests {
     fn live_radio_asked_for_mid_reply_starts_quiet() {
         assert!(MediaPlayer::is_available(), "ffmpeg not installed");
         let (tx, _rx) = std::sync::mpsc::sync_channel(512);
+        let (_recycle_tx, recycle_rx) = std::sync::mpsc::sync_channel(512);
         let gain = Gain::new(gain::FULL);
-        let mut player = MediaPlayer::new(tx, gain.clone(), 48_000, "http://127.0.0.1:6210");
+        let mut player = MediaPlayer::new(
+            tx,
+            recycle_rx,
+            gain.clone(),
+            48_000,
+            "http://127.0.0.1:6210",
+        );
 
         player.on_event("rtf-bot-started-speaking", &Value::Null);
         player.on_event(

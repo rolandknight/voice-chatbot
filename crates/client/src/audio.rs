@@ -225,8 +225,14 @@ impl AudioDevices {
         let (input_tx, input_rx) = tokio_mpsc::channel(input_capacity);
 
         let input_stream = build_input_stream(input, input_tx)?;
-        let (output_stream, output_tx, media_tx, media_gain) =
-            build_output_stream(output, output_capacity)?;
+        let OutputStreamParts {
+            stream: output_stream,
+            voice_tx: output_tx,
+            voice_recycle_rx,
+            media_tx,
+            media_recycle_rx,
+            media_gain,
+        } = build_output_stream(output, output_capacity)?;
 
         Ok(AudioIo {
             input_rate: input.info.config.sample_rate,
@@ -236,6 +242,8 @@ impl AudioDevices {
             input_rx,
             output_tx,
             media_tx,
+            voice_recycle_rx,
+            media_recycle_rx,
             media_gain,
             streams: AudioStreams {
                 input_stream,
@@ -261,6 +269,11 @@ pub struct AudioIo {
     pub output_tx: SyncSender<Vec<i16>>,
     /// Mono `i16` media chunks, summed with `output_tx` under a ramped gain.
     pub media_tx: SyncSender<Vec<i16>>,
+    /// Spent voice buffers coming back from the callback. Refill these instead
+    /// of allocating: the callback must not free, so it returns them here.
+    pub voice_recycle_rx: Receiver<Vec<i16>>,
+    /// Spent media buffers coming back from the callback.
+    pub media_recycle_rx: Receiver<Vec<i16>>,
     /// Ramped gain applied to `media_tx` only.
     pub media_gain: crate::media::gain::Gain,
     streams: AudioStreams,
@@ -298,6 +311,8 @@ pub struct AudioIoParts {
     pub input_rx: tokio_mpsc::Receiver<Vec<i16>>,
     pub output_tx: SyncSender<Vec<i16>>,
     pub media_tx: SyncSender<Vec<i16>>,
+    pub voice_recycle_rx: Receiver<Vec<i16>>,
+    pub media_recycle_rx: Receiver<Vec<i16>>,
     pub media_gain: crate::media::gain::Gain,
 }
 
@@ -321,6 +336,8 @@ impl AudioIo {
             input_rx: self.input_rx,
             output_tx: self.output_tx,
             media_tx: self.media_tx,
+            voice_recycle_rx: self.voice_recycle_rx,
+            media_recycle_rx: self.media_recycle_rx,
             media_gain: self.media_gain,
         }
     }
@@ -759,12 +776,18 @@ where
 
 /// The stream plus its two feed channels and the media gain: `(stream,
 /// voice_tx, media_tx, gain)`.
-type OutputStreamParts = (
-    cpal::Stream,
-    SyncSender<Vec<i16>>,
-    SyncSender<Vec<i16>>,
-    crate::media::gain::Gain,
-);
+/// What [`build_output_stream`] hands back: the stream, the queues that feed
+/// it, and the return paths that keep spent buffers off the allocator.
+struct OutputStreamParts {
+    stream: cpal::Stream,
+    voice_tx: SyncSender<Vec<i16>>,
+    /// Spent voice buffers, for the producer to refill instead of allocating.
+    voice_recycle_rx: Receiver<Vec<i16>>,
+    media_tx: SyncSender<Vec<i16>>,
+    /// Spent media buffers, for the decoder's feeder to refill.
+    media_recycle_rx: Receiver<Vec<i16>>,
+    media_gain: crate::media::gain::Gain,
+}
 
 /// Build the playback stream together with the queue that feeds it.
 ///
@@ -808,10 +831,18 @@ where
         let device_id = selected.info.id.clone();
         let (sender, receiver) = mpsc::sync_channel(capacity);
         let (media_sender, media_receiver) = mpsc::sync_channel(capacity);
+        // The mixer can hold at most one buffer per queued chunk plus the one
+        // it is reading, so this can never be full when it returns one --
+        // which is what lets the callback hand a buffer back rather than free
+        // it. The extra slot is headroom, not a requirement.
+        let (recycle_tx, voice_recycle_rx) = mpsc::sync_channel(capacity + 2);
+        let (media_recycle_tx, media_recycle_rx) = mpsc::sync_channel(capacity + 2);
         let gain = crate::media::gain::Gain::new(crate::media::gain::FULL);
         let mut queued_audio = OutputMixer::new(
             receiver,
+            recycle_tx,
             media_receiver,
+            media_recycle_tx,
             gain.clone(),
             crate::media::gain::step_for(config.sample_rate),
         );
@@ -825,7 +856,16 @@ where
             },
             None,
         ) {
-            Ok(stream) => return Ok((stream, sender, media_sender, gain)),
+            Ok(stream) => {
+                return Ok(OutputStreamParts {
+                    stream,
+                    voice_tx: sender,
+                    voice_recycle_rx,
+                    media_tx: media_sender,
+                    media_recycle_rx,
+                    media_gain: gain,
+                })
+            }
             // Only a refused period is worth retrying at the device's own size.
             Err(error) if matches!(error.kind(), cpal::ErrorKind::UnsupportedConfig) => {
                 tracing::debug!(%error, id = %selected.info.id, ?buffer_size, "output period refused");
@@ -841,16 +881,44 @@ where
 /// One producer feeding the output callback: a queue plus a read cursor.
 struct Source {
     receiver: Receiver<Vec<i16>>,
+    /// Spent buffers go back to the producer down here to be refilled.
+    recycle: SyncSender<Vec<i16>>,
     current: Vec<i16>,
     offset: usize,
 }
 
 impl Source {
-    fn new(receiver: Receiver<Vec<i16>>) -> Self {
+    fn new(receiver: Receiver<Vec<i16>>, recycle: SyncSender<Vec<i16>>) -> Self {
         Self {
             receiver,
+            recycle,
             current: Vec::new(),
             offset: 0,
+        }
+    }
+
+    /// Hand a spent buffer back to its producer.
+    ///
+    /// Never drops it here. `free` can take the allocator's lock, which is the
+    /// same hazard as allocating, and this runs on the audio callback thread.
+    /// [`build_output_stream_typed`] sizes the return channel so `try_send`
+    /// cannot fail; a drop remains the only correct fallback if it ever did.
+    fn release(&self, buffer: Vec<i16>) {
+        // The starting `Vec::new()` owns no allocation; returning it would put
+        // a useless zero-capacity buffer into the producer's free list.
+        if buffer.capacity() == 0 {
+            return;
+        }
+        let _ = self.recycle.try_send(buffer);
+    }
+
+    /// Discard whatever is queued, returning every buffer for reuse.
+    fn discard_queued(&mut self) {
+        let spent = std::mem::take(&mut self.current);
+        self.offset = 0;
+        self.release(spent);
+        while let Ok(chunk) = self.receiver.try_recv() {
+            self.release(chunk);
         }
     }
 
@@ -862,8 +930,9 @@ impl Source {
             }
             match self.receiver.try_recv() {
                 Ok(chunk) => {
-                    self.current = chunk;
+                    let spent = std::mem::replace(&mut self.current, chunk);
                     self.offset = 0;
+                    self.release(spent);
                 }
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => return None,
             }
@@ -885,14 +954,16 @@ struct OutputMixer {
 impl OutputMixer {
     fn new(
         voice: Receiver<Vec<i16>>,
+        voice_recycle: SyncSender<Vec<i16>>,
         media: Receiver<Vec<i16>>,
+        media_recycle: SyncSender<Vec<i16>>,
         gain: crate::media::gain::Gain,
         step: f32,
     ) -> Self {
         let current_gain = gain.target();
         Self {
-            voice: Source::new(voice),
-            media: Source::new(media),
+            voice: Source::new(voice, voice_recycle),
+            media: Source::new(media, media_recycle),
             gain,
             current_gain,
             step,
@@ -903,10 +974,10 @@ impl OutputMixer {
         if self.gain.take_flush() {
             // Drop the previous source's audio rather than playing it under
             // the new one. Bounded by the channel capacity; only ever runs on
-            // an explicit stop or station change, never per callback.
-            self.media.current.clear();
-            self.media.offset = 0;
-            while self.media.receiver.try_recv().is_ok() {}
+            // an explicit stop or station change, never per callback. The
+            // buffers go back to the producer rather than being freed here --
+            // nine `free`s inside one callback is exactly what this avoids.
+            self.media.discard_queued();
         }
 
         // Take the jump request before reading the target it applies to: its
@@ -1065,7 +1136,17 @@ mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
 
-    fn mixer_of(voice: Vec<i16>, media: Vec<i16>, gain_value: f32) -> OutputMixer {
+    /// A mixer plus the return paths its sources hand spent buffers back on.
+    /// Callers bind the receivers so they outlive the mixer, exactly as the
+    /// producers do in production; a dropped receiver would make `release`
+    /// fall back to freeing.
+    struct TestMixer {
+        mixer: OutputMixer,
+        _voice_recycle: Receiver<Vec<i16>>,
+        _media_recycle: Receiver<Vec<i16>>,
+    }
+
+    fn mixer_of(voice: Vec<i16>, media: Vec<i16>, gain_value: f32) -> TestMixer {
         let (voice_tx, voice_rx) = mpsc::sync_channel(4);
         let (media_tx, media_rx) = mpsc::sync_channel(4);
         if !voice.is_empty() {
@@ -1079,35 +1160,161 @@ mod tests {
         let gain = crate::media::gain::Gain::new(gain_value);
         // A step of 1.0 settles the ramp on the first sample, so these tests
         // assert mixing rather than ramp timing.
-        OutputMixer::new(voice_rx, media_rx, gain, 1.0)
+        let (voice_recycle_tx, _voice_recycle) = mpsc::sync_channel(8);
+        let (media_recycle_tx, _media_recycle) = mpsc::sync_channel(8);
+        TestMixer {
+            mixer: OutputMixer::new(
+                voice_rx,
+                voice_recycle_tx,
+                media_rx,
+                media_recycle_tx,
+                gain,
+                1.0,
+            ),
+            _voice_recycle,
+            _media_recycle,
+        }
+    }
+
+    /// The CPAL callback must not free memory: `free` can take an allocator
+    /// lock, which is the same hazard as allocating. A drained buffer is handed
+    /// back to its producer to refill instead of being dropped where it was
+    /// consumed.
+    #[test]
+    fn a_drained_buffer_goes_back_to_its_producer_instead_of_being_freed() {
+        let (tx, rx) = mpsc::sync_channel(4);
+        let (recycle_tx, recycle_rx) = mpsc::sync_channel(4);
+        let first = vec![1i16, 2];
+        let first_alloc = first.as_ptr();
+        tx.try_send(first).expect("queue the first chunk");
+        tx.try_send(vec![3i16, 4]).expect("queue the second");
+        drop(tx);
+        let mut source = Source::new(rx, recycle_tx);
+
+        assert_eq!(source.next_sample(), Some(1));
+        assert_eq!(source.next_sample(), Some(2));
+        assert!(
+            recycle_rx.try_recv().is_err(),
+            "a buffer is only returned once it has been replaced"
+        );
+
+        // Refilling releases the drained buffer.
+        assert_eq!(source.next_sample(), Some(3));
+        let returned = recycle_rx
+            .try_recv()
+            .expect("the drained buffer comes back");
+        assert_eq!(
+            returned.as_ptr(),
+            first_alloc,
+            "the same allocation must come back, not an equal copy"
+        );
+    }
+
+    /// The point of the return path is that the allocator stops being touched
+    /// at all once things are running. Drive a producer/consumer pair the way
+    /// the feeder and the callback drive each other, and count how often the
+    /// producer gets a buffer back instead of making one.
+    ///
+    /// Counting *reuses* rather than distinct addresses is deliberate: an
+    /// allocator will happily hand back the block it has just freed, so
+    /// comparing pointers would pass even if every buffer were being dropped
+    /// on the callback thread — which is the whole thing being prevented.
+    #[test]
+    fn the_producer_refills_returned_buffers_instead_of_allocating() {
+        let (tx, rx) = mpsc::sync_channel(4);
+        let (recycle_tx, recycle_rx) = mpsc::sync_channel(8);
+        let mut source = Source::new(rx, recycle_tx);
+        let rounds = 64u16;
+        let mut reused = 0;
+
+        for round in 0..rounds {
+            let mut buffer = match recycle_rx.try_recv() {
+                Ok(returned) => {
+                    reused += 1;
+                    returned
+                }
+                Err(_) => Vec::new(),
+            };
+            buffer.clear();
+            buffer.extend_from_slice(&[round as i16; 8]);
+            tx.try_send(buffer).expect("queue a chunk");
+            for _ in 0..8 {
+                source.next_sample();
+            }
+        }
+
+        // Only the first couple of rounds can allocate: nothing has come back
+        // yet while the source is still filling its first buffers.
+        assert!(
+            reused >= usize::from(rounds) - 3,
+            "the callback is still freeing buffers instead of returning them: \
+             only {reused} of {rounds} rounds got one back"
+        );
+    }
+
+    /// The flush releases up to nine buffers at once. Dropping them there would
+    /// be nine frees inside a single callback.
+    #[test]
+    fn a_flush_returns_the_discarded_buffers_instead_of_freeing_them() {
+        let (voice_tx, voice_rx) = mpsc::sync_channel(4);
+        let (voice_recycle_tx, _voice_recycle_rx) = mpsc::sync_channel(8);
+        let (media_tx, media_rx) = mpsc::sync_channel(4);
+        let (media_recycle_tx, media_recycle_rx) = mpsc::sync_channel(8);
+        media_tx.try_send(vec![1000i16; 2]).expect("queue media");
+        media_tx
+            .try_send(vec![2000i16; 2])
+            .expect("queue more media");
+        drop(voice_tx);
+        drop(media_tx);
+        let gain = crate::media::gain::Gain::new(1.0);
+        let mut mixer = OutputMixer::new(
+            voice_rx,
+            voice_recycle_tx,
+            media_rx,
+            media_recycle_tx,
+            gain.clone(),
+            1.0,
+        );
+
+        // Take one sample so a partially-drained buffer is also in play.
+        assert_eq!(mixer.next_sample(), Some(1000));
+        gain.flush();
+        assert_eq!(mixer.next_sample(), None, "queued audio is discarded");
+
+        // Both the partially-drained current buffer and the queued one return.
+        assert_eq!(
+            media_recycle_rx.try_iter().count(),
+            2,
+            "every discarded buffer must be returned, not freed in the callback"
+        );
     }
 
     #[test]
     fn mixer_is_silent_only_when_both_sources_are_dry() {
         let mut empty = mixer_of(vec![], vec![], 1.0);
-        assert_eq!(empty.next_sample(), None);
+        assert_eq!(empty.mixer.next_sample(), None);
 
         let mut voice_only = mixer_of(vec![100], vec![], 1.0);
-        assert_eq!(voice_only.next_sample(), Some(100));
-        assert_eq!(voice_only.next_sample(), None);
+        assert_eq!(voice_only.mixer.next_sample(), Some(100));
+        assert_eq!(voice_only.mixer.next_sample(), None);
 
         let mut media_only = mixer_of(vec![], vec![100], 1.0);
-        assert_eq!(media_only.next_sample(), Some(100));
-        assert_eq!(media_only.next_sample(), None);
+        assert_eq!(media_only.mixer.next_sample(), Some(100));
+        assert_eq!(media_only.mixer.next_sample(), None);
     }
 
     #[test]
     fn mixer_sums_both_sources_and_scales_only_the_media_one() {
         let mut full = mixer_of(vec![1000], vec![1000], 1.0);
-        assert_eq!(full.next_sample(), Some(2000));
+        assert_eq!(full.mixer.next_sample(), Some(2000));
 
         // The voice is untouched by the media gain.
         let mut ducked = mixer_of(vec![1000], vec![1000], 0.5);
-        assert_eq!(ducked.next_sample(), Some(1500));
+        assert_eq!(ducked.mixer.next_sample(), Some(1500));
 
         // Media ducked all the way out leaves the voice untouched.
         let mut silent = mixer_of(vec![1000], vec![1000], 0.0);
-        assert_eq!(silent.next_sample(), Some(1000));
+        assert_eq!(silent.mixer.next_sample(), Some(1000));
     }
 
     /// A ducked recorded show must resume in place. The decoder stops, but the
@@ -1121,7 +1328,16 @@ mod tests {
         drop(voice_tx);
         drop(media_tx);
         let gain = crate::media::gain::Gain::new(0.0);
-        let mut mixer = OutputMixer::new(voice_rx, media_rx, gain.clone(), 1.0);
+        let (voice_recycle_tx, _voice_recycle) = mpsc::sync_channel(8);
+        let (media_recycle_tx, _media_recycle) = mpsc::sync_channel(8);
+        let mut mixer = OutputMixer::new(
+            voice_rx,
+            voice_recycle_tx,
+            media_rx,
+            media_recycle_tx,
+            gain.clone(),
+            1.0,
+        );
 
         assert_eq!(
             mixer.next_sample(),
@@ -1140,10 +1356,10 @@ mod tests {
     #[test]
     fn mixer_saturates_instead_of_wrapping() {
         let mut hot = mixer_of(vec![30000], vec![30000], 1.0);
-        assert_eq!(hot.next_sample(), Some(i16::MAX));
+        assert_eq!(hot.mixer.next_sample(), Some(i16::MAX));
 
         let mut cold = mixer_of(vec![-30000], vec![-30000], 1.0);
-        assert_eq!(cold.next_sample(), Some(i16::MIN));
+        assert_eq!(cold.mixer.next_sample(), Some(i16::MIN));
     }
 
     #[test]
@@ -1154,7 +1370,16 @@ mod tests {
         drop(voice_tx);
         drop(media_tx);
         let gain = crate::media::gain::Gain::new(0.0);
-        let mut mixer = OutputMixer::new(voice_rx, media_rx, gain.clone(), 0.25);
+        let (voice_recycle_tx, _voice_recycle) = mpsc::sync_channel(8);
+        let (media_recycle_tx, _media_recycle) = mpsc::sync_channel(8);
+        let mut mixer = OutputMixer::new(
+            voice_rx,
+            voice_recycle_tx,
+            media_rx,
+            media_recycle_tx,
+            gain.clone(),
+            0.25,
+        );
 
         // Ramping up from 0: the first sample is one step in, not the target.
         gain.ramp_to(1.0);
@@ -1175,7 +1400,16 @@ mod tests {
         drop(voice_tx);
         drop(media_tx);
         let gain = crate::media::gain::Gain::new(1.0);
-        let mut mixer = OutputMixer::new(voice_rx, media_rx, gain.clone(), 1.0);
+        let (voice_recycle_tx, _voice_recycle) = mpsc::sync_channel(8);
+        let (media_recycle_tx, _media_recycle) = mpsc::sync_channel(8);
+        let mut mixer = OutputMixer::new(
+            voice_rx,
+            voice_recycle_tx,
+            media_rx,
+            media_recycle_tx,
+            gain.clone(),
+            1.0,
+        );
 
         // One sample of the old source is consumed before the switch.
         assert_eq!(mixer.next_sample(), Some(1000));

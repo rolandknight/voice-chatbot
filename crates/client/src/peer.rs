@@ -8,7 +8,7 @@
 use std::collections::VecDeque;
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::mpsc::{SyncSender, TrySendError};
+use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -182,7 +182,10 @@ impl Peer {
     /// Drive WebRTC and bridge mono device PCM until `cancel` completes.
     ///
     /// `input` is expected to be a bounded Tokio channel fed by the capture
-    /// callback. `output` is a bounded standard-library synchronous channel.
+    /// callback. `output` is a bounded standard-library synchronous channel,
+    /// and `voice_recycle` carries its spent buffers back to be refilled here:
+    /// the callback must never free one, since `free` can take the allocator's
+    /// lock.
     /// Incoming RTP bursts are paced into that channel at their decoded sample
     /// rate, and neither direction blocks the RTC loop behind an audio device.
     pub async fn run<F>(
@@ -191,12 +194,13 @@ impl Peer {
         output_rate: u32,
         mut input: mpsc::Receiver<Vec<i16>>,
         output: SyncSender<Vec<i16>>,
+        voice_recycle: Receiver<Vec<i16>>,
         cancel: F,
     ) -> Result<()>
     where
         F: Future<Output = ()>,
     {
-        let runtime = AudioRuntime::new(input_rate, output_rate);
+        let runtime = AudioRuntime::new(input_rate, output_rate, voice_recycle);
         let mut runtime = match runtime {
             Ok(runtime) => runtime,
             Err(error) => {
@@ -488,7 +492,7 @@ struct AudioRuntime {
 }
 
 impl AudioRuntime {
-    fn new(input_rate: u32, output_rate: u32) -> Result<Self> {
+    fn new(input_rate: u32, output_rate: u32, voice_recycle: Receiver<Vec<i16>>) -> Result<Self> {
         let encoder = Encoder::new(SampleRate::Hz48000, Channels::Mono, Application::Voip)
             .context("create mono Opus VoIP encoder")?;
         let decoder = Decoder::new(SampleRate::Hz48000, Channels::Mono)
@@ -502,7 +506,7 @@ impl AudioRuntime {
                 .context("create playback resampler")?,
             frames: PcmFrames::default(),
             clock: RtpClock::new(Instant::now()),
-            playback: PlayoutQueue::new(output_rate),
+            playback: PlayoutQueue::new(output_rate, voice_recycle),
             opus_packet: vec![0; OPUS_MAX_PACKET_BYTES],
             decoded: vec![0; OPUS_MAX_DECODE_SAMPLES],
             connected: false,
@@ -574,7 +578,7 @@ impl AudioRuntime {
             return Ok(());
         }
 
-        match self.playback.push(converted, now) {
+        match self.playback.push(&converted, now) {
             None => tracing::warn!(
                 max_seconds = MAX_PLAYBACK_SECONDS,
                 "decoded audio frame exceeds the playback buffer; dropping it"
@@ -631,35 +635,61 @@ struct PlayoutQueue {
     sample_rate: u32,
     max_samples: usize,
     next_wallclock: Option<Instant>,
+    /// Buffers the audio callback has finished with. Refilled here rather than
+    /// freed there: `free` can take the allocator's lock, and that callback is
+    /// the one thread that must never block.
+    recycle: Receiver<Vec<i16>>,
 }
 
 impl PlayoutQueue {
-    fn new(sample_rate: u32) -> Self {
-        Self::with_max_samples(sample_rate, sample_rate as usize * MAX_PLAYBACK_SECONDS)
+    fn new(sample_rate: u32, recycle: Receiver<Vec<i16>>) -> Self {
+        Self::with_max_samples_and_recycling(
+            sample_rate,
+            sample_rate as usize * MAX_PLAYBACK_SECONDS,
+            recycle,
+        )
     }
 
+    /// A queue with nothing being handed back: every chunk allocates, as it
+    /// does before the callback has returned its first buffer.
+    #[cfg(test)]
     fn with_max_samples(sample_rate: u32, max_samples: usize) -> Self {
+        let (_tx, rx) = std::sync::mpsc::sync_channel(1);
+        Self::with_max_samples_and_recycling(sample_rate, max_samples, rx)
+    }
+
+    fn with_max_samples_and_recycling(
+        sample_rate: u32,
+        max_samples: usize,
+        recycle: Receiver<Vec<i16>>,
+    ) -> Self {
         Self {
             chunks: VecDeque::new(),
             queued_samples: 0,
             sample_rate,
             max_samples,
             next_wallclock: None,
+            recycle,
         }
     }
 
     /// Queue a decoded chunk and return how many older chunks were evicted.
     /// `None` means the new chunk itself is larger than the entire bound.
-    fn push(&mut self, chunk: Vec<i16>, now: Instant) -> Option<usize> {
-        if chunk.is_empty() {
+    ///
+    /// Takes a slice rather than a `Vec` so the samples can be copied into a
+    /// buffer the audio callback has handed back, instead of a fresh
+    /// allocation. Copying costs a memcpy on this thread and saves a `free` on
+    /// the callback's.
+    fn push(&mut self, samples: &[i16], now: Instant) -> Option<usize> {
+        if samples.is_empty() {
             return Some(0);
         }
-        if chunk.len() > self.max_samples {
+        if samples.len() > self.max_samples {
             return None;
         }
 
         let mut dropped_stale_audio = 0;
-        while self.queued_samples.saturating_add(chunk.len()) > self.max_samples {
+        while self.queued_samples.saturating_add(samples.len()) > self.max_samples {
             let Some(stale) = self.chunks.pop_front() else {
                 break;
             };
@@ -675,6 +705,9 @@ impl PlayoutQueue {
                     .unwrap_or(now),
             );
         }
+        let mut chunk = self.recycle.try_recv().unwrap_or_default();
+        chunk.clear();
+        chunk.extend_from_slice(samples);
         self.queued_samples += chunk.len();
         self.chunks.push_back(chunk);
         Some(dropped_stale_audio)
@@ -820,11 +853,13 @@ mod tests {
 
         let (_input_tx, input_rx) = mpsc::channel(1);
         let (output_tx, _output_rx) = std::sync::mpsc::sync_channel(1);
+        let (_recycle_tx, recycle_rx) = std::sync::mpsc::sync_channel(1);
         peer.run(
             RTP_RATE,
             RTP_RATE,
             input_rx,
             output_tx,
+            recycle_rx,
             std::future::ready(()),
         )
         .await
@@ -877,6 +912,34 @@ mod tests {
         );
     }
 
+    /// The audio callback returns spent buffers rather than freeing them on
+    /// its own thread. That only helps if this queue refills them, so assert
+    /// the very allocation handed back is the one that goes out again.
+    #[test]
+    fn playout_refills_a_returned_buffer_instead_of_allocating() {
+        let epoch = Instant::now();
+        let (recycle_tx, recycle_rx) = std::sync::mpsc::sync_channel(4);
+        let mut queue = PlayoutQueue::with_max_samples_and_recycling(
+            RTP_RATE,
+            OPUS_FRAME_SAMPLES * 4,
+            recycle_rx,
+        );
+        let spare = vec![0i16; OPUS_FRAME_SAMPLES];
+        let spare_alloc = spare.as_ptr();
+        recycle_tx.try_send(spare).expect("hand a buffer back");
+
+        assert_eq!(queue.push(&[7; OPUS_FRAME_SAMPLES], epoch), Some(0));
+        let (output, received) = std::sync::mpsc::sync_channel(4);
+        queue.deliver_due(&output, epoch).unwrap();
+        let delivered = received.try_recv().expect("a delivered chunk");
+        assert_eq!(
+            delivered.as_ptr(),
+            spare_alloc,
+            "the returned allocation must be refilled, not replaced"
+        );
+        assert_eq!(delivered, vec![7; OPUS_FRAME_SAMPLES]);
+    }
+
     #[test]
     fn playout_is_paced_and_evicts_oldest_audio_when_bounded() {
         let epoch = Instant::now();
@@ -885,11 +948,11 @@ mod tests {
         let second = vec![2; OPUS_FRAME_SAMPLES];
         let third = vec![3; OPUS_FRAME_SAMPLES];
 
-        assert_eq!(queue.push(first, epoch), Some(0));
-        assert_eq!(queue.push(second.clone(), epoch), Some(0));
-        assert_eq!(queue.push(third.clone(), epoch), Some(1));
+        assert_eq!(queue.push(&first, epoch), Some(0));
+        assert_eq!(queue.push(&second, epoch), Some(0));
+        assert_eq!(queue.push(&third, epoch), Some(1));
         assert_eq!(queue.queued_samples, OPUS_FRAME_SAMPLES * 2);
-        assert_eq!(queue.push(vec![4; OPUS_FRAME_SAMPLES * 3], epoch), None);
+        assert_eq!(queue.push(&vec![4; OPUS_FRAME_SAMPLES * 3], epoch), None);
 
         let (output, received) = std::sync::mpsc::sync_channel(4);
         queue.deliver_due(&output, epoch).unwrap();
@@ -905,10 +968,7 @@ mod tests {
         // Even though the queue was momentarily empty, a packet arriving early
         // retains the existing sample clock instead of playing immediately.
         assert_eq!(
-            queue.push(
-                vec![4; OPUS_FRAME_SAMPLES],
-                epoch + Duration::from_millis(25)
-            ),
+            queue.push(&[4; OPUS_FRAME_SAMPLES], epoch + Duration::from_millis(25)),
             Some(0)
         );
         assert!(!queue.is_due(epoch + Duration::from_millis(39)));
@@ -920,7 +980,7 @@ mod tests {
         let epoch = Instant::now();
         let mut queue = PlayoutQueue::with_max_samples(RTP_RATE, OPUS_FRAME_SAMPLES);
         let audio = vec![7; OPUS_FRAME_SAMPLES];
-        assert_eq!(queue.push(audio.clone(), epoch), Some(0));
+        assert_eq!(queue.push(&audio, epoch), Some(0));
 
         let (output, received) = std::sync::mpsc::sync_channel(1);
         output.try_send(vec![9]).unwrap();
