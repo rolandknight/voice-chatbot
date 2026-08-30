@@ -489,10 +489,15 @@ impl Skill for CancelTimer {
         match candidates.as_slice() {
             [] => {
                 let running: Vec<String> = entries.iter().map(a_timer).collect();
-                let what = if raw.is_empty() {
-                    duration_adjective(minutes.unwrap_or_default())
-                } else {
-                    raw.to_string()
+                // A name that reached this arm is always `Some`: a name that
+                // normalizes to `None` (like "the timer") can't produce an
+                // empty candidate list — it leaves `candidates` as the whole
+                // book instead. Speaking the *normalized* name (not `raw`)
+                // is what keeps "the rice timer" from echoing back as "a the
+                // rice timer timer".
+                let what = match &wanted {
+                    Some(w) => w.clone(),
+                    None => duration_adjective(minutes.unwrap_or_default()),
                 };
                 format!(
                     "You don't have a {what} timer. You have {}.",
@@ -982,6 +987,31 @@ mod tests {
         assert_eq!(state.with_timers(|b| b.len()), 2);
     }
 
+    /// The model routinely wraps a name the way `SetTimer`'s own callers do
+    /// ("the rice timer", not bare "rice"). The no-match description must be
+    /// built from the *normalized* name, not the raw phrase — otherwise this
+    /// speaks the doubled, oddly-capitalized "You don't have a the rice timer
+    /// timer."
+    #[tokio::test(start_paused = true)]
+    async fn an_unknown_wrapped_name_speaks_the_normalized_name() {
+        let (ctx, _rx, state) = board(&[(5.0, Some("pasta"))]).await;
+        assert_eq!(
+            CancelTimer.call(&json!({"name": "the rice timer"}), &ctx).await,
+            "You don't have a rice timer. You have a pasta timer."
+        );
+        assert_eq!(state.with_timers(|b| b.len()), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unknown_duration_says_what_is_running() {
+        let (ctx, _rx, state) = board(&[(5.0, Some("pasta")), (10.0, None)]).await;
+        assert_eq!(
+            CancelTimer.call(&json!({"minutes": 7}), &ctx).await,
+            "You don't have a 7 minute timer. You have a pasta timer and a 10 minute timer."
+        );
+        assert_eq!(state.with_timers(|b| b.len()), 2);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn cancel_all_clears_the_board() {
         let (ctx, _rx, state) = board(&[(5.0, Some("pasta")), (10.0, None)]).await;
@@ -993,6 +1023,47 @@ mod tests {
         // And the call is still usable afterwards.
         SetTimer.call(&json!({"minutes": 1, "label": "tea"}), &ctx).await;
         assert_eq!(state.with_timers(|b| b.len()), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancel_all_with_one_timer_uses_the_singular() {
+        let (ctx, _rx, state) = board(&[(5.0, Some("pasta"))]).await;
+        assert_eq!(
+            CancelTimer.call(&json!({"all": true}), &ctx).await,
+            "Cancelled your timer."
+        );
+        assert!(state.with_timers(|b| b.is_empty()));
+    }
+
+    /// The end-to-end proof of the send/cancel race fix `SetTimer` relies on:
+    /// a timer that is actively ringing (already announced once, sleeping
+    /// until its next repeat) gets silenced by `CancelTimer::call` itself —
+    /// not just by calling `TimerBook::cancel` directly — and stays silent
+    /// through every remaining repeat.
+    #[tokio::test(start_paused = true)]
+    async fn cancelling_a_ringing_timer_silences_it_end_to_end() {
+        let (ctx, mut rx, state) = live_ctx();
+        SetTimer.call(&json!({"minutes": 1, "label": "tea"}), &ctx).await;
+        tokio::time::advance(Duration::from_secs(61)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(spoken(&mut rx), vec!["Your tea timer is up."], "first announcement");
+        assert!(
+            state.with_timers(|b| b.entries()[0].ringing),
+            "the timer is mid-ring when we cancel it"
+        );
+
+        assert_eq!(
+            CancelTimer.call(&json!({"name": "tea"}), &ctx).await,
+            "Cancelled the tea timer."
+        );
+
+        tokio::time::advance(REPEAT_EVERY * 10).await;
+        tokio::task::yield_now().await;
+        assert!(
+            spoken(&mut rx).is_empty(),
+            "no announcement after cancelling a ringing timer"
+        );
+        assert!(state.with_timers(|b| b.is_empty()), "book is cleaned up");
     }
 
     #[tokio::test(start_paused = true)]
