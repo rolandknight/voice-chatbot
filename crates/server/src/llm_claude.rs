@@ -165,6 +165,21 @@ impl ClaudeLlm {
     }
 }
 
+/// Append to a string field of a rebuilt content block, creating it if absent.
+fn append_str(
+    blocks: &mut std::collections::BTreeMap<u64, Value>,
+    abs: u64,
+    field: &str,
+    text: &str,
+) {
+    let Some(block) = blocks.get_mut(&abs) else {
+        return;
+    };
+    let mut current = block[field].as_str().unwrap_or("").to_string();
+    current.push_str(text);
+    block[field] = json!(current);
+}
+
 fn content_string(v: &Value) -> String {
     match v {
         Value::Null => String::new(),
@@ -280,6 +295,20 @@ struct Folder {
     /// two, and only this one ends the caller's silence.
     first_text_at: Option<Instant>,
     stop_reason: Option<String>,
+    /// The assistant turn's raw content blocks, keyed by absolute index.
+    ///
+    /// A `pause_turn` is resumed by sending this turn back *verbatim*: the API
+    /// rejects a `web_search_tool_result` whose `encrypted_content` is missing
+    /// or altered. `index` restarts at 0 in every request of the turn, hence
+    /// the offset.
+    blocks: std::collections::BTreeMap<u64, Value>,
+    block_index_offset: u64,
+    /// Partial `input` JSON by absolute index, for `tool_use` and
+    /// `server_tool_use` alike.
+    block_input: std::collections::HashMap<u64, String>,
+    /// Set by `message_stop`; the stream driver decides whether that ends the
+    /// turn or starts a resume.
+    request_done: bool,
 }
 
 impl Folder {
@@ -301,6 +330,10 @@ impl Folder {
             first_output_at: None,
             first_text_at: None,
             stop_reason: None,
+            blocks: Default::default(),
+            block_index_offset: 0,
+            block_input: Default::default(),
+            request_done: false,
         }
     }
 
@@ -309,6 +342,34 @@ impl Folder {
             self.started = true;
             self.pending.push_back(Frame::LlmResponseStart);
         }
+    }
+
+    fn abs(&self, idx: u64) -> u64 {
+        self.block_index_offset + idx
+    }
+
+    /// Start another request in the same logical turn (a `pause_turn` resume).
+    /// Blocks and timings carry over; per-request state does not.
+    ///
+    /// Not yet called outside tests — the resume driver lands in the next
+    /// task, which is why this is still `allow(dead_code)`.
+    #[allow(dead_code)]
+    fn begin_request(&mut self) {
+        self.block_index_offset = self.blocks.keys().last().map_or(0, |k| k + 1);
+        self.block_input.clear();
+        self.tool_blocks.clear();
+        self.buf.clear();
+        self.stop_reason = None;
+        self.request_done = false;
+    }
+
+    /// The assistant turn so far, in wire order.
+    ///
+    /// Not yet called outside tests — the resume driver lands in the next
+    /// task, which is why this is still `allow(dead_code)`.
+    #[allow(dead_code)]
+    fn assistant_blocks(&self) -> Vec<Value> {
+        self.blocks.values().cloned().collect()
     }
 
     /// One SSE `data:` payload (pure — the wire-fixture seam).
@@ -324,6 +385,7 @@ impl Folder {
             "content_block_start" => {
                 let idx = ev["index"].as_u64().unwrap_or(0);
                 let block = &ev["content_block"];
+                self.blocks.insert(self.abs(idx), block.clone());
                 if block["type"] == "tool_use" {
                     self.tool_blocks.insert(
                         idx,
@@ -345,6 +407,7 @@ impl Folder {
                             self.first_output_at.get_or_insert(now);
                             self.first_text_at.get_or_insert(now);
                             self.pending.push_back(Frame::LlmText(t.to_string()));
+                            append_str(&mut self.blocks, self.block_index_offset + idx, "text", t);
                         }
                     }
                     // Adaptive thinking (the Opus 5 default). Never a spoken
@@ -353,17 +416,56 @@ impl Folder {
                     // paired `signature_delta` needs nothing from us.
                     "thinking_delta" => {
                         self.first_output_at.get_or_insert_with(Instant::now);
+                        if let Some(t) = delta["thinking"].as_str() {
+                            append_str(
+                                &mut self.blocks,
+                                self.block_index_offset + idx,
+                                "thinking",
+                                t,
+                            );
+                        }
+                    }
+                    // Thinking blocks are only replayable with their signature.
+                    "signature_delta" => {
+                        if let Some(b) = self.blocks.get_mut(&(self.block_index_offset + idx)) {
+                            b["signature"] = delta["signature"].clone();
+                        }
+                    }
+                    "citations_delta" => {
+                        if let Some(b) = self.blocks.get_mut(&(self.block_index_offset + idx)) {
+                            if !b["citations"].is_array() {
+                                b["citations"] = json!([]);
+                            }
+                            if let Some(a) = b["citations"].as_array_mut() {
+                                a.push(delta["citation"].clone());
+                            }
+                        }
                     }
                     "input_json_delta" => {
+                        let partial = delta["partial_json"].as_str().unwrap_or("");
                         if let Some(b) = self.tool_blocks.get_mut(&idx) {
-                            b.2.push_str(delta["partial_json"].as_str().unwrap_or(""));
+                            b.2.push_str(partial);
                         }
+                        self.block_input
+                            .entry(self.block_index_offset + idx)
+                            .or_default()
+                            .push_str(partial);
                     }
                     _ => {}
                 }
             }
             "content_block_stop" => {
                 let idx = ev["index"].as_u64().unwrap_or(0);
+                let abs = self.abs(idx);
+                if let Some(raw) = self.block_input.remove(&abs) {
+                    if let Some(b) = self.blocks.get_mut(&abs) {
+                        b["input"] = if raw.trim().is_empty() {
+                            json!({})
+                        } else {
+                            serde_json::from_str(&raw).unwrap_or_else(|_| json!({}))
+                        };
+                    }
+                }
                 if let Some((id, name, raw)) = self.tool_blocks.remove(&idx) {
                     if name.is_empty() {
                         return;
@@ -394,10 +496,10 @@ impl Folder {
                     self.stop_reason = Some(r.to_string());
                 }
             }
-            "message_stop" => self.finish(),
+            "message_stop" => self.request_done = true,
             "error" => {
                 tracing::warn!(error = %ev["error"], "claude: stream error event");
-                self.finish();
+                self.request_done = true;
             }
             _ => {}
         }
@@ -584,6 +686,7 @@ mod tests {
             r#"data: {"type":"message_stop"}"#,
         ];
         f.feed((lines.join("\n") + "\n").as_bytes());
+        f.finish();
         let frames: Vec<Frame> = f.pending.drain(..).collect();
         assert!(matches!(frames[0], Frame::LlmResponseStart));
         assert!(matches!(&frames[1], Frame::LlmText(t) if t == "One sec."));
@@ -718,6 +821,7 @@ mod tests {
     fn frames_of(lines: &[&str]) -> Vec<Frame> {
         let mut f = Folder::new("m".into());
         f.feed((lines.join("\n") + "\n").as_bytes());
+        f.finish();
         f.pending.drain(..).collect()
     }
 
@@ -778,6 +882,76 @@ mod tests {
         assert!(frames
             .iter()
             .any(|f| matches!(f, Frame::FunctionCallsStarted(_))));
+    }
+
+    /// The doc's own streaming example, trimmed: text, the search query, the
+    /// results, then the cited answer.
+    const SEARCH_STREAM: [&str; 8] = [
+        r#"data: {"type":"message_start","message":{"usage":{"input_tokens":10}}}"#,
+        r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+        r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Let me check."}}"#,
+        r#"data: {"type":"content_block_stop","index":0}"#,
+        r#"data: {"type":"content_block_start","index":1,"content_block":{"type":"server_tool_use","id":"srvtoolu_1","name":"web_search"}}"#,
+        r#"data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"cineplex etobicoke showtimes\"}"}}"#,
+        r#"data: {"type":"content_block_stop","index":1}"#,
+        r#"data: {"type":"content_block_start","index":2,"content_block":{"type":"web_search_tool_result","tool_use_id":"srvtoolu_1","content":[{"type":"web_search_result","url":"https://example.com","title":"Showtimes","encrypted_content":"EqgfCioIA"}]}}"#,
+    ];
+
+    #[test]
+    fn a_server_tool_use_block_is_never_dispatched_as_a_skill() {
+        let frames = frames_of(&SEARCH_STREAM);
+        assert_eq!(spoken(&frames), "Let me check.");
+        assert!(
+            !frames
+                .iter()
+                .any(|f| matches!(f, Frame::FunctionCallsStarted(_))),
+            "server_tool_use must never become a client-side tool call: {frames:?}"
+        );
+    }
+
+    #[test]
+    fn assistant_blocks_are_rebuilt_verbatim_for_a_resume() {
+        let mut f = Folder::new("m".into());
+        f.feed((SEARCH_STREAM.join("\n") + "\n").as_bytes());
+        let blocks = f.assistant_blocks();
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[0], json!({"type": "text", "text": "Let me check."}));
+        assert_eq!(blocks[1]["type"], "server_tool_use");
+        assert_eq!(
+            blocks[1]["input"],
+            json!({"query": "cineplex etobicoke showtimes"})
+        );
+        assert_eq!(
+            blocks[2]["content"][0]["encrypted_content"], "EqgfCioIA",
+            "encrypted_content must survive verbatim or the resume 400s"
+        );
+    }
+
+    #[test]
+    fn a_resumed_request_appends_its_blocks_after_the_paused_ones() {
+        let mut f = Folder::new("m".into());
+        f.feed((SEARCH_STREAM.join("\n") + "\n").as_bytes());
+        f.begin_request();
+        f.feed(
+            ([
+                r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+                r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Nothing showing."}}"#,
+                r#"data: {"type":"content_block_stop","index":0}"#,
+            ]
+            .join("\n")
+                + "\n")
+                .as_bytes(),
+        );
+        let blocks = f.assistant_blocks();
+        assert_eq!(
+            blocks.len(),
+            4,
+            "index restarts at 0 per request: {blocks:?}"
+        );
+        assert_eq!(
+            blocks[3],
+            json!({"type": "text", "text": "Nothing showing."})
+        );
     }
 }
 
