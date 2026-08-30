@@ -1,0 +1,43 @@
+# Autostart unit for the native client. `@INSTALL_DIR@` and `@RUN_USER@` are
+# substituted by deploy/rpi/install.sh; edit them there, not here.
+[Unit]
+Description=voice-chatbot native WebRTC client
+# sound.target only covers the cards present at boot. A USB speakerphone can
+# still be enumerating when we start -- that race is what Restart= handles.
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@RUN_USER@
+# cpal drives ALSA directly and prefers the raw `plughw:` PCM (alias_rank in
+# crates/client/src/audio.rs), never PulseAudio or PipeWire. So there is no
+# user session to wait for and nothing to inherit but /dev/snd access, which
+# is the whole reason this is a system unit rather than a --user one.
+SupplementaryGroups=audio
+NoNewPrivileges=yes
+
+# Both runtime paths are relative to the working directory: the client loads
+# ./.env itself (crates/env-file, before clap reads its env fallbacks) and
+# WAKE_DIR defaults to ./models/wakeword.
+WorkingDirectory=@INSTALL_DIR@
+# Optional ops override, applied on top of .env. The leading `-` keeps a
+# missing file from failing the unit.
+EnvironmentFile=-/etc/default/voice-chatbot-client
+ExecStart=@INSTALL_DIR@/voice-chatbot-client call
+
+# The client's only shutdown path is its Ctrl-C watcher (run_call in
+# crates/client/src/main.rs). SIGTERM has no handler, so systemd's default
+# would kill it mid-call instead of closing the peer and the ALSA streams.
+KillSignal=SIGINT
+TimeoutStopSec=10
+
+# The client already retries an unreachable server by itself, every 2 s and
+# forever (RECONNECT_DELAY), so a late-booting server needs nothing from
+# systemd. This is for crashes and for the USB race above: no speakerphone yet
+# means device selection fails, and we try again in 5 s.
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -26,6 +26,13 @@ PI_TOOLCHAIN ?= 1.97.1
 # invalidate the other's artifacts.
 PI_TARGET_DIR ?= target/pi
 PI_CLIENT_BIN := $(PI_TARGET_DIR)/$(PI_TARGET)/release/voice-chatbot-client
+# Deploying that binary to the Pi: `make deploy-pi PI_HOST=pi@raspberrypi.local`.
+# PI_STAGE is relative to the Pi user's home -- rsync lands there unprivileged,
+# and only the installer it runs needs sudo.
+PI_HOST ?=
+PI_DIR ?= /opt/voice-chatbot
+PI_STAGE ?= .cache/voice-chatbot-deploy
+PI_SERVICE ?= voice-chatbot-client
 PI_CROSS_ENV := CARGO_HOME=$(HOME)/.cargo RUSTUP_HOME=$(HOME)/.rustup \
     PATH=$(HOME)/.cargo/bin:$$PATH CARGO_TARGET_DIR=$(PI_TARGET_DIR) \
     PKG_CONFIG_ALLOW_CROSS=1 PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig
@@ -60,7 +67,7 @@ SERVER_BUILD_ENV := PYO3_PYTHON=$(QWEN_PYTHON) NEMO_SPEECH_LIB_DIR=$(NEMO_SPEECH
 comma := ,
 WS_FEATURES := $(subst $(eval) ,$(comma),$(addprefix voice-chatbot-server/,$(subst $(comma), ,$(SERVER_FEATURES))))
 
-.PHONY: build server-build client-build client-build-pi server call devices sfx-up sfx-down sfx-status test check clean help
+.PHONY: build server-build client-build client-build-pi deploy-pi server call devices sfx-up sfx-down sfx-status test check clean help
 
 build: server-build client-build  ## Build server + client (release)
 
@@ -80,6 +87,17 @@ client-build-pi:  ## Cross-build the client for a Raspberry Pi (aarch64; needs D
 	$(PI_CROSS_ENV) cross +$(PI_TOOLCHAIN) build --release --target $(PI_TARGET) -p voice-chatbot-client
 	@echo "built $(PI_CLIENT_BIN)"
 	@file $(PI_CLIENT_BIN) 2>/dev/null || true
+
+deploy-pi: client-build-pi  ## Ship the cross-built client to a Pi and install the autostart service (PI_HOST=pi@host)
+	@[ -n "$(PI_HOST)" ] || { echo "set PI_HOST, e.g. make deploy-pi PI_HOST=pi@raspberrypi.local"; exit 1; }
+	@ssh $(PI_HOST) 'command -v rsync >/dev/null' || { echo "the Pi has no rsync (sudo apt install rsync)"; exit 1; }
+	ssh $(PI_HOST) 'mkdir -p $(PI_STAGE)/models/wakeword'
+	rsync -az $(PI_CLIENT_BIN) $(PI_HOST):$(PI_STAGE)/voice-chatbot-client
+	rsync -az deploy/rpi/ $(PI_HOST):$(PI_STAGE)/
+	rsync -az --delete --include='hey_*.onnx' --exclude='*' \
+	    models/wakeword/ $(PI_HOST):$(PI_STAGE)/models/wakeword/
+	ssh -t $(PI_HOST) 'sudo env INSTALL_DIR=$(PI_DIR) SERVICE_NAME=$(PI_SERVICE) \
+	    "$$HOME/$(PI_STAGE)/install.sh"'
 
 server: server-build  ## Build if needed, then run the server (reads .env)
 	./$(SERVER_BIN)
