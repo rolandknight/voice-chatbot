@@ -173,6 +173,38 @@ fn with_system_prompt(
     out
 }
 
+/// Appended to the system prompt on the Claude branch.
+///
+/// This used to arrive as `ask_claude`'s tool *result*, which meant Claude's
+/// history carried a call to a tool Claude is no longer shown — and meant the
+/// brevity rule applied only to the turn immediately after the flip. As a
+/// system suffix it holds for every Claude turn, and `strip_ask_claude` can run
+/// unconditionally.
+pub(crate) const CLAUDE_SYSTEM_SUFFIX: &str =
+    "\n\nYou are now answering as Claude, on a live voice call. \
+Answer the caller directly — never say you are handing over, and never ask them to repeat \
+themselves. Keep replies to one or two short spoken sentences, and offer to go deeper if they \
+want more. If you are going to search the web, say a short line first — \"let me check\" — so the \
+caller is not sitting in silence while the search runs.";
+
+/// Append `suffix` to `ctx`'s system message, creating one if there is none.
+fn append_system_suffix(ctx: &mut flowcat_core::processor::frame::LlmContext, suffix: &str) {
+    match ctx.messages.first_mut() {
+        Some(first) if first.get("role").and_then(|r| r.as_str()) == Some("system") => {
+            let base = first
+                .get("content")
+                .and_then(|c| c.as_str())
+                .unwrap_or_default()
+                .to_string();
+            *first = serde_json::json!({"role": "system", "content": format!("{base}{suffix}")});
+        }
+        _ => ctx.messages.insert(
+            0,
+            serde_json::json!({"role": "system", "content": suffix.trim_start()}),
+        ),
+    }
+}
+
 /// The tool whose exchanges the local model must not see (see [`strip_ask_claude`]).
 const ASK_CLAUDE: &str = "ask_claude";
 
@@ -204,7 +236,9 @@ fn has_ask_claude(messages: &[serde_json::Value]) -> bool {
 /// of the phrasings that fire reliably on a clean context ("I am already
 /// Claude, though I suppose the distinction is largely…"). Hiding just this
 /// exchange restored every one of them. Claude's spoken answers stay — only the
-/// call and its result go, and only on the branch that runs the local model.
+/// call and its result go. It runs on both branches: Claude receives the
+/// handover as a system-prompt suffix (`CLAUDE_SYSTEM_SUFFIX`) instead, so it
+/// never sees a call to a tool that is not in its own tool list.
 fn strip_ask_claude(messages: &mut Vec<serde_json::Value>) {
     let mut dropped: Vec<String> = Vec::new();
     messages.retain_mut(|m| match m["role"].as_str().unwrap_or("") {
@@ -259,12 +293,12 @@ impl flowcat_core::service::LlmService for SwitchingLlm {
         ctx: &'a flowcat_core::processor::frame::LlmContext,
     ) -> flowcat_core::Result<futures::stream::BoxStream<'a, flowcat_core::processor::frame::Frame>>
     {
-        // Two rewrites, both landing in `scratch` so the returned stream can
-        // borrow it: the persona prompt (prompt.<persona>.txt, selected by a
-        // wake word or switch_persona) replacing the default system message,
-        // and — on the local branch only — hiding the ask_claude exchange.
-        // Split borrows: the stream borrows `scratch` while `local`/`claude`
-        // are borrowed mutably.
+        // Up to three rewrites, all landing in `scratch` so the returned stream
+        // can borrow it: the persona prompt (prompt.<persona>.txt, selected by
+        // a wake word or switch_persona) replacing the default system message,
+        // the Claude handover suffix appended on the Claude branch, and the
+        // ask_claude exchange hidden from both backends. Split borrows: the
+        // stream borrows `scratch` while `local`/`claude` are borrowed mutably.
         let Self {
             local,
             claude,
@@ -274,20 +308,23 @@ impl flowcat_core::service::LlmService for SwitchingLlm {
         let backend = state.backend();
         let on_claude = claude.is_some() && backend == crate::skills::LlmBackend::Claude;
         let prompt = state.prompt();
-        let hide_ask_claude = !on_claude && has_ask_claude(&ctx.messages);
-        let ctx: &'a flowcat_core::processor::frame::LlmContext =
-            if prompt.is_some() || hide_ask_claude {
-                *scratch = match &prompt {
-                    Some(p) => with_system_prompt(ctx, p),
-                    None => ctx.clone(),
-                };
-                if hide_ask_claude {
-                    strip_ask_claude(&mut scratch.messages);
-                }
-                scratch
-            } else {
-                ctx
+        // The ask_claude exchange is hidden from *both* backends now: from the
+        // local model because reading it back convinces it that it already is
+        // Claude, and from Claude because it names a tool Claude is not shown.
+        let rewrite = prompt.is_some() || on_claude || has_ask_claude(&ctx.messages);
+        let ctx: &'a flowcat_core::processor::frame::LlmContext = if rewrite {
+            *scratch = match &prompt {
+                Some(p) => with_system_prompt(ctx, p),
+                None => ctx.clone(),
             };
+            if on_claude {
+                append_system_suffix(scratch, CLAUDE_SYSTEM_SUFFIX);
+            }
+            strip_ask_claude(&mut scratch.messages);
+            scratch
+        } else {
+            ctx
+        };
         match (claude, backend) {
             (Some(c), crate::skills::LlmBackend::Claude) => c.run_llm(ctx).await,
             _ => local.run_llm(ctx).await,
@@ -701,5 +738,51 @@ mod prompt_tests {
             None,
             "no prompt.babel.txt in this map → default"
         );
+    }
+
+    fn ask_claude_ctx() -> flowcat_core::processor::frame::LlmContext {
+        flowcat_core::processor::frame::LlmContext {
+            messages: vec![
+                serde_json::json!({"role": "system", "content": "Be Babel."}),
+                serde_json::json!({"role": "user", "content": "Use Claude to find showtimes"}),
+                serde_json::json!({"role": "assistant", "content": null, "tool_calls": [
+                    {"id": "c1", "type": "function", "function": {"name": "ask_claude", "arguments": "{}"}}
+                ]}),
+                serde_json::json!({"role": "tool", "tool_call_id": "c1", "content": "handover"}),
+            ],
+            tools: vec![],
+        }
+    }
+
+    #[test]
+    fn the_ask_claude_exchange_is_stripped_for_both_backends() {
+        let mut messages = ask_claude_ctx().messages;
+        strip_ask_claude(&mut messages);
+        let roles: Vec<&str> = messages
+            .iter()
+            .map(|m| m["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(roles, vec!["system", "user"]);
+    }
+
+    #[test]
+    fn the_claude_suffix_appends_to_the_existing_system_prompt() {
+        let mut ctx = ask_claude_ctx();
+        append_system_suffix(&mut ctx, CLAUDE_SYSTEM_SUFFIX);
+        let system = ctx.messages[0]["content"].as_str().unwrap();
+        assert!(system.starts_with("Be Babel."), "{system}");
+        assert!(system.contains("answering as Claude"), "{system}");
+        assert!(system.contains("let me check"), "{system}");
+    }
+
+    #[test]
+    fn the_claude_suffix_creates_a_system_message_when_there_is_none() {
+        let mut ctx = flowcat_core::processor::frame::LlmContext {
+            messages: vec![serde_json::json!({"role": "user", "content": "hi"})],
+            tools: vec![],
+        };
+        append_system_suffix(&mut ctx, CLAUDE_SYSTEM_SUFFIX);
+        assert_eq!(ctx.messages[0]["role"], "system");
+        assert_eq!(ctx.messages[1]["role"], "user");
     }
 }

@@ -725,26 +725,28 @@ mod network_tests {
         assert!(matches!(frames.last(), Some(Frame::LlmResponseEnd)));
     }
 
-    /// The turn that was failing live: `ask_claude` has flipped the backend, so
-    /// the continuation of that same turn runs here, reading the skill's result
-    /// as its prompt. It has to answer the question — the old result string had
-    /// it re-announce the handover instead, burning the turn.
+    /// The handover instruction now arrives as a suffix on the system prompt
+    /// (`call::CLAUDE_SYSTEM_SUFFIX`) rather than as `ask_claude`'s tool
+    /// result, and there is no `ask_claude` tool call in the context at all —
+    /// Claude is never shown that tool. This checks the suffix alone is enough
+    /// to make Claude answer the question directly instead of announcing a
+    /// handover that, from Claude's point of view, never happened.
     #[tokio::test]
     #[ignore]
-    async fn network_claude_answers_within_the_ask_claude_turn() {
+    async fn network_claude_answers_directly_with_the_handover_suffix() {
         crate::env_file::load_if_unset(std::path::Path::new("../../.env"));
         let key = std::env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY in .env");
         let mut llm = ClaudeLlm::new(key, "claude-opus-5".into(), DEFAULT_EFFORT.into());
+        let system = format!(
+            "{}{}",
+            include_str!("../prompt.babel.txt"),
+            crate::call::CLAUDE_SYSTEM_SUFFIX
+        );
         let ctx = LlmContext {
             messages: vec![
-                json!({"role": "system", "content": include_str!("../prompt.babel.txt")}),
+                json!({"role": "system", "content": system}),
                 json!({"role": "assistant", "content": "Ready."}),
-                json!({"role": "user", "content": "Ask Claude what the capital of France is."}),
-                json!({"role": "assistant", "content": null, "tool_calls": [{
-                    "id": "call_1_0", "type": "function",
-                    "function": {"name": "ask_claude", "arguments": "{}"}}]}),
-                json!({"role": "tool", "tool_call_id": "call_1_0",
-                       "content": crate::skills::claude::HANDOVER}),
+                json!({"role": "user", "content": "What is the capital of France?"}),
             ],
             tools: vec![],
         };
