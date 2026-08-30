@@ -48,8 +48,9 @@ pub struct CallCtx {
     pub state: Option<Arc<CallState>>,
     /// Sample rate of this call's TTS backend. Audio injected as
     /// `Frame::OutputAudio` must be generated at exactly this rate: the output
-    /// stage resamples with a fixed `tts_rate -> carrier_rate` converter and
-    /// ignores the frame's own `sample_rate`. `None` outside a live call.
+    /// stage's resampler is built once for `tts_rate -> carrier_rate` and
+    /// *rejects* a chunk at any other rate, which the sink then drops and
+    /// latches as the call's error. `None` outside a live call.
     pub tts_rate: Option<u32>,
 }
 

@@ -363,11 +363,12 @@ impl Skill for SetTimer {
 
         let run_id = ctx.run_id;
         let text = alert_text(spoken_name.as_deref().unwrap_or(""));
-        // Generated once and shared by every announcement. Must be at the
-        // backend's own rate: the output stage resamples with a fixed
-        // `tts_rate -> carrier_rate` converter and ignores this frame's
-        // `sample_rate` (`cascaded.rs:1323,1331`). A call with no known rate
-        // gets the words alone rather than audio at the wrong pitch.
+        // Generated once per timer and shared by every announcement (the clone
+        // below is an `Arc` pointer copy, not the PCM). Must be at the backend's
+        // own rate: the output stage's resampler is built once for
+        // `tts_rate -> carrier_rate` and rejects a chunk at any other rate
+        // (`codec.rs:185`), which the sink drops and latches as the call's
+        // error. A call with no known rate gets the words alone.
         let chime = ctx
             .tts_rate
             .map(|rate| (crate::alarm::alarm_pcm(rate), rate))
@@ -428,6 +429,12 @@ impl Skill for SetTimer {
                         if let Err(e) = frames.send(Frame::OutputAudio(chime.clone())) {
                             return Some(Err(e));
                         }
+                        // Note this widens the barge-in window: the chime raises
+                        // the bot-speaking edge before synthesis starts, so a
+                        // user who reacts out loud ("oh, the pasta!") can now
+                        // interrupt the alert where previously they could not.
+                        // Accepted — saying "stop" *should* stop it, and an
+                        // announcement lost this way returns on the next repeat.
                     }
                     Some(frames.send(frame))
                 });
@@ -1595,5 +1602,52 @@ mod tests {
         tokio::time::advance(Duration::from_secs(61)).await;
         tokio::task::yield_now().await;
         assert_eq!(frame_kinds(&mut rx), vec!["alert"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_zero_tts_rate_speaks_the_words_without_a_chime() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let state = std::sync::Arc::new(CallState::default());
+        let ctx = CallCtx {
+            run_id: 7,
+            frames: Some(tx),
+            media: None,
+            spotify: None,
+            state: Some(state),
+            tts_rate: Some(0),
+        };
+        SetTimer
+            .call(&json!({"minutes": 1, "label": "tea"}), &ctx)
+            .await;
+        tokio::time::advance(Duration::from_secs(61)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(frame_kinds(&mut rx), vec!["alert"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn all_five_announcements_carry_the_chime() {
+        let (ctx, mut rx, _state) = live_ctx();
+        SetTimer
+            .call(&json!({"minutes": 1, "label": "tea"}), &ctx)
+            .await;
+        tokio::time::advance(Duration::from_secs(61)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            frame_kinds(&mut rx),
+            vec!["chime", "alert"],
+            "announcement 1"
+        );
+        for n in 2..=MAX_ANNOUNCEMENTS {
+            tokio::time::advance(REPEAT_EVERY).await;
+            tokio::task::yield_now().await;
+            assert_eq!(
+                frame_kinds(&mut rx),
+                vec!["chime", "alert"],
+                "announcement {n}"
+            );
+        }
+        tokio::time::advance(REPEAT_EVERY * 10).await;
+        tokio::task::yield_now().await;
+        assert!(frame_kinds(&mut rx).is_empty(), "stops after the cap");
     }
 }

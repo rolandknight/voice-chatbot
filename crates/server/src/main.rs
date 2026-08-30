@@ -7,7 +7,7 @@
 //! Kokoro-shim TTS) — bypassing `factory::cascaded`, which can't set Kokoro's
 //! base_url and demands dummy API keys for keyless local providers.
 
-pub mod alarm;
+mod alarm;
 mod brain;
 mod call;
 mod env_file;
