@@ -544,7 +544,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let sfx_dir = runtime_dir.join("logs/sfx");
-    let (registry, calls) = build_skills(&cfg, sfx_dir.clone())?;
+    let search_location =
+        location::SearchLocation::parse(&env_or("SEARCH_LOCATION", location::DEFAULT))?;
+    let (registry, calls) = build_skills(&cfg, sfx_dir.clone(), search_location.as_ref())?;
     let session = SkillSession::new(registry, calls, runtime_dir.join("logs/artifacts"));
 
     // ADR-0007: the chatbot owns its LLM's lifecycle. Ensure a serve, pull the
@@ -1008,6 +1010,7 @@ fn qwen_persona_names(cfg: &PocConfig) -> Vec<String> {
 fn build_skills(
     cfg: &PocConfig,
     sfx_dir: std::path::PathBuf,
+    search_location: Option<&location::SearchLocation>,
 ) -> Result<(skills::Registry, skills::CallRegistry), Box<dyn std::error::Error>> {
     use std::sync::Arc;
     let mut list: Vec<Arc<dyn skills::Skill>> = vec![
@@ -1021,11 +1024,18 @@ fn build_skills(
             "",
         ))),
     ];
-    let provider = skills::web_search::Provider::parse(&env_or("POC_WEB_SEARCH_PROVIDER", ""))?;
+    let provider = skills::web_search::Provider::parse(&env_or("WEB_SEARCH_PROVIDER", ""))?;
+    let brave_key = env_or("BRAVE_API_KEY", "");
+    if provider == skills::web_search::Provider::Brave && brave_key.trim().is_empty() {
+        return Err("WEB_SEARCH_PROVIDER=brave (the default) needs BRAVE_API_KEY in .env — \
+free tier at https://brave.com/search/api/. Set WEB_SEARCH_PROVIDER=duckduckgo to run without a key."
+            .into());
+    }
     list.push(Arc::new(skills::web_search::WebSearch::new(
         provider,
-        env_or("BRAVE_API_KEY", ""),
+        brave_key,
         env_or("TAVILY_API_KEY", ""),
+        search_location.map(|l| l.country.clone()),
     )));
     // Playback happens on the native client; the browser playground has
     // no media, so these can be switched off for browser-only setups.

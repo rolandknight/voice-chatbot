@@ -1,5 +1,7 @@
-//! `web_search` — DuckDuckGo instant answers by default, Brave or Tavily with
-//! a key (port of skills/core/web_search).
+//! `web_search` — Brave by default, DuckDuckGo or Tavily on request.
+//!
+//! Advertised to the **local** model only. Claude gets Anthropic's server-side
+//! web search instead, which carries the same tool name (see `llm_claude.rs`).
 
 use std::time::Duration;
 
@@ -20,11 +22,11 @@ pub enum Provider {
 impl Provider {
     pub fn parse(value: &str) -> Result<Self, String> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "" | "duckduckgo" => Ok(Self::DuckDuckGo),
-            "brave" => Ok(Self::Brave),
+            "" | "brave" => Ok(Self::Brave),
+            "duckduckgo" => Ok(Self::DuckDuckGo),
             "tavily" => Ok(Self::Tavily),
             other => Err(format!(
-                "unsupported POC_WEB_SEARCH_PROVIDER {other:?} (expected duckduckgo, brave, or tavily)"
+                "unsupported WEB_SEARCH_PROVIDER {other:?} (expected brave, duckduckgo, or tavily)"
             )),
         }
     }
@@ -35,6 +37,10 @@ pub struct WebSearch {
     provider: Provider,
     brave_key: String,
     tavily_key: String,
+    /// ISO 3166-1 alpha-2 from `SEARCH_LOCATION`, passed to Brave so results
+    /// are local. `None` sends no country and lets Brave guess from the egress
+    /// IP, which on a home server is usually right but not always.
+    country: Option<String>,
 }
 
 fn text_field<'a>(item: &'a Value, key: &str) -> Option<&'a str> {
@@ -69,13 +75,21 @@ fn extract_duckduckgo(data: &Value) -> String {
     snippets.join(" ").trim().to_string()
 }
 
+/// Brave: up to three results as `Title: description`. The title carries the
+/// venue or publication, which is often the part that answers the question.
 fn extract_brave(data: &Value) -> String {
     data.pointer("/web/results")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .take(3)
-        .filter_map(|r| text_field(r, "description"))
+        .filter_map(|r| {
+            let desc = text_field(r, "description")?;
+            Some(match text_field(r, "title") {
+                Some(title) => format!("{title}: {desc}"),
+                None => desc.to_string(),
+            })
+        })
         .collect::<Vec<_>>()
         .join(" ")
         .trim()
@@ -99,7 +113,12 @@ fn extract_tavily(data: &Value) -> String {
 }
 
 impl WebSearch {
-    pub fn new(provider: Provider, brave_key: String, tavily_key: String) -> Self {
+    pub fn new(
+        provider: Provider,
+        brave_key: String,
+        tavily_key: String,
+        country: Option<String>,
+    ) -> Self {
         Self {
             http: reqwest::Client::builder()
                 .timeout(HTTP_TIMEOUT)
@@ -108,6 +127,7 @@ impl WebSearch {
             provider,
             brave_key,
             tavily_key,
+            country,
         }
     }
 
@@ -139,10 +159,14 @@ impl WebSearch {
                             .to_string(),
                     );
                 }
+                let mut params: Vec<(&str, &str)> = vec![("q", query), ("count", "3")];
+                if let Some(c) = &self.country {
+                    params.push(("country", c));
+                }
                 let data: Value = self
                     .http
                     .get("https://api.search.brave.com/res/v1/web/search")
-                    .query(&[("q", query), ("count", "3")])
+                    .query(&params)
                     .header("Accept", "application/json")
                     .header("X-Subscription-Token", key)
                     .send()
@@ -231,10 +255,23 @@ mod tests {
     }
 
     #[test]
-    fn provider_parsing() {
-        assert_eq!(Provider::parse("").unwrap(), Provider::DuckDuckGo);
+    fn provider_parsing_defaults_to_brave() {
+        assert_eq!(Provider::parse("").unwrap(), Provider::Brave);
         assert_eq!(Provider::parse(" Brave ").unwrap(), Provider::Brave);
+        assert_eq!(Provider::parse("duckduckgo").unwrap(), Provider::DuckDuckGo);
+        assert_eq!(Provider::parse("tavily").unwrap(), Provider::Tavily);
         assert!(Provider::parse("bing").is_err());
+    }
+
+    #[test]
+    fn brave_extraction_keeps_titles() {
+        let brave = json!({"web": {"results": [
+            {"title": "Showtimes", "description": "a"},
+            {"title": "", "description": ""},
+            {"description": "b"},
+            {"title": "T", "description": "c"}
+        ]}});
+        assert_eq!(extract_brave(&brave), "Showtimes: a b");
     }
 }
 
@@ -246,7 +283,12 @@ mod network_tests {
     #[tokio::test]
     #[ignore]
     async fn network_duckduckgo_instant_answer() {
-        let s = WebSearch::new(Provider::DuckDuckGo, String::new(), String::new());
+        let s = WebSearch::new(
+            Provider::DuckDuckGo,
+            String::new(),
+            String::new(),
+            Some("CA".to_string()),
+        );
         let out = s
             .call(&json!({"query": "Eiffel Tower"}), &CallCtx::detached(0))
             .await;
