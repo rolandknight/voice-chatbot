@@ -13,6 +13,11 @@ Local modifications for the PoC:
 - `RollingContext` carries a user-turn generation; `CascadedToolBridge` skips
   the LLM re-run for a tool result whose call belongs to a superseded turn
   (a wake phrase and its command landing as two finals answered twice).
+- `RtviObserver` flushes its `bot-transcription` accumulator at every turn
+  boundary (`LlmResponseStart`, `LlmResponseEnd`, `Interruption`), not only when
+  a streamed chunk happens to end on terminal punctuation. Upstream, a reply
+  ending in a closing quote (`credit."`) never flushed, so it stayed buffered and
+  was emitted glued to the front of a later turn's line.
 - `SpeechGate::on_interruption` no longer clears the pre-roll ring. The VAD
   broadcasts `Interruption` before the new turn's `UserStartedSpeaking`, so
   clearing there emptied the ring the rising edge was about to replay and the

@@ -26,9 +26,10 @@
 //! | [`Frame::Transcription`] (`user_id != "bot"`) | `user-transcription` (`final: true`) |
 //! | [`Frame::Transcription`] (`user_id == "bot"`, realtime s2s) | `bot-transcription` |
 //! | [`Frame::InterimTranscription`] (`user_id != "bot"`) | `user-transcription` (`final: false`) |
-//! | [`Frame::LlmResponseStart`] | `bot-llm-started` |
-//! | [`Frame::LlmResponseEnd`] | `bot-llm-stopped` |
+//! | [`Frame::LlmResponseStart`] | `bot-llm-started` (+ `bot-transcription` for a stranded tail) |
+//! | [`Frame::LlmResponseEnd`] | `bot-llm-stopped` (+ `bot-transcription` for the turn's tail) |
 //! | [`Frame::LlmText`] | `bot-llm-text` (+ `bot-transcription` on sentence end) |
+//! | [`Frame::Interruption`] | `bot-transcription` (the partial reply, on barge-in) |
 //! | [`Frame::TtsStarted`] | `bot-tts-started` |
 //! | [`Frame::TtsStopped`] | `bot-tts-stopped` |
 //! | [`Frame::TtsText`] | `bot-tts-text` + `bot-output` (`spoken: true`) |
@@ -313,9 +314,19 @@ impl RtviObserver {
                     ));
                 }
             Frame::LlmResponseStart if self.params.bot_llm_enabled => {
+                // Backstop: a previous turn that never saw an `LlmResponseEnd` (a
+                // cancelled request, or the runtime's drain dropping the
+                // interruptible end frame) left text behind. Emit it as its own
+                // bubble rather than as the prefix of the turn starting here.
+                self.flush_bot_transcription();
                 self.emit(RtviMessage::bare("bot-llm-started"));
             }
             Frame::LlmResponseEnd if self.params.bot_llm_enabled => {
+                // The turn is over, so the tail is final whether or not a chunk
+                // boundary happened to land on terminal punctuation. Without this
+                // a reply ending in `credit."` stays buffered and reappears glued
+                // to the next turn's line.
+                self.flush_bot_transcription();
                 self.emit(RtviMessage::bare("bot-llm-stopped"));
             }
             Frame::LlmText(text) if self.params.bot_llm_enabled => {
@@ -374,6 +385,13 @@ impl RtviObserver {
             } => {
                 self.emit_function_call_stopped(function_name, tool_call_id, true, None);
             }
+            Frame::Interruption => {
+                // Barge-in mid-stream: the cancelled turn's `LlmResponseEnd` may
+                // never arrive. Commit what streamed, as `flush_bot!` does on the
+                // s2s path and `AssistantContextAggregator` does for the context —
+                // the bubble then matches the recorded transcript.
+                self.flush_bot_transcription();
+            }
             Frame::Metrics(data) if self.params.metrics_enabled => {
                 if let Some(msg) = map_metrics(data) {
                     self.emit(msg);
@@ -385,24 +403,44 @@ impl RtviObserver {
 
     /// Legacy `bot-transcription`: accumulate bot LLM text and flush a full
     /// sentence when one completes (pipecat `_handle_llm_text_frame`).
+    ///
+    /// The check runs on the whole accumulator after every streamed chunk, so it
+    /// only fires when a chunk boundary happens to land on terminal punctuation.
+    /// That makes it a streaming nicety, never the guaranteed exit — the turn
+    /// boundaries call [`Self::flush_bot_transcription`] for that.
     fn flush_bot_transcription_on_sentence(&self, text: &str) {
-        let flush = {
+        let ends_here = {
             let Ok(mut st) = self.state.lock() else {
                 return;
             };
             st.bot_transcription.push_str(text);
-            if ends_sentence(&st.bot_transcription) && !st.bot_transcription.is_empty() {
-                Some(std::mem::take(&mut st.bot_transcription))
-            } else {
-                None
-            }
+            ends_sentence(&st.bot_transcription)
         };
-        if let Some(sentence) = flush {
-            self.emit(RtviMessage::with_data(
-                "bot-transcription",
-                json!({ "text": sentence }),
-            ));
+        if ends_here {
+            self.flush_bot_transcription();
         }
+    }
+
+    /// Emit everything accumulated so far as one `bot-transcription` and clear
+    /// the accumulator; a no-op when nothing is buffered. Called at every turn
+    /// boundary so bot text can never survive into the next turn.
+    ///
+    /// Ungated: text only accumulates through the `bot_llm_enabled` arm, so with
+    /// that family off there is never anything here to emit.
+    fn flush_bot_transcription(&self) {
+        let pending = {
+            let Ok(mut st) = self.state.lock() else {
+                return;
+            };
+            if st.bot_transcription.is_empty() {
+                return;
+            }
+            std::mem::take(&mut st.bot_transcription)
+        };
+        self.emit(RtviMessage::with_data(
+            "bot-transcription",
+            json!({ "text": pending }),
+        ));
     }
 
     fn emit_function_call_started(&self, call: &FunctionCall) {
@@ -713,6 +751,67 @@ mod tests {
             .find(|m| m.kind == "bot-transcription")
             .unwrap();
         assert_eq!(bt.data.unwrap()["text"], "Hello there.");
+    }
+
+    /// Every `bot-transcription` text the sink saw, in order.
+    fn bot_texts(sink: &VecSink) -> Vec<String> {
+        sink.messages()
+            .into_iter()
+            .filter(|m| m.kind == "bot-transcription")
+            .map(|m| m.data.unwrap()["text"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn response_end_flushes_a_reply_that_does_not_end_in_terminal_punctuation() {
+        // A reply ending in a closing quote (`credit."`) fails `ends_sentence`'s
+        // last-char test, so no streamed chunk ever flushes it. The end of the
+        // response must, or it sits in the accumulator and is emitted glued to the
+        // front of the NEXT turn ("…terrible credit.\"Thanks. Another…").
+        let (obs, sink) = obs();
+        push(&obs, Frame::LlmResponseStart).await;
+        push(&obs, Frame::LlmText("I've got terrible credit.\"".into())).await;
+        push(&obs, Frame::LlmResponseEnd).await;
+        assert_eq!(bot_texts(&sink), vec!["I've got terrible credit.\""]);
+
+        push(&obs, Frame::LlmResponseStart).await;
+        push(&obs, Frame::LlmText("Thanks. Another, or music?".into())).await;
+        push(&obs, Frame::LlmResponseEnd).await;
+        assert_eq!(
+            bot_texts(&sink),
+            vec!["I've got terrible credit.\"", "Thanks. Another, or music?"]
+        );
+    }
+
+    #[tokio::test]
+    async fn barge_in_flushes_the_partial_reply_rather_than_carrying_it_over() {
+        // Mirrors the s2s reader's `flush_bot!` on `Interrupted` and the cascaded
+        // `AssistantContextAggregator`, which both commit the partial: the bubble
+        // matches the recorded transcript, and nothing survives into the next turn.
+        let (obs, sink) = obs();
+        push(&obs, Frame::LlmResponseStart).await;
+        push(&obs, Frame::LlmText("Half a sen".into())).await;
+        push(&obs, Frame::Interruption).await;
+        assert_eq!(bot_texts(&sink), vec!["Half a sen"]);
+
+        push(&obs, Frame::LlmResponseStart).await;
+        push(&obs, Frame::LlmText("Fresh line.".into())).await;
+        push(&obs, Frame::LlmResponseEnd).await;
+        assert_eq!(bot_texts(&sink), vec!["Half a sen", "Fresh line."]);
+    }
+
+    #[tokio::test]
+    async fn a_reply_with_no_response_end_is_flushed_by_the_next_response_start() {
+        // Backstop for a turn that ends without `LlmResponseEnd` — a cancelled
+        // request, or the runtime's drain dropping the interruptible end frame.
+        // The stranded text becomes its own bubble instead of the new turn's prefix.
+        let (obs, sink) = obs();
+        push(&obs, Frame::LlmResponseStart).await;
+        push(&obs, Frame::LlmText("Stranded".into())).await;
+        push(&obs, Frame::LlmResponseStart).await;
+        push(&obs, Frame::LlmText("Next turn.".into())).await;
+        push(&obs, Frame::LlmResponseEnd).await;
+        assert_eq!(bot_texts(&sink), vec!["Stranded", "Next turn."]);
     }
 
     #[tokio::test]
