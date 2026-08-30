@@ -26,9 +26,9 @@ and it is live at the next start.
 |---|---|---|
 | Detector | `wake.rs::OpenWakeWord` | one head; wraps `oww_rs::OwwModel` (own melspec+embedding frontend, 12-window smoothing, 2 s refractory) |
 | Gate | `wake.rs::WakeGate` | IDLE swallows audio + VAD edges, feeds detector; on fire replays 0.5 s pre-roll, synthesizes `UserStartedSpeaking`, AWAKE for 15 s of silence |
-| Wiring | `call.rs` ~L272 | `POC_WAKE_MODEL` non-empty → gate between VAD and SpeechGate; built **before** `CallState` exists |
+| Wiring | `call.rs` ~L272 | `WAKE_MODEL` non-empty → gate between VAD and SpeechGate; built **before** `CallState` exists |
 | Persona → voice | `skills/persona.rs`, `skills/mod.rs::CallState`, `tts_qwen.rs::current_voice` | `set_voice(name)` read per utterance; only the Qwen backend honours it |
-| Voice preload | `main.rs::qwen_persona_names` | `POC_QWEN_VOICE` + `POC_QWEN_VOICES` — the only voices that can be selected |
+| Voice preload | `main.rs::qwen_persona_names` | `QWEN_VOICE` + `QWEN_VOICES` — the only voices that can be selected |
 | Python reference | `wakeword_detector.py` | one `openwakeword.Model` with N heads; per-model cooldown; fires → persona switch + `WakeWordDetectedFrame`; ControlChannel sends `{"type":"wake","state":"awake"/"asleep",…}` |
 | Heads | `models/wakeword/hey_{babel,marvin,one_one}.onnx` | trained via `scripts/wakeword/` |
 | Fixture | `fixtures/t13_wake.wav` (was `poc/harness/fixtures/`) | "Hey babel, what time is it?" (Kokoro) |
@@ -44,15 +44,15 @@ would leave unused.
 
 ### 1. Configuration — directory, not list
 
-- `POC_WAKE_DIR` (new): directory of head `.onnx` files. Non-empty →
+- `WAKE_DIR` (new): directory of head `.onnx` files. Non-empty →
   Listen mode with every `*.onnx` in it. Relative paths resolve against the
   repo root like the other model paths. The documented default in
   `poc/.env.example` is `models/wakeword`.
-- `POC_WAKE_MODEL` (existing): kept as a single-file form (the fixture test
+- `WAKE_MODEL` (existing): kept as a single-file form (the fixture test
   and `poc/README.md` use it). Either variable non-empty enables Listen
   mode; both set → the dir wins and a warning is logged.
-- `POC_WAKE_THRESHOLD` (existing, 0.5) applies to every head.
-- `POC_WAKE_SESSION_SECS` (new, default 15 — today's hardcoded window;
+- `WAKE_THRESHOLD` (existing, 0.5) applies to every head.
+- `WAKE_SESSION_SECS` (new, default 15 — today's hardcoded window;
   Python's `conversation.idle_timeout_secs` is 10).
 
 Persona for a head is derived from the file stem, no mapping table:
@@ -65,13 +65,13 @@ where every head still gates but none can switch voice; log one warning.
 
 ### 2. Voices follow the heads
 
-`qwen_persona_names()` becomes the union of `POC_QWEN_VOICE`,
-`POC_QWEN_VOICES` and the personas derived from the wake heads, deduped,
-default voice first. With `POC_WAKE_DIR=models/wakeword` that preloads
-babel, marvin and one-one without touching `POC_QWEN_VOICES`, and
+`qwen_persona_names()` becomes the union of `QWEN_VOICE`,
+`QWEN_VOICES` and the personas derived from the wake heads, deduped,
+default voice first. With `WAKE_DIR=models/wakeword` that preloads
+babel, marvin and one-one without touching `QWEN_VOICES`, and
 `switch_persona` is registered whenever more than one voice results (as
 now). Startup cost: one extra voice prime each for marvin/one-one
-(~seconds, once per process — same as setting `POC_QWEN_VOICES` today).
+(~seconds, once per process — same as setting `QWEN_VOICES` today).
 
 ### 3. `WakeBank` — one frontend, N heads (`wake.rs`)
 
@@ -132,8 +132,8 @@ a near-miss head during the same breath.
 
 ### 5. Startup validation (`main.rs`)
 
-- Resolve `POC_WAKE_DIR`; error if set and empty of `.onnx` files.
-- Derive personas; with `POC_TTS_BACKEND=qwen` each must resolve in the
+- Resolve `WAKE_DIR`; error if set and empty of `.onnx` files.
+- Derive personas; with `TTS_BACKEND=qwen` each must resolve in the
   engine's `voices/` catalog (the union in §2 makes `qwen_start` do this
   check for free). Log the table `head → persona` once at startup.
 - Loading the heads themselves stays per call as today (they are small;
@@ -150,7 +150,7 @@ a near-miss head during the same breath.
 | `crates/protocol/src/lib.rs` | `WAKE_EVENT`, `WakeState` |
 | `crates/client/src/events.rs` | render wake events |
 | `third_party/oww_rs/crates/oww/src/oww/oww_model.rs`, `VENDORED.md` | `head_from_path` (frontend-less head) |
-| `poc/.env.example`, `README.md` | `POC_WAKE_DIR`, `POC_WAKE_SESSION_SECS`, persona-by-filename convention |
+| `poc/.env.example`, `README.md` | `WAKE_DIR`, `WAKE_SESSION_SECS`, persona-by-filename convention |
 | `docs/plans/wakeword-in-server.md` | this file; outcome notes on completion |
 
 ## Tests
@@ -176,7 +176,7 @@ is it?", "Hey one one, what time is it?") and commit them under
 `poc/harness/fixtures/`; the bank test then asserts each fires only its
 own head.
 
-Live (`make server` with `POC_WAKE_DIR=models/wakeword`, `make call`):
+Live (`make server` with `WAKE_DIR=models/wakeword`, `make call`):
 1. Startup log shows the three heads and their personas; Qwen primes
    three voices.
 2. Silence + unrelated speech → no turn, no events.
@@ -205,14 +205,14 @@ pipeline, on-device for the RPi satellite); the Rust stack keeps both:
 
 | Client | Where the detector runs | How the persona reaches TTS |
 |---|---|---|
-| Browser / playground | server `WakeGate` (`POC_WAKE_DIR`) | the gate calls `CallState::set_voice` itself |
+| Browser / playground | server `WakeGate` (`WAKE_DIR`) | the gate calls `CallState::set_voice` itself |
 | Native client (`make call`; wake is on by default, `--no-wake` for push mode) | `crates/client/src/wake.rs::ClientWakeGate` on the capture channel; audio is sent only while a session is open (pre-roll replayed on the opening fire) | the client sends `{"type":"wake","payload":WakeState}` over the events WebSocket; `main.rs::apply_client_wake` sets the voice (and reverts `ask_claude` on `asleep`) |
 
 Both share `crates/wake` (`WakeBank`, `GateCore`, `resolve_heads`,
 `persona_for_head`). The client re-arms its session window on the server's
 own events (final transcriptions, bot turn boundaries) since it has no VAD.
 Running both gates at once is harmless (the client's pre-roll carries the
-wake word, so the server gate fires too) but pointless; set `POC_WAKE_DIR`
+wake word, so the server gate fires too) but pointless; set `WAKE_DIR`
 for browser sessions; the native client wakes on-device by default.
 
 ## Outcome notes (2026-08-26)
@@ -230,8 +230,8 @@ for browser sessions; the native client wakes on-device by default.
   the old `OpenWakeWord::feed` had.
 - `GateCore` is pure (time passed in) and unit-tested: open, cooldown,
   hand-over to another head while awake, lazy expiry, re-open.
-- Server: `POC_WAKE_DIR` / `POC_WAKE_MODEL` / `POC_WAKE_THRESHOLD` /
-  `POC_WAKE_SESSION_SECS`; wake personas are unioned into the Qwen preload
+- Server: `WAKE_DIR` / `WAKE_MODEL` / `WAKE_THRESHOLD` /
+  `WAKE_SESSION_SECS`; wake personas are unioned into the Qwen preload
   list, so a head without a matching `voices/` preset fails `start_qwen`.
   `wake` events (`voice_chatbot_protocol::WakeState`) go to the client;
   the native client renders `[awake: marvin 0.87]` / `[asleep]`.

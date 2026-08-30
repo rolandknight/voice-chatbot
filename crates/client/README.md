@@ -8,8 +8,8 @@ a selected output device. The browser and Python audio clients are not involved.
 Client and server may be on different machines on the same LAN: the client
 binds and advertises the interface that routes to `--server-url`, and the
 server advertises the interface that routes back to the caller (host ICE
-candidates only, no STUN/TURN). Start the server with `POC_BIND=0.0.0.0:6210`
-(and `POC_ADVERTISE_IP` if auto-detection picks the wrong interface), then:
+candidates only, no STUN/TURN). Start the server with `BIND=0.0.0.0:6210`
+(and `ADVERTISE_IP` if auto-detection picks the wrong interface), then:
 
 ```sh
 make client FLOWCAT_URL=http://<server-lan-ip>:6210

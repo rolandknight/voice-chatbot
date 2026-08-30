@@ -374,7 +374,7 @@ pub async fn offer(
                 .into_response()
         }
     };
-    // Advertise an address the caller can reach: an explicit POC_ADVERTISE_IP,
+    // Advertise an address the caller can reach: an explicit ADVERTISE_IP,
     // else the local interface that routes back to the caller (loopback for a
     // same-machine peer, the LAN interface for a remote one). No STUN/TURN: the
     // PoC serves a LAN, and host candidates pair directly there.
@@ -427,7 +427,7 @@ pub async fn offer(
         cfg.persona_prompts.clone(),
     ));
     // Listen mode: wake gate between VAD and SpeechGate when wake heads are
-    // configured (POC_WAKE_DIR / POC_WAKE_MODEL); push mode otherwise. A fire
+    // configured (WAKE_DIR / WAKE_MODEL); push mode otherwise. A fire
     // selects the head's persona voice on `call_state` and publishes `wake`
     // events on the call's channel.
     let mut input_processors: Vec<Box<dyn flowcat_core::processor::FrameProcessor>> = Vec::new();

@@ -199,7 +199,7 @@ impl Device {
                 .map(Self::Gpu)
                 .ok_or_else(|| {
                     FlowcatError::Other(format!(
-                        "invalid POC_NEMOTRON_DEVICE {value:?} (expected auto, metal, cpu, or cuda:N)"
+                        "invalid NEMOTRON_DEVICE {value:?} (expected auto, metal, cpu, or cuda:N)"
                     ))
                 }),
         }

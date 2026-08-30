@@ -89,7 +89,7 @@ async def main() -> int:
     if not BIN.exists():
         print(f"build first: make build ({BIN} missing)", file=sys.stderr)
         return 1
-    env = {**os.environ, "POC_QWEN_SERVER_PORT": str(a.port), "RUST_LOG": "warn"}
+    env = {**os.environ, "QWEN_SERVER_PORT": str(a.port), "RUST_LOG": "warn"}
     proc = subprocess.Popen([str(BIN), "--config", str(HERE / "gui.yaml"), "serve"], cwd=HERE, env=env)
     base = f"http://127.0.0.1:{a.port}"
     try:

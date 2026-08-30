@@ -1,4 +1,4 @@
-//! Qwen3-TTS streaming backend (`POC_TTS_BACKEND=qwen`, Cargo feature `qwen-tts`).
+//! Qwen3-TTS streaming backend (`TTS_BACKEND=qwen`, Cargo feature `qwen-tts`).
 //!
 //! The qwen-tts engine runs in-process: one Python thread owns the GIL
 //! and mlx-audio's own worker thread owns Metal (see its `engine.rs`). Each
@@ -56,7 +56,7 @@ impl QwenVoice {
 #[derive(Clone)]
 pub struct QwenShared {
     pub engine: Engine,
-    /// The default voice (first of `POC_QWEN_VOICES`).
+    /// The default voice (first of `QWEN_VOICES`).
     pub voice: Arc<QwenVoice>,
     /// Every loaded preset, selectable per call by `switch_persona`.
     pub voices: Vec<Arc<QwenVoice>>,

@@ -38,7 +38,7 @@ const MAX_RESUMES: u32 = 2;
 /// Default `output_config.effort`. Spoken one-or-two-sentence answers do not
 /// need the API default (`high`); `low` measured ~0.7 s to first token against
 /// ~1.0 s. `thinking.budget_tokens` is rejected with a 400 on Opus 5, so effort
-/// is the only depth knob. Empty (`POC_CLAUDE_EFFORT=`) omits the field, for
+/// is the only depth knob. Empty (`CLAUDE_EFFORT=`) omits the field, for
 /// models that reject it.
 pub const DEFAULT_EFFORT: &str = "low";
 

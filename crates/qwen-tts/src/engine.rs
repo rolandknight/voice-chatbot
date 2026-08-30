@@ -198,7 +198,7 @@ fn init_bridge<'py>(
     // sys.executable; libraries that spawn `sys.executable -c ...` would run
     // the server. Point both at sane values (the interpreter we linked).
     sys.setattr("argv", PyList::new(py, ["qwen-tts"])?)?;
-    let python = env!("POC_PYTHON");
+    let python = env!("QWEN_PYTHON");
     if std::path::Path::new(python).exists() {
         sys.setattr("executable", python)?;
     }

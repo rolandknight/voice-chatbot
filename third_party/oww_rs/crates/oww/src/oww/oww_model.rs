@@ -251,7 +251,7 @@ mod poc_probe {
     use super::*;
     #[test]
     fn probe_custom_model_on_wav() {
-        let (Ok(model_path), Ok(wav)) = (std::env::var("POC_MODEL"), std::env::var("POC_WAV"))
+        let (Ok(model_path), Ok(wav)) = (std::env::var("MODEL"), std::env::var("WAV"))
         else {
             return;
         };

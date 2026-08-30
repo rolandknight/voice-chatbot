@@ -30,7 +30,7 @@ impl Supervise {
             "never" => Ok(Self::Never),
             "always" => Ok(Self::Always),
             other => Err(format!(
-                "invalid POC_OLLAMA_SUPERVISE {other:?} (expected auto, never, or always)"
+                "invalid OLLAMA_SUPERVISE {other:?} (expected auto, never, or always)"
             )),
         }
     }
@@ -48,11 +48,11 @@ pub fn plan(supervise: Supervise, port_answers: bool) -> Plan {
     match (supervise, port_answers) {
         (Supervise::Never, true) | (Supervise::Auto, true) => Plan::UseExisting,
         (Supervise::Never, false) => Plan::Fail(
-            "no ollama answers and POC_OLLAMA_SUPERVISE=never; start `ollama serve` or use auto",
+            "no ollama answers and OLLAMA_SUPERVISE=never; start `ollama serve` or use auto",
         ),
         (Supervise::Auto, false) | (Supervise::Always, false) => Plan::Spawn,
         (Supervise::Always, true) => Plan::Fail(
-            "POC_OLLAMA_SUPERVISE=always but a serve already answers on the port (quit the Ollama.app or use auto)",
+            "OLLAMA_SUPERVISE=always but a serve already answers on the port (quit the Ollama.app or use auto)",
         ),
     }
 }

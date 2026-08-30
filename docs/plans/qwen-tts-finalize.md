@@ -70,7 +70,7 @@ is the precondition for moving all `poc*` dirs to `archive/` later.
 ```
 crates/qwen-tts/                # the library the server embeds — Rust + Python halves
   Cargo.toml                    # unchanged deps
-  build.rs                      # unchanged: rpath + POC_PYTHON from PYO3_PYTHON
+  build.rs                      # unchanged: rpath + QWEN_PYTHON from PYO3_PYTHON
   Makefile                      # setup, test-py, clean
   requirements.txt              # mlx-audio, mlx-whisper, soundfile, pyyaml, numpy, pytest
   mise.toml                     # python 3.12 (from poc-qwen)
@@ -83,7 +83,7 @@ crates/qwen-tts/                # the library the server embeds — Rust + Pytho
       __init__.py
       engine.py                 # from poc_qwen/engine.py
       text.py                   # from poc_qwen/text.py
-      config.py                 # from poc_qwen/config.py (POC_DIR → crate-relative)
+      config.py                 # from poc_qwen/config.py (DIR → crate-relative)
       bridge.py                 # from poc_qwen_streaming/bridge.py; imports .engine
     tests/
       conftest.py               # fake loader/model; no sys.path hacks (package is installed -e)
@@ -107,7 +107,7 @@ qwen-tts-tester/                # dev tool: the streaming GUI + bench (copied fr
   README.md                     # GUI, bench, explore profile, measured numbers (bench-m4-max.md + streaming README)
 ```
 
-`crates/server` changes: `config/qwen.yaml` → `POC_QWEN_CONFIG` default
+`crates/server` changes: `config/qwen.yaml` → `QWEN_CONFIG` default
 becomes `crates/qwen-tts/config/server.yaml`; `python.paths` becomes
 `[../.venv/lib/python3.12/site-packages, ../python]`. Root `Makefile`
 `QWEN_PYTHON := crates/qwen-tts/.venv/bin/python`; `poc/platform.sh:324`
@@ -146,7 +146,7 @@ Each step builds, passes `make check`, and leaves the server runnable.
 
 4. **Server config.** `crates/server/config/qwen.yaml` →
    `crates/qwen-tts/config/server.yaml`; server default path updated;
-   `python.paths` crate-relative. Verify: server start with no `POC_QWEN_*`
+   `python.paths` crate-relative. Verify: server start with no `QWEN_*`
    overrides.
 
 5. **Docs + cut-over check.** Crate README (setup, server profile, how

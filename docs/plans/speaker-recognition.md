@@ -51,8 +51,8 @@ verification. Two rules follow:
 | M2 | ERes2NetV2 forward p50/p95 at 1 / 2 / 3 s | Task 2 bench | — |
 | M3 | CAM++ forward p50/p95 at 3 s (the fallback's real cost) | Task 2 bench | — |
 | M4 | ERes2NetV2 forward p95 at 3 s **with a whisper decode running concurrently** | Task 2 bench | — |
-| M5 | Turn-latency delta, feature on vs off, `POC_STT_BACKEND=whisper` | Task 4 | — |
-| M6 | Turn-latency delta, feature on vs off, `POC_STT_BACKEND=nemotron` | Task 4 | — |
+| M5 | Turn-latency delta, feature on vs off, `STT_BACKEND=whisper` | Task 4 | — |
+| M6 | Turn-latency delta, feature on vs off, `STT_BACKEND=nemotron` | Task 4 | — |
 | M7 | `speaker_ready_rate` per backend — embeds finished before the prompt is built | Task 4 | — |
 | M8 | Household EER at 1 / 2 / 3 s across 3 speakers, vs the published numbers | Task 7 | — |
 | M9 | False-accept rate at the chosen operating point | Task 7 | — |
@@ -74,7 +74,7 @@ harness, the exact command, and what counts as noise for every row.
 | Seam | `SpeakerTap<S: SttService>` decorator | An `input_processors` tap misses `SpeechGate`'s 600 ms re-injected pre-roll (`cascaded.rs:451,526`). The decorator sees byte-identical audio to the STT and covers all four backends with no change to any of them. |
 | Text-dependent scoring | Wake phrase as a second, fixed-content sample | TD enrolment measures 3.62 % EER vs 8.86 % for TI at 3 s. Every listen-mode turn is preceded by the same phrase and it's already in the buffer. Biggest accuracy lever available. |
 | Phase 1 storage | None | Session-scoped clustering needs no persistence, no enrolment flow, and raises no privacy question. It is also how we collect the data needed to set Phase 2's threshold. |
-| Join policy | Non-blocking check; `POC_SPEAKER_WAIT_MS` defaults to `0` | A deadline-capped join (the first draft said 150 ms) is free on whisper and a real cost on a streaming backend, where the STT final is already computed when `flush()` is called. `JoinHandle::is_finished()` plus a fall-through to `Unknown` costs a boolean test on every backend, and a late embed still updates the roster, publishes, and logs — so it counts for the next turn. |
+| Join policy | Non-blocking check; `SPEAKER_WAIT_MS` defaults to `0` | A deadline-capped join (the first draft said 150 ms) is free on whisper and a real cost on a streaming backend, where the STT final is already computed when `flush()` is called. `JoinHandle::is_finished()` plus a fall-through to `Unknown` costs a boolean test on every backend, and a late embed still updates the roster, publishes, and logs — so it counts for the next turn. |
 | Pre-roll accounting | One documented `SpeechGate` patch: drop the ring across a transport gap | Without it, "strip `preroll_ms` from the front of the buffer" is simply wrong — `SpeechGate` re-injects up to 600 ms of its own ring ahead of the utterance (`cascaded.rs:514-533`) and the tap cannot decompose it, because `SttService` never sees `UserStartedSpeaking` (`adapters.rs:117,132`). Clearing stale ring content makes *buffer start == burst start* an invariant, after which the strip is exactly `preroll_ms` on all three wake paths. |
 
 ---
@@ -87,7 +87,7 @@ harness, the exact command, and what counts as noise for every row.
   as a fifth bullet in `third_party/flowcat-core/VENDORED.md` beside the four
   local modifications already documented there. Nothing else in the vendored tree
   moves.
-- **Feature is off unless configured.** No `POC_SPEAKER_MODEL` → `SpeakerTap` is
+- **Feature is off unless configured.** No `SPEAKER_MODEL` → `SpeakerTap` is
   never wrapped and not one byte is copied for speaker ID, exactly as
   `cfg.wake_heads.is_empty()` gates the wake path today. Task 5's
   `WakePrerollTrim` is the deliberate exception: it is always installed, because
@@ -103,10 +103,10 @@ harness, the exact command, and what counts as noise for every row.
   the prompt line is best-effort.
 - Model file in `models/` (gitignored), fetched by a `make models-speaker`
   target next to the existing wake/whisper model targets.
-- Config via `.env` following the `POC_WAKE_*` convention: `POC_SPEAKER_MODEL`,
-  `POC_SPEAKER_THRESHOLD`, `POC_SPEAKER_MARGIN`, `POC_SPEAKER_STORE`,
-  `POC_SPEAKER_WAIT_MS` (default `0`), plus `POC_SPEAKER_LOG` and
-  `POC_SPEAKER_LABEL` for the measurement chain (**Measurement method** below).
+- Config via `.env` following the `WAKE_*` convention: `SPEAKER_MODEL`,
+  `SPEAKER_THRESHOLD`, `SPEAKER_MARGIN`, `SPEAKER_STORE`,
+  `SPEAKER_WAIT_MS` (default `0`), plus `SPEAKER_LOG` and
+  `SPEAKER_LABEL` for the measurement chain (**Measurement method** below).
   A non-zero wait is an explicit trade of
   turn latency for hit rate; it must be justified by an M7 number and recorded in
   the ledger, never adopted quietly to make the feature look better.
@@ -116,7 +116,7 @@ harness, the exact command, and what counts as noise for every row.
 - The repo is public: voiceprint stores, enrolment audio, and `logs/*.jsonl`
   score dumps must be gitignored before the first one is written. `/models/*`
   (`.gitignore:24`) and `/logs/` (`.gitignore:27`) already cover this — verify,
-  don't duplicate, and add a rule only for `POC_SPEAKER_STORE` if it lands
+  don't duplicate, and add a rule only for `SPEAKER_STORE` if it lands
   outside those two.
 - Commit after every task on branch `speaker-recognition`.
 
@@ -130,10 +130,10 @@ Nothing here needs a replay rig or a second clock.
 ### Environment, recorded with every run
 
 Copy the header style of `archive/poc-tts/bench-m4-max.md`: host and chip, core
-count, RAM, OS version, **git sha of the tree**, `POC_STT_BACKEND` and its model
+count, RAM, OS version, **git sha of the tree**, `STT_BACKEND` and its model
 (whisper model file, or the Nemotron right-context operating point from
 ADR-0005), `whisper_threads`, the speaker model file with its sha256, and every
-`POC_SPEAKER_*` value in force. Machine plugged in, no other load. A number
+`SPEAKER_*` value in force. Machine plugged in, no other load. A number
 without this block is not a measurement.
 
 ### M1–M4 — `crates/speaker/src/bin/bench.rs`
@@ -181,7 +181,7 @@ too, for context, but never gate on it.
 - [ ] **Confirmatory, real:** the same delta computed from `logs/speaker.jsonl`
       over ≥ 20 real turns per condition on the box. No rig needed — every field
       is already in the file.
-- [ ] Four conditions: `speaker_enabled` false/true × `POC_STT_BACKEND` whisper
+- [ ] Four conditions: `speaker_enabled` false/true × `STT_BACKEND` whisper
       (**M5**) / nemotron (**M6**), ≥ 20 turns each.
 - [ ] **"Within noise" is a number, not a judgement:** p50 delta ≤ **1 ms** and
       p95 delta ≤ **5 ms**. If it fails, read M4 before touching the join — the
@@ -214,10 +214,10 @@ from `ts`, the VAD falling edge — one clock, one file, no cross-log join:
       so a log without the vector cannot produce Task 7's ROC — the data would have
       to be collected twice. 192 floats at 4 dp is ~1.2 KB/turn: a week of
       household use is a couple of MB.
-- [ ] **`ground_truth`** comes from `POC_SPEAKER_LABEL`, set while one person is
+- [ ] **`ground_truth`** comes from `SPEAKER_LABEL`, set while one person is
       doing their collection sessions. It is the only manual step in the whole
       measurement chain, and it is what makes the six distributions computable.
-- [ ] Write the line whenever `POC_SPEAKER_LOG=1`, **including with the feature
+- [ ] Write the line whenever `SPEAKER_LOG=1`, **including with the feature
       off** (`speaker_enabled: false`, speaker fields null). Without that there is
       no off-condition to subtract for M5/M6.
 - [ ] The vector is biometric data. Gitignored (`/logs/`, `.gitignore:27`), and
@@ -399,7 +399,7 @@ no orphaned embed task.
       prompt is built, with **`JoinHandle::is_finished()` and no wait**: finished
       → take it; not finished → `Unknown`, and leave the task running so its
       result still reaches the roster, the event, and the log. Honour
-      `POC_SPEAKER_WAIT_MS` as an operator knob, default `0`. The first draft's
+      `SPEAKER_WAIT_MS` as an operator knob, default `0`. The first draft's
       150 ms hard timeout is removed: it is free on whisper and up to 150 ms of
       real turn latency on Nemotron, which is the backend ADR-0005 selects.
 - [ ] Count `speaker_ready_rate` — the share of turns whose embed finished before
@@ -416,25 +416,25 @@ no orphaned embed task.
       in **Measurement method** above — including the raw `embedding` and the
       `ground_truth` label. Both are load-bearing: without the vector Task 7's ROC
       cannot be computed at all and the week of household collection has to be
-      done twice. Gate on `POC_SPEAKER_LOG=1`, and write the line with the feature
+      done twice. Gate on `SPEAKER_LOG=1`, and write the line with the feature
       **off** as well, or M5/M6 have no baseline to subtract.
 - [ ] **This file is the input to Task 7's threshold and to M5–M9**, which is why
       Phase 1 ships before enrolment exists: the calibration data is a by-product
       of using the thing.
 - [ ] Confirm `/logs/` (`.gitignore:27`) and `/models/*` (`.gitignore:24`) already
       cover the new files rather than adding duplicate rules; add one only if
-      `POC_SPEAKER_STORE` lands outside them.
+      `SPEAKER_STORE` lands outside them.
 
 **Gate:** SPKR-1 done. Two people alternating on one call get stable distinct
 labels across ≥ 10 turns.
 
 Latency A/B, and it is not optional: 20 turns per condition, the *same* recorded
 utterances replayed each time, measuring VAD falling edge → first LLM token.
-Four conditions — feature off and on, under `POC_STT_BACKEND=whisper` (**M5**)
-and `POC_STT_BACKEND=nemotron` (**M6**). The delta must be within noise on
+Four conditions — feature off and on, under `STT_BACKEND=whisper` (**M5**)
+and `STT_BACKEND=nemotron` (**M6**). The delta must be within noise on
 **both**; whisper alone proves nothing, because whisper is the backend where the
 old racing argument happened to be true. If the delta is real on nemotron with
-`POC_SPEAKER_WAIT_MS=0`, the cost is CPU contention with the decode (M4), not the
+`SPEAKER_WAIT_MS=0`, the cost is CPU contention with the decode (M4), not the
 join — take a cheaper model rather than reaching for the knob.
 
 ---
@@ -526,7 +526,7 @@ happen before the audio reaches the service.
       the inner service and forwards everything after it, splitting a frame when
       the boundary falls mid-frame.
 - [ ] Install it at `call.rs:428` **unconditionally**: it is a passthrough when no
-      wake is armed, and the `todo.md` fix must not depend on `POC_SPEAKER_MODEL`
+      wake is armed, and the `todo.md` fix must not depend on `SPEAKER_MODEL`
       being set. Composition is `SpeakerTap<WakePrerollTrim<S>>` with the speaker
       feature on, `WakePrerollTrim<S>` alone with it off.
 - [ ] Decide **at the first frame of an utterance**, lazily — "was a wake armed
@@ -542,7 +542,7 @@ happen before the audio reaches the service.
 - [ ] The head fires at or after the end of the phrase, so trimming to the wake
       instant removes the phrase plus at most a few tens of ms after it. If
       command onsets start clipping ("…lay Bowie"), the fix is a small guard that
-      keeps the last N ms (**[assumption]** `POC_WAKE_TRIM_GUARD_MS`, default 0),
+      keeps the last N ms (**[assumption]** `WAKE_TRIM_GUARD_MS`, default 0),
       **not** a shorter client pre-roll — that pre-roll is also the TD sample
       Task 6 needs.
 - [ ] Tests with a mock inner service: exact-boundary trim; boundary mid-frame; no
@@ -553,7 +553,7 @@ happen before the audio reaches the service.
 **Gate:** the wake phrase no longer appears in transcripts on the native-client
 path, and tool selection on "hey babel play X" improves (the failure `todo.md`
 traces to this). Verify on a real Pi session against **both**
-`POC_STT_BACKEND=whisper` and `nemotron` — the trim's timing behaviour differs
+`STT_BACKEND=whisper` and `nemotron` — the trim's timing behaviour differs
 between a batch and a streaming service and the mock covers only one. Record the
 skipped-trim count; if it is not near zero, the lazy resolution is losing the race
 and the answer is a bounded hold on the first frames, not a longer grace.
@@ -636,7 +636,7 @@ complete.
 - [ ] Store as JSON next to `.env` (**[assumption]** — ~768 bytes per centroid, so
       three people is under 5 KB; SQLite is not warranted), in the shape given
       below, including `model_id` and `frontend_hash`. Gitignored. Path via
-      `POC_SPEAKER_STORE`.
+      `SPEAKER_STORE`.
 - [ ] Load at startup; a missing or malformed store logs and degrades to Phase 1
       session labels rather than failing the call. A store whose `model_id` or
       `frontend_hash` doesn't match the loaded embedder is **not** malformed — it

@@ -3,7 +3,7 @@
 //! One setting feeds two consumers: Claude's server-side web search takes it as
 //! a structured `user_location` object, and Brave takes its `country`. Without
 //! it "what's on at Cineplex Etobicoke" is a query with no place attached, which
-//! is how the DuckDuckGo era failed. `POC_WEATHER_DEFAULT_LOCATION` is
+//! is how the DuckDuckGo era failed. `WEATHER_DEFAULT_LOCATION` is
 //! deliberately untouched: it is free text with its own geolocation fallback.
 
 use serde_json::{json, Value};

@@ -4,30 +4,30 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-POC_DIR="$PROJECT_DIR" # runtime root (models/, .deps/, .env); the PoC trees are archived
+DIR="$PROJECT_DIR" # runtime root (models/, .deps/, .env); the PoC trees are archived
 
 # Read the PoC profile for standalone use while preserving explicit shell or
 # Make overrides. run_poc.sh already exports this file before launching us.
-DEVICE_OVERRIDE_SET="${POC_NEMOTRON_DEVICE+set}"
-DEVICE_OVERRIDE="${POC_NEMOTRON_DEVICE-}"
+DEVICE_OVERRIDE_SET="${NEMOTRON_DEVICE+set}"
+DEVICE_OVERRIDE="${NEMOTRON_DEVICE-}"
 MODEL_ROOT_OVERRIDE_SET="${NEMO_SPEECH_MODEL_DIR+set}"
 MODEL_ROOT_OVERRIDE="${NEMO_SPEECH_MODEL_DIR-}"
-if [ -f "$POC_DIR/.env" ]; then
+if [ -f "$DIR/.env" ]; then
     set -a
     # shellcheck disable=SC1091
-    . "$POC_DIR/.env"
+    . "$DIR/.env"
     set +a
 fi
-[ -n "$DEVICE_OVERRIDE_SET" ] && POC_NEMOTRON_DEVICE="$DEVICE_OVERRIDE"
+[ -n "$DEVICE_OVERRIDE_SET" ] && NEMOTRON_DEVICE="$DEVICE_OVERRIDE"
 [ -n "$MODEL_ROOT_OVERRIDE_SET" ] && NEMO_SPEECH_MODEL_DIR="$MODEL_ROOT_OVERRIDE"
 
 NEMO_SPEECH_VERSION="0.1.0"
 NEMO_SPEECH_TAG="v$NEMO_SPEECH_VERSION"
 RELEASE_BASE="https://github.com/NVIDIA/NeMo-Speech.cpp/releases/download/$NEMO_SPEECH_TAG"
-NATIVE_PARENT="$POC_DIR/.deps/nemo-speech"
+NATIVE_PARENT="$DIR/.deps/nemo-speech"
 NATIVE_ROOT="$NATIVE_PARENT/$NEMO_SPEECH_TAG"
-MODEL_ROOT="${NEMO_SPEECH_MODEL_DIR:-$POC_DIR/models/nemotron}"
-REQUESTED_DEVICE="${POC_NEMOTRON_DEVICE:-auto}"
+MODEL_ROOT="${NEMO_SPEECH_MODEL_DIR:-$DIR/models/nemotron}"
+REQUESTED_DEVICE="${NEMOTRON_DEVICE:-auto}"
 
 CLEANUP_DIRS=()
 
@@ -76,21 +76,21 @@ verify_sha256() {
 
 select_release() {
     local kernel machine
-    kernel="${POC_PLATFORM_OVERRIDE:-$(uname -s)}"
-    machine="${POC_ARCH_OVERRIDE:-$(uname -m)}"
+    kernel="${PLATFORM_OVERRIDE:-$(uname -s)}"
+    machine="${ARCH_OVERRIDE:-$(uname -m)}"
 
     case "$REQUESTED_DEVICE" in
     auto | cpu | cuda:0 | metal) ;;
-    *) fail "invalid POC_NEMOTRON_DEVICE '$REQUESTED_DEVICE' (expected auto, cuda:0, cpu, or metal)" ;;
+    *) fail "invalid NEMOTRON_DEVICE '$REQUESTED_DEVICE' (expected auto, cuda:0, cpu, or metal)" ;;
     esac
 
     case "$kernel/$machine" in
     Linux/x86_64 | Linux/amd64)
         case "$REQUESTED_DEVICE" in
-        metal) fail "POC_NEMOTRON_DEVICE=metal is only supported on Apple Silicon macOS" ;;
+        metal) fail "NEMOTRON_DEVICE=metal is only supported on Apple Silicon macOS" ;;
         cuda:0)
             command -v nvidia-smi >/dev/null 2>&1 || \
-                fail "POC_NEMOTRON_DEVICE=cuda:0 requires a working NVIDIA driver (nvidia-smi)"
+                fail "NEMOTRON_DEVICE=cuda:0 requires a working NVIDIA driver (nvidia-smi)"
             nvidia-smi --query-gpu=name --format=csv,noheader >/dev/null 2>&1 || \
                 fail "the NVIDIA driver is installed but unavailable"
             RELEASE_BACKEND="cuda"
@@ -113,7 +113,7 @@ select_release() {
         ;;
     Darwin/arm64 | Darwin/aarch64)
         case "$REQUESTED_DEVICE" in
-        cuda:0) fail "POC_NEMOTRON_DEVICE=cuda:0 is only supported on Linux" ;;
+        cuda:0) fail "NEMOTRON_DEVICE=cuda:0 is only supported on Linux" ;;
         metal | auto) RELEASE_BACKEND="metal" ;;
         cpu) RELEASE_BACKEND="cpu" ;;
         esac
@@ -126,8 +126,8 @@ select_release() {
     Darwin/x86_64 | Darwin/amd64)
         case "$REQUESTED_DEVICE" in
         auto | cpu) RELEASE_BACKEND="cpu" ;;
-        metal) fail "POC_NEMOTRON_DEVICE=metal requires Apple Silicon" ;;
-        cuda:0) fail "POC_NEMOTRON_DEVICE=cuda:0 is only supported on Linux" ;;
+        metal) fail "NEMOTRON_DEVICE=metal requires Apple Silicon" ;;
+        cuda:0) fail "NEMOTRON_DEVICE=cuda:0 is only supported on Linux" ;;
         esac
         PLATFORM="macos-x86_64"
         ARCHIVE_SHA256="042a4612e07460fab6a39b5d862aa1e39d0ac3eaedfdb979f3f5fc12de510c20"

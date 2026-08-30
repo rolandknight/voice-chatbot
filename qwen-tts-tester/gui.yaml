@@ -1,7 +1,7 @@
 # qwen-tts-tester GUI profile: all three demo models resident, transcription on.
 # Read by the Rust side (server:, python:, bench:) and by qwen_tts.config for
 # the engine (models:, generation:, voices:, preload:, transcribe:). Scalars in
-# the engine sections can be overridden with POC_QWEN_<SECTION>_<KEY>=value.
+# the engine sections can be overridden with QWEN_<SECTION>_<KEY>=value.
 server:
   host: 127.0.0.1
   port: 8008

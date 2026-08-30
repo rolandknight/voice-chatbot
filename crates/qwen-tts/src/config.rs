@@ -86,7 +86,7 @@ impl Config {
                 cfg.server.host = host;
             }
         }
-        if let Ok(port) = std::env::var("POC_QWEN_SERVER_PORT") {
+        if let Ok(port) = std::env::var("QWEN_SERVER_PORT") {
             if let Ok(p) = port.trim().parse() {
                 cfg.server.port = p;
             }

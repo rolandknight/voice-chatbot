@@ -47,7 +47,7 @@ impl Routing {
             "woosh" => Ok(Routing::Only(Backend::Woosh)),
             "stable_audio" | "sao" => Ok(Routing::Only(Backend::StableAudio)),
             other => Err(format!(
-                "unsupported POC_SFX_BACKEND {other:?} (expected auto, woosh, or stable_audio)"
+                "unsupported SFX_BACKEND {other:?} (expected auto, woosh, or stable_audio)"
             )),
         }
     }

@@ -203,7 +203,7 @@ drives the full cascaded pipeline over WebRTC with fixture WAVs (16 kHz
 mono, ≈ 300 ms leading / 1.2 s trailing silence), asserts tool calls from
 stub-service logs (the primary signal, immune to STT/TTS fuzz), and
 transcribes the bot's audio to check content. With
-`POC_STT_BACKEND=nemotron` on CUDA:
+`STT_BACKEND=nemotron` on CUDA:
 
 | Test | Result | Reading |
 | --- | --- | --- |
