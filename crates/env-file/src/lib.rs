@@ -21,12 +21,19 @@ pub fn parse_line(line: &str) -> Option<(String, String)> {
         return None;
     }
     let value = value.trim();
-    let value = if let Some(inner) = value.strip_prefix('"').and_then(|v| v.strip_suffix('"')) {
-        inner.to_string()
-    } else if let Some(inner) = value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')) {
-        inner.to_string()
-    } else {
-        value.split(" #").next().unwrap_or("").trim().to_string()
+    // A quoted value ends at its closing quote, so a `#` inside is data and a
+    // trailing comment outside is not. Only an unquoted value ends at ` #`.
+    let quoted = value
+        .strip_prefix('"')
+        .and_then(|rest| rest.split_once('"'))
+        .or_else(|| {
+            value
+                .strip_prefix('\'')
+                .and_then(|rest| rest.split_once('\''))
+        });
+    let value = match quoted {
+        Some((inner, _after)) => inner.to_string(),
+        None => value.split(" #").next().unwrap_or("").trim().to_string(),
     };
     Some((key.to_string(), value))
 }
@@ -62,7 +69,14 @@ pub const RETIRED_PREFIX: &str = "POC_";
 
 /// Every `POC_*` name found in the environment, so startup can refuse to run.
 pub fn retired_names<I: Iterator<Item = String>>(keys: I) -> Vec<String> {
-    let mut found: Vec<String> = keys.filter(|k| k.starts_with(RETIRED_PREFIX)).collect();
+    names_with_prefix(keys, RETIRED_PREFIX)
+}
+
+/// Every name in `keys` starting with `prefix`, sorted. Each binary owns its
+/// own retired prefix and its own rename hint: the server's is `POC_`, the
+/// native client's is `FLOWCAT_`.
+pub fn names_with_prefix<I: Iterator<Item = String>>(keys: I, prefix: &str) -> Vec<String> {
+    let mut found: Vec<String> = keys.filter(|k| k.starts_with(prefix)).collect();
     found.sort();
     found
 }
@@ -91,6 +105,16 @@ mod tests {
             Some(("E".into(), "value".into()))
         );
         assert_eq!(parse_line("F="), Some(("F".into(), String::new())));
+        // A quoted value may still be followed by a comment. The closing quote
+        // ends the value; python-dotenv reads it the same way.
+        assert_eq!(
+            parse_line("G = \"http://127.0.0.1:6210\"   # dead port"),
+            Some(("G".into(), "http://127.0.0.1:6210".into()))
+        );
+        assert_eq!(
+            parse_line("H='two words' # trailing"),
+            Some(("H".into(), "two words".into()))
+        );
         assert_eq!(parse_line("# comment"), None);
         assert_eq!(parse_line(""), None);
         assert_eq!(parse_line("hey babel,hey babe,hey baby"), None);
@@ -121,5 +145,27 @@ mod retired_tests {
     #[test]
     fn an_environment_without_them_is_clean() {
         assert!(retired_names(["SERVER_URL".to_string()].into_iter()).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod prefix_tests {
+    use super::*;
+
+    #[test]
+    fn finds_every_name_under_an_arbitrary_prefix_sorted() {
+        let keys = ["FLOWCAT_URL", "SERVER_URL", "FLOWCAT_NO_WAKE", "PATH"]
+            .into_iter()
+            .map(String::from);
+        assert_eq!(
+            names_with_prefix(keys, "FLOWCAT_"),
+            vec!["FLOWCAT_NO_WAKE".to_string(), "FLOWCAT_URL".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_prefix_nothing_matches_is_empty() {
+        let keys = ["SERVER_URL".to_string()].into_iter();
+        assert!(names_with_prefix(keys, "FLOWCAT_").is_empty());
     }
 }

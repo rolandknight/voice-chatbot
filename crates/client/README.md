@@ -1,9 +1,10 @@
-# Native FlowCat WebRTC client
+# Native WebRTC client
 
-`flowcat-webrtc-client` is a terminal-only Rust client for the FlowCat PoC. It
-captures directly from a selected operating-system audio input, sends 20 ms
-Opus frames over WebRTC, decodes the returned Opus stream, and plays it through
-a selected output device. The browser and Python audio clients are not involved.
+`voice-chatbot-client` is a terminal-only Rust client for the voice-chatbot
+server. It captures directly from a selected operating-system audio input,
+sends 20 ms Opus frames over WebRTC, decodes the returned Opus stream, and
+plays it through a selected output device. The browser and Python audio
+clients are not involved.
 
 Client and server may be on different machines on the same LAN: the client
 binds and advertises the interface that routes to `--server-url`, and the
@@ -12,7 +13,7 @@ candidates only, no STUN/TURN). Start the server with `BIND=0.0.0.0:6210`
 (and `ADVERTISE_IP` if auto-detection picks the wrong interface), then:
 
 ```sh
-make client FLOWCAT_URL=http://<server-lan-ip>:6210
+make call SERVER_URL=http://<server-lan-ip>:6210
 ```
 
 ## Prerequisites
@@ -32,7 +33,7 @@ Debian, Ubuntu, and Pop!_OS use ALSA through CPAL:
 sudo apt install build-essential cmake pkg-config libasound2-dev libopus-dev
 ```
 
-If `poc/.deps/prefix` contains the PoC-local Opus build, the Make targets use it
+If `.deps/prefix` contains the repo-local Opus build, the Make targets use it
 automatically instead of requiring the system Opus development package.
 
 ### Raspberry Pi (aarch64)
@@ -64,11 +65,11 @@ docker run --rm -v "$PWD:/w" -w /w ghcr.io/cross-rs/aarch64-unknown-linux-gnu:0.
 
 ## Use
 
-Start the FlowCat stack, then list the native devices:
+Start the server, then list the native devices:
 
 ```sh
-make poc-up
-make flowcat-client-devices
+make server
+make devices
 ```
 
 Omitting selectors auto-selects the Jabra speakerphone when one is plugged in,
@@ -78,14 +79,14 @@ displayed 1-based index, exact stable device ID, exact name, or a
 case-insensitive part of the name:
 
 ```sh
-make flowcat-client-run
-make flowcat-client-run INPUT_DEVICE='Jabra' OUTPUT_DEVICE='Jabra'
+make call
+make call INPUT_DEVICE='Jabra' OUTPUT_DEVICE='Jabra'
 ```
 
 You can invoke the binary directly for its full help:
 
 ```sh
-cargo run --manifest-path poc/flowcat-client/Cargo.toml -- call --help
+cargo run -p voice-chatbot-client -- call --help
 ```
 
 Press Ctrl-C to close the WebRTC peer and both device streams. User
@@ -135,5 +136,5 @@ output callback sums it with the call's voice, so it reaches the same device.
 ## Checks
 
 ```sh
-make flowcat-client-check
+make check
 ```

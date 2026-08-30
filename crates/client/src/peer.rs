@@ -122,15 +122,15 @@ impl PendingPeer {
         })
     }
 
-    /// The raw SDP body to send to FlowCat's `/webrtc/offer` endpoint.
+    /// The raw SDP body to send to the server's `/webrtc/offer` endpoint.
     pub fn offer_sdp(&self) -> &str {
         &self.offer_sdp
     }
 
-    /// Parse and apply FlowCat's raw SDP answer.
+    /// Parse and apply the server's raw SDP answer.
     pub fn accept_answer(self, answer_sdp: &str) -> Result<Peer> {
-        let answer =
-            SdpAnswer::from_sdp_string(answer_sdp).context("parse FlowCat WebRTC SDP answer")?;
+        let answer = SdpAnswer::from_sdp_string(answer_sdp)
+            .context("parse the server's WebRTC SDP answer")?;
         let Self {
             mut rtc,
             socket,
@@ -145,7 +145,7 @@ impl PendingPeer {
         // accept_answer may partially mutate before reporting an error, so the
         // drain is unconditional and happens before propagating either result.
         let deadline_result = drain_rtc(&mut rtc, &mut actions);
-        accept_result.context("apply FlowCat WebRTC SDP answer")?;
+        accept_result.context("apply the server's WebRTC SDP answer")?;
         let _ = deadline_result?;
 
         // Resolve and retain the negotiated payload type once.  `writer` takes
@@ -452,7 +452,7 @@ fn negotiated_opus_pt(rtc: &mut Rtc, mid: Mid) -> Result<Pt> {
         .payload_params()
         .find(|params| params.spec().codec == Codec::Opus)
         .map(|params| params.pt())
-        .ok_or_else(|| anyhow!("FlowCat SDP answer did not negotiate Opus audio"));
+        .ok_or_else(|| anyhow!("the server's SDP answer did not negotiate Opus audio"));
     pt
 }
 
@@ -834,7 +834,7 @@ mod tests {
             .accept_answer("this is not SDP")
             .err()
             .expect("invalid SDP must fail");
-        assert!(error.to_string().contains("parse FlowCat"));
+        assert!(error.to_string().contains("parse the server's"));
     }
 
     #[tokio::test]

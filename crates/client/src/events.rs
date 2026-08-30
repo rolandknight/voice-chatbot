@@ -1,4 +1,4 @@
-//! Human-readable rendering of FlowCat's server-to-client event WebSocket,
+//! Human-readable rendering of the server-to-client event WebSocket,
 //! plus dispatch of the server's media commands to the local player.
 
 use std::time::Duration;
@@ -58,7 +58,7 @@ pub async fn run(
                         match render(&text) {
                             Ok(Some(line)) => println!("{line}"),
                             Ok(None) => {}
-                            Err(error) => tracing::warn!(%error, "ignoring malformed FlowCat event"),
+                            Err(error) => tracing::warn!(%error, "ignoring malformed server event"),
                         }
                         if let Some(player) = media.as_mut() {
                             if let Some(line) = dispatch_media(player, &text) {
@@ -69,7 +69,7 @@ pub async fn run(
                     Some(Ok(Message::Close(_))) | None => return,
                     Some(Ok(_)) => {}
                     Some(Err(error)) => {
-                        tracing::warn!(%error, "FlowCat event stream closed");
+                        tracing::warn!(%error, "server event stream closed");
                         return;
                     }
                 }

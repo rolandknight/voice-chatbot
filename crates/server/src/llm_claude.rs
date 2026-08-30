@@ -1846,7 +1846,7 @@ mod network_tests {
     #[tokio::test]
     #[ignore]
     async fn network_claude_streams_a_short_reply() {
-        crate::env_file::load_if_unset(std::path::Path::new("../../.env"));
+        voice_chatbot_env_file::load_if_unset(std::path::Path::new("../../.env"));
         let key = std::env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY in .env");
         let mut llm = ClaudeLlm::new(
             key,
@@ -1883,7 +1883,7 @@ mod network_tests {
     #[tokio::test]
     #[ignore]
     async fn network_claude_answers_directly_with_the_handover_suffix() {
-        crate::env_file::load_if_unset(std::path::Path::new("../../.env"));
+        voice_chatbot_env_file::load_if_unset(std::path::Path::new("../../.env"));
         let key = std::env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY in .env");
         let mut llm = ClaudeLlm::new(
             key,

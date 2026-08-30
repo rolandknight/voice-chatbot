@@ -1,4 +1,4 @@
-//! FlowCat's HTTP offer/answer and companion event-stream URLs.
+//! The server's HTTP offer/answer and companion event-stream URLs.
 
 use anyhow::{bail, Context, Result};
 use reqwest::{Client, Url};
@@ -81,7 +81,7 @@ impl ServerEndpoints {
 
     pub fn events_url(&self, pc_id: &str) -> Result<Url> {
         if pc_id.trim().is_empty() {
-            bail!("FlowCat returned an empty pc_id");
+            bail!("the server returned an empty pc_id");
         }
         let mut url = self.events_base.clone();
         url.path_segments_mut()
@@ -96,9 +96,9 @@ pub async fn require_healthy(client: &Client, endpoints: &ServerEndpoints) -> Re
         .get(endpoints.health_url().clone())
         .send()
         .await
-        .context("connect to FlowCat health endpoint")?
+        .context("connect to the server health endpoint")?
         .error_for_status()
-        .context("FlowCat is not healthy")?;
+        .context("the server is not healthy")?;
     Ok(())
 }
 
@@ -115,17 +115,17 @@ pub async fn exchange_offer(
         .json(&OfferRequest { sdp })
         .send()
         .await
-        .context("send WebRTC offer to FlowCat")?
+        .context("send the WebRTC offer to the server")?
         .error_for_status()
-        .context("FlowCat rejected the WebRTC offer")?
+        .context("the server rejected the WebRTC offer")?
         .json::<OfferResponse>()
         .await
-        .context("decode FlowCat offer response")?;
+        .context("decode the server's offer response")?;
     if response.sdp.trim().is_empty() {
-        bail!("FlowCat returned an empty SDP answer");
+        bail!("the server returned an empty SDP answer");
     }
     if response.pc_id.trim().is_empty() {
-        bail!("FlowCat returned an empty pc_id");
+        bail!("the server returned an empty pc_id");
     }
     Ok(response)
 }
@@ -135,7 +135,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn derives_flowcat_urls_and_discards_input_path() {
+    fn derives_server_urls_and_discards_input_path() {
         let endpoints = ServerEndpoints::new("http://127.0.0.1:6210/old?q=1#frag").unwrap();
         assert_eq!(
             endpoints.health_url().as_str(),
