@@ -88,6 +88,11 @@ pub struct ClaudeLlm {
     tools: Vec<Tool>,
     /// Anthropic's server-side web search, when configured.
     search: Option<SearchConfig>,
+    /// Set when the API rejects the request because web search is switched off
+    /// for the organisation. Without it every Claude turn would fail; with it
+    /// the turn is retried once without the tool and the process carries on
+    /// unsearched. `AtomicBool` because the stream holds `&self`.
+    search_disabled: std::sync::atomic::AtomicBool,
 }
 
 impl ClaudeLlm {
@@ -104,7 +109,16 @@ impl ClaudeLlm {
             effort,
             tools: Vec::new(),
             search,
+            search_disabled: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Switches Anthropic's server-side search tool off for the rest of the
+    /// process — called once, after the API refuses a request because web
+    /// search is disabled for the organisation.
+    pub fn disable_search(&self) {
+        self.search_disabled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn tools_json(&self, ctx: &LlmContext) -> Vec<Value> {
@@ -129,7 +143,10 @@ impl ClaudeLlm {
                 })
             })
             .collect();
-        if let Some(s) = &self.search {
+        let searching = !self
+            .search_disabled
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if let (Some(s), true) = (&self.search, searching) {
             let mut tool = json!({ "type": s.tool, "name": "web_search" });
             if s.max_uses > 0 {
                 tool["max_uses"] = json!(s.max_uses);
@@ -206,6 +223,38 @@ fn resume_body(body: &Value, blocks: Vec<Value>) -> Value {
     let mut next = body.clone();
     if let Some(msgs) = next["messages"].as_array_mut() {
         msgs.push(json!({ "role": "assistant", "content": blocks }));
+    }
+    next
+}
+
+/// The 400 the API returns when web search is disabled for the organisation in
+/// the Console. Matched on text because there is no distinct error code, so it
+/// is deliberately narrow: a 400 that names web search and says it is off.
+fn is_web_search_disabled(status: u16, body: &str) -> bool {
+    if status != 400 {
+        return false;
+    }
+    let body = body.to_ascii_lowercase();
+    body.contains("web search") && (body.contains("not enabled") || body.contains("disabled"))
+}
+
+/// The same request with Anthropic's server-side search tool removed, for the
+/// one retry after an org-level refusal.
+fn strip_server_search(body: &Value) -> Value {
+    let mut next = body.clone();
+    let remaining: Vec<Value> = next["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|t| t.get("type").is_none())
+        .cloned()
+        .collect();
+    if remaining.is_empty() {
+        if let Some(o) = next.as_object_mut() {
+            o.remove("tools");
+        }
+    } else {
+        next["tools"] = Value::Array(remaining);
     }
     next
 }
@@ -355,6 +404,9 @@ struct Folder {
     thinking_tokens_before: u64,
     cache_read: u64,
     cache_write: u64,
+    /// Server-side searches billed so far this turn, from
+    /// `usage.server_tool_use.web_search_requests`.
+    search_requests: u64,
     requested_at: Instant,
     /// First output of any kind, thinking included — the real time-to-first-token.
     first_output_at: Option<Instant>,
@@ -395,6 +447,7 @@ impl Folder {
             thinking_tokens_before: 0,
             cache_read: 0,
             cache_write: 0,
+            search_requests: 0,
             requested_at: Instant::now(),
             first_output_at: None,
             first_text_at: None,
@@ -452,6 +505,12 @@ impl Folder {
                 let idx = ev["index"].as_u64().unwrap_or(0);
                 let block = &ev["content_block"];
                 self.blocks.insert(self.abs(idx), block.clone());
+                if block["type"] == "web_search_tool_result" && block["content"].is_object() {
+                    tracing::warn!(
+                        error_code = %block["content"]["error_code"],
+                        "claude: web search returned an error"
+                    );
+                }
                 if block["type"] == "tool_use" {
                     self.tool_blocks.insert(
                         idx,
@@ -564,6 +623,9 @@ impl Folder {
                 if let Some(r) = ev["delta"]["stop_reason"].as_str() {
                     self.stop_reason = Some(r.to_string());
                 }
+                if let Some(n) = ev["usage"]["server_tool_use"]["web_search_requests"].as_u64() {
+                    self.search_requests += n;
+                }
             }
             "message_stop" => self.request_done = true,
             "error" => {
@@ -610,6 +672,7 @@ impl Folder {
             output_tokens = self.output_tokens,
             thinking_tokens = self.thinking_tokens,
             cache_read = self.cache_read,
+            search_requests = self.search_requests,
             ttft_ms,
             text_ms,
             stop_reason = self.stop_reason.as_deref().unwrap_or(""),
@@ -659,20 +722,39 @@ impl LlmService for ClaudeLlm {
     }
 
     async fn run_llm<'a>(&'a mut self, ctx: &'a LlmContext) -> Result<BoxStream<'a, Frame>> {
-        // The base request is never mutated: every resume is the base plus the
-        // *whole* paused turn. `assistant_blocks()` is cumulative across the
-        // turn, so appending it to the previous resume's body instead would
-        // re-send request 1's blocks — duplicated `server_tool_use` ids and
-        // `encrypted_content`, in two consecutive assistant messages.
+        // The base request is not mutated by a resume: every resume is the base
+        // plus the *whole* paused turn. `assistant_blocks()` is cumulative
+        // across the turn, so appending it to the previous resume's body
+        // instead would re-send request 1's blocks — duplicated
+        // `server_tool_use` ids and `encrypted_content`, in two consecutive
+        // assistant messages. The one exception is an org-level search
+        // refusal: `base` is then rewritten in place (tool stripped) so every
+        // later resume of this turn inherits the stripped form too.
         let base = self.request_body(ctx)?;
         let this: &ClaudeLlm = self;
         Ok(async_stream::stream! {
+            let mut base = base;
             let mut body = base.clone();
             let mut folder = Folder::new(this.model.clone());
             let mut resumes = 0u32;
+            let mut retried_without_search = false;
             loop {
                 let stream = match this.send(&body).await {
                     Ok(s) => s,
+                    Err(SendFail::Http { status, body: err })
+                        if is_web_search_disabled(status, &err) && !retried_without_search =>
+                    {
+                        tracing::error!(
+                            "claude: web search is disabled for this organisation — enable it at \
+https://platform.claude.com/settings/privacy, or set CLAUDE_WEB_SEARCH=false to stop asking. \
+Retrying this turn without it."
+                        );
+                        this.disable_search();
+                        retried_without_search = true;
+                        base = strip_server_search(&base);
+                        body = base.clone();
+                        continue;
+                    }
                     Err(e) => {
                         tracing::warn!(error = %e, "claude: request failed");
                         break;
@@ -1131,6 +1213,71 @@ mod tests {
         );
         assert_eq!(f.stop_reason.as_deref(), Some("pause_turn"));
         assert!(f.request_done);
+    }
+
+    #[test]
+    fn an_org_level_web_search_refusal_is_recognised() {
+        assert!(is_web_search_disabled(
+            400,
+            r#"{"type":"error","error":{"type":"invalid_request_error","message":"Web search is not enabled for this organization."}}"#
+        ));
+        assert!(!is_web_search_disabled(
+            400,
+            r#"{"error":{"message":"max_tokens: must be >= 1"}}"#
+        ));
+        assert!(!is_web_search_disabled(
+            429,
+            r#"{"error":{"message":"web search is not enabled"}}"#
+        ));
+    }
+
+    #[test]
+    fn disabling_search_drops_the_tool_from_the_next_request() {
+        let llm = ClaudeLlm::new(
+            "k".into(),
+            "claude-opus-5".into(),
+            "low".into(),
+            Some(search_cfg()),
+        );
+        assert!(llm.request_body(&plain_ctx()).unwrap()["tools"].is_array());
+        llm.disable_search();
+        assert!(
+            llm.request_body(&plain_ctx())
+                .unwrap()
+                .get("tools")
+                .is_none(),
+            "the tool must not come back on the retry"
+        );
+    }
+
+    #[test]
+    fn stripping_the_server_tool_leaves_the_client_tools() {
+        let body = json!({"tools": [
+            {"type": "web_search_20260209", "name": "web_search"},
+            {"name": "get_weather", "description": "W", "input_schema": {}}
+        ]});
+        assert_eq!(
+            strip_server_search(&body)["tools"],
+            json!([{"name": "get_weather", "description": "W", "input_schema": {}}])
+        );
+        let only_server = json!({"tools": [{"type": "web_search_20260209", "name": "web_search"}]});
+        assert!(strip_server_search(&only_server).get("tools").is_none());
+    }
+
+    #[test]
+    fn a_failed_search_result_block_is_not_mistaken_for_results() {
+        let frames = frames_of(&[
+            r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"web_search_tool_result","tool_use_id":"srvtoolu_1","content":{"type":"web_search_tool_result_error","error_code":"max_uses_exceeded"}}}"#,
+            r#"data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#,
+            r#"data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"I could not look that up."}}"#,
+            r#"data: {"type":"content_block_stop","index":1}"#,
+            r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":9}}"#,
+            r#"data: {"type":"message_stop"}"#,
+        ]);
+        assert_eq!(spoken(&frames), "I could not look that up.");
+        assert!(!frames
+            .iter()
+            .any(|f| matches!(f, Frame::FunctionCallsStarted(_))));
     }
 }
 
