@@ -223,6 +223,12 @@ impl TimerBook {
 /// not a task that sleeps for two million years.
 pub const MAX_MINUTES: f64 = 24.0 * 60.0;
 
+/// Gap between repeats of the expiry alert.
+pub const REPEAT_EVERY: Duration = Duration::from_secs(10);
+/// Total announcements before a timer gives up: the initial alert plus four
+/// repeats, a ringing window of about forty seconds.
+pub const MAX_ANNOUNCEMENTS: usize = 5;
+
 /// The LLM sometimes sends numbers as strings; accept both like Python's `float()`.
 ///
 /// Rejects anything `Duration::from_secs_f64` would panic on. This matters
@@ -260,28 +266,77 @@ impl Skill for SetTimer {
         if minutes <= 0.0 {
             return "The timer duration needs to be greater than zero.".to_string();
         }
-        let label = arg_str(args, "label").to_string();
-        let Some(frames) = ctx.frames.clone() else {
-            // No live pipeline registered for this run (shouldn't happen in a call).
-            tracing::warn!(run_id = ctx.run_id, "set_timer: no pipeline for this call");
+        // A live call gives us both, or neither (`CallRegistry::ctx`).
+        let (Some(frames), Some(state)) = (ctx.frames.clone(), ctx.state.clone()) else {
+            tracing::warn!(run_id = ctx.run_id, "set_timer: no live call");
             return "I can't set a timer right now.".to_string();
         };
+
+        let label = arg_str(args, "label").to_string();
+        let spoken_name = (!label.is_empty()).then(|| label.clone());
+        let name = spoken_name.as_deref().and_then(normalize_name);
+
         let delay = Duration::from_secs_f64(minutes * 60.0);
+        let (id, token) = state.with_timers(|b| {
+            b.insert(name, spoken_name.clone(), minutes, Instant::now() + delay)
+        });
+
         let run_id = ctx.run_id;
-        let fire_label = label.clone();
+        let text = alert_text(spoken_name.as_deref().unwrap_or(""));
+        // An absolute deadline, fixed now — not a relative `sleep(delay)`
+        // constructed lazily on the task's first poll. Under a paused test
+        // clock, that first poll can happen *after* the test has already
+        // advanced time past this point (e.g. inside `tokio::time::advance`'s
+        // own internal yield), which would silently push the fire time back
+        // by however much the clock moved before the task ever ran. Pinning
+        // the deadline here, before `tokio::spawn`, makes firing independent
+        // of when the scheduler gets around to polling the new task.
+        let deadline = tokio::time::Instant::now() + delay;
+        // Weak, never Arc: a strong reference would keep `CallState` — and so
+        // the whole `TimerBook` — alive past the end of the call, and the
+        // book's `Drop` would never cancel anything.
+        let state = std::sync::Arc::downgrade(&state);
         tokio::spawn(async move {
-            tokio::time::sleep(delay).await;
-            let text = alert_text(&fire_label);
-            match frames.send(Frame::TtsSpeak {
-                text: text.clone(),
-                append_to_context: None,
-            }) {
-                Ok(()) => tracing::info!(run_id, %text, "timer fired"),
-                Err(_) => {
-                    tracing::info!(run_id, %text, "timer fired after the call ended; dropped")
+            tokio::select! {
+                _ = token.cancelled() => {
+                    // cancel()/cancel_all()/end-of-call already removed us.
+                    tracing::info!(run_id, id, "timer cancelled before firing");
+                    return;
+                }
+                _ = tokio::time::sleep_until(deadline) => {}
+            }
+            if let Some(s) = state.upgrade() {
+                s.with_timers(|b| b.mark_ringing(id));
+            }
+            for i in 0..MAX_ANNOUNCEMENTS {
+                // `cancel()` sets this synchronously, so checking here means a
+                // cancelled timer can never get one last word in.
+                if token.is_cancelled() {
+                    break;
+                }
+                let frame = Frame::TtsSpeak {
+                    text: text.clone(),
+                    // Record the timer going off once, not five times.
+                    append_to_context: (i > 0).then_some(false),
+                };
+                if frames.send(frame).is_err() {
+                    tracing::info!(run_id, %text, "timer fired after the call ended; dropped");
+                    break;
+                }
+                tracing::info!(run_id, id, %text, announcement = i + 1, "timer fired");
+                if i + 1 == MAX_ANNOUNCEMENTS {
+                    break;
+                }
+                tokio::select! {
+                    _ = token.cancelled() => break,
+                    _ = tokio::time::sleep(REPEAT_EVERY) => {}
                 }
             }
+            if let Some(s) = state.upgrade() {
+                s.with_timers(|b| b.remove(id));
+            }
         });
+
         let pretty = format_duration(minutes);
         let tail = if label.is_empty() {
             String::new()
@@ -315,26 +370,131 @@ mod tests {
         assert_eq!(parse_minutes(None), None);
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn timer_speaks_into_the_call_after_the_delay() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
+    /// A `CallCtx` with a live pipeline and live per-call state.
+    fn live_ctx() -> (
+        CallCtx,
+        mpsc::UnboundedReceiver<Frame>,
+        std::sync::Arc<CallState>,
+    ) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let state = std::sync::Arc::new(CallState::default());
         let ctx = CallCtx {
             run_id: 7,
             frames: Some(tx),
             media: None,
             spotify: None,
-            state: None,
+            state: Some(state.clone()),
         };
+        (ctx, rx, state)
+    }
+
+    fn spoken(rx: &mut mpsc::UnboundedReceiver<Frame>) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Ok(Frame::TtsSpeak { text, .. }) = rx.try_recv() {
+            out.push(text);
+        }
+        out
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timer_speaks_into_the_call_after_the_delay() {
+        let (ctx, mut rx, _state) = live_ctx();
         let reply = SetTimer
             .call(&json!({"minutes": 0.5, "label": "tea"}), &ctx)
             .await;
         assert_eq!(reply, "Timer set for 30 seconds for tea.");
-        assert!(rx.try_recv().is_err(), "nothing spoken before the delay");
+        assert!(spoken(&mut rx).is_empty(), "nothing spoken before the delay");
         tokio::time::advance(Duration::from_secs(31)).await;
-        match rx.recv().await {
-            Some(Frame::TtsSpeak { text, .. }) => assert_eq!(text, "Your tea timer is up."),
-            other => panic!("unexpected {other:?}"),
+        tokio::task::yield_now().await;
+        assert_eq!(spoken(&mut rx), vec!["Your tea timer is up."]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn alert_repeats_a_bounded_number_of_times() {
+        let (ctx, mut rx, state) = live_ctx();
+        SetTimer.call(&json!({"minutes": 1, "label": "tea"}), &ctx).await;
+        tokio::time::advance(Duration::from_secs(61)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(spoken(&mut rx).len(), 1, "one announcement on firing");
+
+        // Four repeats, ten seconds apart.
+        for n in 2..=MAX_ANNOUNCEMENTS {
+            tokio::time::advance(REPEAT_EVERY).await;
+            tokio::task::yield_now().await;
+            assert_eq!(
+                spoken(&mut rx),
+                vec!["Your tea timer is up."],
+                "announcement {n}"
+            );
         }
+
+        // Then it gives up and forgets itself.
+        tokio::time::advance(REPEAT_EVERY * 10).await;
+        tokio::task::yield_now().await;
+        assert!(spoken(&mut rx).is_empty(), "stops after the cap");
+        assert!(state.with_timers(|b| b.is_empty()), "book is cleaned up");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelling_before_it_fires_speaks_nothing() {
+        let (ctx, mut rx, state) = live_ctx();
+        SetTimer.call(&json!({"minutes": 5, "label": "tea"}), &ctx).await;
+        let id = state.with_timers(|b| b.entries()[0].id);
+        assert!(state.with_timers(|b| b.cancel(id)));
+        tokio::time::advance(Duration::from_secs(600)).await;
+        tokio::task::yield_now().await;
+        assert!(spoken(&mut rx).is_empty());
+        assert!(state.with_timers(|b| b.is_empty()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelling_while_ringing_stops_the_announcements() {
+        let (ctx, mut rx, state) = live_ctx();
+        SetTimer.call(&json!({"minutes": 1, "label": "tea"}), &ctx).await;
+        tokio::time::advance(Duration::from_secs(61)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(spoken(&mut rx).len(), 1);
+        assert!(
+            state.with_timers(|b| b.entries()[0].ringing),
+            "a ringing timer stays in the book so it can be silenced"
+        );
+
+        let id = state.with_timers(|b| b.entries()[0].id);
+        state.with_timers(|b| b.cancel(id));
+        tokio::time::advance(REPEAT_EVERY * 10).await;
+        tokio::task::yield_now().await;
+        assert!(spoken(&mut rx).is_empty(), "no announcement after cancel()");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn several_timers_run_at_once_and_each_says_its_own_name() {
+        let (ctx, mut rx, state) = live_ctx();
+        SetTimer.call(&json!({"minutes": 1, "label": "tea"}), &ctx).await;
+        SetTimer.call(&json!({"minutes": 2, "label": "pasta"}), &ctx).await;
+        SetTimer.call(&json!({"minutes": 3}), &ctx).await;
+        assert_eq!(state.with_timers(|b| b.len()), 3);
+
+        tokio::time::advance(Duration::from_secs(61)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(spoken(&mut rx), vec!["Your tea timer is up."]);
+
+        tokio::time::advance(Duration::from_secs(60)).await;
+        tokio::task::yield_now().await;
+        let heard = spoken(&mut rx);
+        assert!(heard.contains(&"Your pasta timer is up.".to_string()));
+        assert!(heard.contains(&"Your tea timer is up.".to_string()), "tea repeats");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_timer_whose_call_ended_is_dropped() {
+        let (ctx, rx, state) = live_ctx();
+        SetTimer.call(&json!({"minutes": 1, "label": "tea"}), &ctx).await;
+        drop(rx);
+        drop(ctx);
+        drop(state); // the call ended: last strong Arc<CallState> released
+        tokio::time::advance(Duration::from_secs(300)).await;
+        tokio::task::yield_now().await;
+        // No panic, no leak. The task woke on the cancelled parent and exited.
     }
 
     #[tokio::test]
