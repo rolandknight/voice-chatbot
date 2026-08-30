@@ -265,8 +265,7 @@ pub fn format_remaining(left: Duration) -> String {
 /// Adjectival form of a requested duration: "the **5 minute** timer".
 pub fn duration_adjective(minutes: f64) -> String {
     let d = format_duration(minutes);
-    // Written as a match, not `.map(..).unwrap_or(d)`: the latter is a borrow
-    // of `d` in the same expression that moves it.
+    // Written as a match, not `.map(..).unwrap_or(d)`, for readability.
     match d.strip_suffix('s') {
         Some(trimmed) => trimmed.to_string(),
         None => d,

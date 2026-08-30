@@ -55,13 +55,30 @@ pub fn normalize_name(raw: &str) -> Option<String> {
     Some(s)
 }
 
+/// Whether two normalized names refer to the same timer by word-boundary
+/// containment: "pasta" finds "pasta sauce" and vice versa, but "steak" does
+/// not find "tea" just because the letters happen to occur inside it (plain
+/// `"steak".contains("tea")` is true on raw substrings — a real bug, since a
+/// `{"name":"steak"}` call would cancel a running "tea" timer).
+fn names_overlap(a: &str, b: &str) -> bool {
+    let a_words: Vec<&str> = a.split_whitespace().collect();
+    let b_words: Vec<&str> = b.split_whitespace().collect();
+    contains_word_run(&a_words, &b_words) || contains_word_run(&b_words, &a_words)
+}
+
+/// True if `needle` occurs as a contiguous run inside `haystack`, comparing
+/// whole words rather than raw characters.
+fn contains_word_run(haystack: &[&str], needle: &[&str]) -> bool {
+    !needle.is_empty() && haystack.windows(needle.len()).any(|w| w == needle)
+}
+
 /// How long is left, as a countdown reads aloud. Deliberately separate from
 /// `format_duration`, whose "2.5 minutes" form is right for "timer set for …"
 /// and wrong for "… left".
 pub fn format_remaining(left: Duration) -> String {
     let secs = left.as_secs();
     if secs == 0 {
-        return "no time".to_string();
+        return "less than a second".to_string();
     }
     if secs < 60 {
         return if secs == 1 {
@@ -81,8 +98,7 @@ pub fn format_remaining(left: Duration) -> String {
 /// Adjectival form of a requested duration: "the **5 minute** timer".
 pub fn duration_adjective(minutes: f64) -> String {
     let d = format_duration(minutes);
-    // Written as a match, not `.map(..).unwrap_or(d)`: the latter is a borrow
-    // of `d` in the same expression that moves it.
+    // Written as a match, not `.map(..).unwrap_or(d)`, for readability.
     match d.strip_suffix('s') {
         Some(trimmed) => trimmed.to_string(),
         None => d,
@@ -114,7 +130,16 @@ pub struct TimerEntry {
     /// Fired, and still announcing. Ringing timers stay in the book so they
     /// can be silenced.
     pub ringing: bool,
-    pub cancel: CancellationToken,
+    /// Not `pub`: `entries()` clones `TimerEntry` for read-only display, and
+    /// a caller that could reach this token directly could cancel it without
+    /// going through `TimerBook::cancel`/`cancel_all`, which remove the book
+    /// entry *before* cancelling the token. Cancelling the token alone would
+    /// leave a dead entry in the book forever, since the announce task's
+    /// "cancelled before firing" branch returns without removing anything —
+    /// it relies on `cancel()` having already done so. Keeping the field
+    /// private keeps that invariant a compile-time guarantee instead of a
+    /// convention every future call site has to remember.
+    cancel: CancellationToken,
 }
 
 /// Every timer on one call.
@@ -244,17 +269,36 @@ pub const REPEAT_EVERY: Duration = Duration::from_secs(10);
 pub const MAX_ANNOUNCEMENTS: usize = 5;
 
 /// The LLM sometimes sends numbers as strings; accept both like Python's `float()`.
-///
-/// Rejects anything `Duration::from_secs_f64` would panic on. This matters
-/// because the caller's `minutes <= 0.0` guard is *false* for NaN, so without
-/// the `is_finite` check a `{"minutes": "NaN"}` tool call panics the task.
-fn parse_minutes(v: Option<&Value>) -> Option<f64> {
+fn extract_finite_number(v: Option<&Value>) -> Option<f64> {
     let n = match v? {
         Value::Number(n) => n.as_f64()?,
         Value::String(s) => s.trim().parse().ok()?,
         _ => return None,
     };
-    (n.is_finite() && n <= MAX_MINUTES).then_some(n)
+    n.is_finite().then_some(n)
+}
+
+/// A duration for `set_timer` to create.
+///
+/// Rejects anything `Duration::from_secs_f64` would panic on. This matters
+/// because the caller's `minutes <= 0.0` guard is *false* for NaN, so without
+/// the `is_finite` check (inside `extract_finite_number`) a `{"minutes":
+/// "NaN"}` tool call panics the task. Also rejects anything over
+/// `MAX_MINUTES`: a hallucinated `1e12` should get a spoken error, not a task
+/// that sleeps for two million years.
+fn parse_minutes(v: Option<&Value>) -> Option<f64> {
+    extract_finite_number(v).filter(|n| *n <= MAX_MINUTES)
+}
+
+/// A duration for `cancel_timer` to match an existing timer against.
+///
+/// Deliberately has no upper cap: `MAX_MINUTES` is a `set_timer` policy about
+/// what may be *created*, not a definition of "argument absent". Reusing
+/// `parse_minutes` here folded "over the cap" into `None`, indistinguishable
+/// from no `minutes` argument at all, so `{"minutes": 2000}` fell through to
+/// the sole-timer rule and cancelled whatever was running.
+fn parse_cancel_minutes(v: Option<&Value>) -> Option<f64> {
+    extract_finite_number(v)
 }
 
 pub fn alert_text(label: &str) -> String {
@@ -287,8 +331,16 @@ impl Skill for SetTimer {
         };
 
         let label = arg_str(args, "label").to_string();
-        let spoken_name = (!label.is_empty()).then(|| label.clone());
-        let name = spoken_name.as_deref().and_then(normalize_name);
+        // Both the spoken name and the match key come from the *normalized*
+        // label. Storing the raw label as `spoken_name` while only the match
+        // key was normalized doubled "timer" in every surface that speaks it
+        // back: "set the oven timer for 10 minutes" routinely gives a
+        // wrapped label, and "the oven timer" spoken verbatim by TTS reads
+        // as "Your the oven timer timer is up." The `tail` below still uses
+        // the raw `label`, so "Timer set for 30 seconds for tea." is
+        // unaffected.
+        let spoken_name = normalize_name(&label);
+        let name = spoken_name.clone();
 
         let delay = Duration::from_secs_f64(minutes * 60.0);
         // A single absolute deadline, fixed now and shared by the book entry
@@ -345,7 +397,9 @@ impl Skill for SetTimer {
                 }
                 let frame = Frame::TtsSpeak {
                     text: text.clone(),
-                    // Record the timer going off once, not five times.
+                    // Intent: only the first announcement should register as
+                    // part of the conversation, not every repeat — though no
+                    // consumer of this field currently acts on it either way.
                     append_to_context: (i > 0).then_some(false),
                 };
                 let sent = s.with_timers(|b| {
@@ -452,7 +506,7 @@ impl Skill for CancelTimer {
 
         let raw = arg_str(args, "name");
         let wanted = normalize_name(raw);
-        let minutes = parse_minutes(args.get("minutes"));
+        let minutes = parse_cancel_minutes(args.get("minutes"));
 
         let candidates: Vec<TimerEntry> = if let Some(w) = &wanted {
             let exact: Vec<TimerEntry> = entries
@@ -460,19 +514,43 @@ impl Skill for CancelTimer {
                 .filter(|t| t.name.as_deref() == Some(w.as_str()))
                 .cloned()
                 .collect();
-            if exact.is_empty() {
-                // "pasta" should still find "pasta sauce", and vice versa.
+            let name_matched = if exact.is_empty() {
+                // "pasta" should still find "pasta sauce", and vice versa —
+                // on word boundaries, so "steak" does not match a "tea"
+                // timer just because the letters occur inside it.
                 entries
                     .iter()
-                    .filter(|t| {
-                        t.name
-                            .as_deref()
-                            .is_some_and(|n| n.contains(w.as_str()) || w.contains(n))
-                    })
+                    .filter(|t| t.name.as_deref().is_some_and(|n| names_overlap(n, w)))
                     .cloned()
                     .collect()
             } else {
                 exact
+            };
+            // A duplicate name ("two timers named pasta") produces a
+            // "which one?" question naming both. If the answer also supplies
+            // a duration, that is the natural way to resolve it — narrow to
+            // the duration match rather than asking the identical question
+            // again. An empty narrowing (the duration matches none of the
+            // name-matched timers) keeps the full name-matched set, so the
+            // question still lists the right candidates instead of emptying
+            // out.
+            if name_matched.len() > 1 {
+                if let Some(m) = minutes {
+                    let narrowed: Vec<TimerEntry> = name_matched
+                        .iter()
+                        .filter(|t| (t.minutes - m).abs() < 0.01)
+                        .cloned()
+                        .collect();
+                    if narrowed.is_empty() {
+                        name_matched
+                    } else {
+                        narrowed
+                    }
+                } else {
+                    name_matched
+                }
+            } else {
+                name_matched
             }
         } else if let Some(m) = minutes {
             // Never `==` on f64.
@@ -778,6 +856,80 @@ mod tests {
         // No panic, no leak. The task woke on the cancelled parent and exited.
     }
 
+    /// FIX 8 (final review): the entire safety argument behind holding one
+    /// upgraded `Arc<CallState>` for a ringing timer's whole announcement
+    /// window (rather than re-upgrading the `Weak` on every iteration) is
+    /// that it cannot outlive the call: once every external
+    /// `Arc<CallState>` and the frame receiver are gone, the next
+    /// announcement's send fails, the task removes itself and exits, and
+    /// only then does the held `Arc` drop — releasing `CallState` and,
+    /// through its `TimerBook`'s own `Drop`, cancelling every sibling
+    /// timer's token. Nothing pinned this before.
+    #[tokio::test(start_paused = true)]
+    async fn call_ending_mid_ring_still_drops_call_state_and_cancels_siblings() {
+        let (ctx, mut rx, state) = live_ctx();
+        let weak = std::sync::Arc::downgrade(&state);
+
+        SetTimer
+            .call(&json!({"minutes": 1, "label": "tea"}), &ctx)
+            .await;
+        SetTimer
+            .call(&json!({"minutes": 30, "label": "bread"}), &ctx)
+            .await;
+
+        let sibling_token = state.with_timers(|b| {
+            b.entries()
+                .into_iter()
+                .find(|t| t.spoken_name.as_deref() == Some("bread"))
+                .expect("the bread timer is registered")
+                .cancel
+        });
+
+        tokio::time::advance(Duration::from_secs(61)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            spoken(&mut rx),
+            vec!["Your tea timer is up."],
+            "tea is ringing"
+        );
+        assert!(
+            state.with_timers(|b| b
+                .entries()
+                .into_iter()
+                .find(|t| t.spoken_name.as_deref() == Some("tea"))
+                .unwrap()
+                .ringing),
+            "tea is mid-ring"
+        );
+
+        // End of call: the frame receiver and every Arc<CallState> this test
+        // holds are gone. Only the ringing task's own held reference could
+        // remain.
+        drop(rx);
+        drop(ctx);
+        drop(state);
+        assert!(
+            weak.upgrade().is_some(),
+            "the ringing task's held Arc keeps CallState alive through its window"
+        );
+        assert!(
+            !sibling_token.is_cancelled(),
+            "the sibling has not been cancelled yet"
+        );
+
+        tokio::time::advance(REPEAT_EVERY).await;
+        tokio::task::yield_now().await;
+
+        assert!(
+            weak.upgrade().is_none(),
+            "the next failed send must let the ringing task's held Arc drop"
+        );
+        assert!(
+            sibling_token.is_cancelled(),
+            "dropping CallState cancels every sibling timer through call_token"
+        );
+    }
+
     #[tokio::test]
     async fn rejects_bad_durations_and_missing_pipeline() {
         let ctx = CallCtx::detached(1);
@@ -837,7 +989,10 @@ mod tests {
 
     #[test]
     fn remaining_reads_naturally() {
-        assert_eq!(format_remaining(Duration::from_secs(0)), "no time");
+        assert_eq!(
+            format_remaining(Duration::from_secs(0)),
+            "less than a second"
+        );
         assert_eq!(format_remaining(Duration::from_secs(1)), "1 second");
         assert_eq!(format_remaining(Duration::from_secs(30)), "30 seconds");
         assert_eq!(format_remaining(Duration::from_secs(59)), "59 seconds");
@@ -988,6 +1143,26 @@ mod tests {
         assert!(state.with_timers(|b| b.is_empty()));
     }
 
+    /// FIX 4 (final review): matching was raw substring containment
+    /// (`n.contains(w) || w.contains(n)`), so with only a "tea" timer
+    /// running, `{"name":"steak"}` matched because `"steak".contains("tea")`.
+    /// Matching must respect word boundaries: "pasta" still finds "pasta
+    /// sauce" (covered by `cancels_by_partial_name` above), but "steak" must
+    /// not find "tea".
+    #[tokio::test(start_paused = true)]
+    async fn an_unrelated_word_does_not_match_on_raw_substring() {
+        let (ctx, _rx, state) = board(&[(5.0, Some("tea"))]).await;
+        assert_eq!(
+            CancelTimer.call(&json!({"name": "steak"}), &ctx).await,
+            "You don't have a steak timer. You have a tea timer."
+        );
+        assert_eq!(
+            state.with_timers(|b| b.len()),
+            1,
+            "the tea timer must survive"
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn cancels_by_duration_including_fractions() {
         let (ctx, _rx, state) = board(&[(5.0, None), (0.5, None)]).await;
@@ -1001,6 +1176,25 @@ mod tests {
             "Cancelled the 5 minute timer."
         );
         assert!(state.with_timers(|b| b.is_empty()));
+    }
+
+    /// FIX 5 (final review): `cancel_timer` reused `set_timer`'s
+    /// `parse_minutes`, which folds "non-finite or over the 24 hour cap"
+    /// into `None` — indistinguishable from "argument absent". With one
+    /// 2-minute timer running, `{"minutes":2000}` must not fall through to
+    /// the sole-timer rule and cancel it.
+    #[tokio::test(start_paused = true)]
+    async fn an_over_cap_minutes_argument_does_not_match_the_sole_timer() {
+        let (ctx, _rx, state) = board(&[(2.0, None)]).await;
+        assert_eq!(
+            CancelTimer.call(&json!({"minutes": 2000}), &ctx).await,
+            "You don't have a 2000 minute timer. You have a 2 minute timer."
+        );
+        assert_eq!(
+            state.with_timers(|b| b.len()),
+            1,
+            "the only timer must survive"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -1037,6 +1231,40 @@ mod tests {
         assert_eq!(state.with_timers(|b| b.len()), 2);
     }
 
+    /// FIX 2 (final review): `name` and `minutes` were or-ed, never and-ed,
+    /// so answering the "which pasta timer?" question with the duration
+    /// ({"name":"pasta","minutes":3}) asked the identical question forever
+    /// — only dropping the name worked. A name match with more than one
+    /// candidate must be narrowed by duration when one is also supplied.
+    #[tokio::test(start_paused = true)]
+    async fn duplicate_names_narrowed_by_duration_resolve_instead_of_looping() {
+        let (ctx, _rx, state) = board(&[(3.0, Some("pasta")), (8.0, Some("pasta"))]).await;
+        let reply = CancelTimer.call(&json!({"name": "pasta"}), &ctx).await;
+        assert_eq!(
+            reply,
+            "You have a pasta timer with about 3 minutes left and a pasta timer \
+             with about 8 minutes left. Which should I cancel?"
+        );
+        assert_eq!(
+            state.with_timers(|b| b.len()),
+            2,
+            "nothing was cancelled yet"
+        );
+
+        assert_eq!(
+            CancelTimer
+                .call(&json!({"name": "pasta", "minutes": 3}), &ctx)
+                .await,
+            "Cancelled the pasta timer."
+        );
+        let remaining = state.with_timers(|b| b.entries());
+        assert_eq!(remaining.len(), 1, "only the 3 minute pasta timer is gone");
+        assert!(
+            (remaining[0].minutes - 8.0).abs() < 0.01,
+            "the 8 minute pasta timer is still running"
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn an_unknown_name_says_what_is_running() {
         let (ctx, _rx, state) = board(&[(5.0, Some("pasta")), (10.0, None)]).await;
@@ -1062,6 +1290,55 @@ mod tests {
             "You don't have a rice timer. You have a pasta timer."
         );
         assert_eq!(state.with_timers(|b| b.len()), 1);
+    }
+
+    /// FIX 1 (final review, blocks merge): `spoken_name` was stored raw
+    /// while only the match key was normalized, so a routine wrapped label
+    /// ("set the oven timer for 10 minutes") doubled "timer" in every
+    /// spoken surface — the alert (spoken verbatim by TTS, up to five
+    /// times), `list_timers`, and the `cancel_timer` confirmation alike.
+    /// This is the same bug class commit 65f5276 already fixed for
+    /// `cancel_timer`'s no-match reply; the set side was missed.
+    #[tokio::test(start_paused = true)]
+    async fn a_wrapped_label_does_not_double_timer_in_any_spoken_surface() {
+        let (ctx, mut rx, state) = live_ctx();
+        SetTimer
+            .call(&json!({"minutes": 5, "label": "the oven timer"}), &ctx)
+            .await;
+
+        assert_eq!(
+            ListTimers.call(&json!({}), &ctx).await,
+            "You have a oven timer with about 5 minutes left."
+        );
+
+        tokio::time::advance(Duration::from_secs(301)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(spoken(&mut rx), vec!["Your oven timer is up."]);
+
+        assert_eq!(
+            CancelTimer.call(&json!({"name": "oven"}), &ctx).await,
+            "Cancelled the oven timer."
+        );
+        assert!(state.with_timers(|b| b.is_empty()));
+    }
+
+    /// Same bug, the other realistic phrasing ("oven timer" with no leading
+    /// "the") — both must normalize to the same spoken name.
+    #[tokio::test(start_paused = true)]
+    async fn a_wrapped_label_speaks_the_normalized_alert_however_phrased() {
+        for label in ["the oven timer", "oven timer"] {
+            let (ctx, mut rx, _state) = live_ctx();
+            SetTimer
+                .call(&json!({"minutes": 1, "label": label}), &ctx)
+                .await;
+            tokio::time::advance(Duration::from_secs(61)).await;
+            tokio::task::yield_now().await;
+            assert_eq!(
+                spoken(&mut rx),
+                vec!["Your oven timer is up."],
+                "label {label:?}"
+            );
+        }
     }
 
     #[tokio::test(start_paused = true)]
