@@ -46,6 +46,11 @@ pub struct CallCtx {
     pub spotify: Option<Arc<spotify_client::SpotifyClient>>,
     /// This call's voice/backend flags. `None` outside a live call.
     pub state: Option<Arc<CallState>>,
+    /// Sample rate of this call's TTS backend. Audio injected as
+    /// `Frame::OutputAudio` must be generated at exactly this rate: the output
+    /// stage resamples with a fixed `tts_rate -> carrier_rate` converter and
+    /// ignores the frame's own `sample_rate`. `None` outside a live call.
+    pub tts_rate: Option<u32>,
 }
 
 impl CallCtx {
@@ -57,6 +62,7 @@ impl CallCtx {
             media: None,
             spotify: None,
             state: None,
+            tts_rate: None,
         }
     }
 
@@ -193,6 +199,8 @@ pub struct CallHandle {
     pub frames: mpsc::UnboundedSender<Frame>,
     pub media: Arc<MediaController>,
     pub state: Arc<CallState>,
+    /// The TTS backend's sample rate; see [`CallCtx::tts_rate`].
+    pub tts_rate: u32,
 }
 
 /// Per-call handles a skill may need. `SessionSource::tool_call` only
@@ -236,6 +244,7 @@ impl CallRegistry {
             frames: handle.as_ref().map(|h| h.frames.clone()),
             media: handle.as_ref().map(|h| h.media.clone()),
             spotify: self.spotify.clone(),
+            tts_rate: handle.as_ref().map(|h| h.tts_rate),
             state: handle.map(|h| h.state),
         }
     }

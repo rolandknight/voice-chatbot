@@ -550,6 +550,9 @@ pub async fn offer(
         ),
         _ => unreachable!("validated at startup"),
     };
+    // Captured before `tts` moves into the builder below. Skills that inject
+    // raw audio (the timer chime) must generate it at exactly this rate.
+    let tts_rate = flowcat_core::service::TtsService::sample_rate(&tts);
     let brain = crate::brain::BabelBrain::new(cfg.system_prompt.clone());
     let session = state.session.clone();
 
@@ -596,6 +599,7 @@ pub async fn offer(
                     run_id,
                     crate::skills::CallHandle {
                         frames: task.task.queue_sender(),
+                        tts_rate,
                         media,
                         state: call_state,
                     },

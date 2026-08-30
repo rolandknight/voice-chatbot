@@ -650,6 +650,10 @@ mod tests {
         assert_eq!(parse_minutes(None), None);
     }
 
+    /// Stand-in for a TTS backend's rate. The chime is generated at whatever
+    /// the live backend reports, so the tests pin a plausible one.
+    const TEST_TTS_RATE: u32 = 24_000;
+
     /// A `CallCtx` with a live pipeline and live per-call state.
     fn live_ctx() -> (
         CallCtx,
@@ -664,6 +668,7 @@ mod tests {
             media: None,
             spotify: None,
             state: Some(state.clone()),
+            tts_rate: Some(TEST_TTS_RATE),
         };
         (ctx, rx, state)
     }
