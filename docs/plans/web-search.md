@@ -1301,9 +1301,14 @@ Replace `run_llm` and delete `sse_to_frames` entirely (nothing else calls it):
 
 ```rust
     async fn run_llm<'a>(&'a mut self, ctx: &'a LlmContext) -> Result<BoxStream<'a, Frame>> {
-        let mut body = self.request_body(ctx)?;
+        let base = self.request_body(ctx)?;
         let this: &ClaudeLlm = self;
         Ok(async_stream::stream! {
+            // `base` stays untouched: every resume is base + ONE assistant message
+            // carrying the whole paused turn. Deriving a resume from the previous
+            // resume's body double-appends, because `begin_request()` deliberately
+            // does not clear `blocks` and `assistant_blocks()` is cumulative.
+            let mut body = base.clone();
             let mut folder = Folder::new(this.model.clone());
             let mut resumes = 0u32;
             loop {
@@ -1333,7 +1338,7 @@ Replace `run_llm` and delete `sse_to_frames` entirely (nothing else calls it):
                 if folder.stop_reason.as_deref() == Some("pause_turn") && resumes < MAX_RESUMES {
                     resumes += 1;
                     tracing::info!(resumes, "claude: resuming a paused search turn");
-                    body = resume_body(&body, folder.assistant_blocks());
+                    body = resume_body(&base, folder.assistant_blocks());
                     folder.begin_request();
                     continue;
                 }
@@ -1546,7 +1551,11 @@ Finally, count searches. Add `search_requests: u64` to `Folder` (initialised to 
 
 ```rust
                 if let Some(n) = ev["usage"]["server_tool_use"]["web_search_requests"].as_u64() {
-                    self.search_requests += n;
+                    // Cumulative *within* a request, and `message_delta` can repeat —
+                    // same shape as `output_tokens`. Assign from a per-request base
+                    // (`search_requests_before`, snapshotted in `begin_request()`)
+                    // rather than `+=`, which double-counts on a repeated event.
+                    self.search_requests = self.search_requests_before + n;
                 }
 ```
 
@@ -1775,3 +1784,22 @@ Unit tests cover the pure seams only. Before calling this done, make one real ca
 - **A client tool and a search in the same turn loses the search.** The API returns `stop_reason: "tool_use"` and defers the search to the next request, which needs the `server_tool_use` block echoed back — and Babel drops it. Claude re-decides on the next turn. Not worth a context-shape change until it is seen in practice.
 - **`is_web_search_disabled` matches on error text.** There is no distinct error code for the org-level switch. If Anthropic rewords the message the retry stops firing and Claude turns fail outright — the `tracing::error!` is what will point at this.
 - **Three LLM turns for "Use Claude to…"** (local decides → Claude decides → Claude answers) is untouched. It is real latency and a separate change.
+
+## Corrections applied during execution
+
+Two defects in this plan's own code were caught by review and are corrected above. Both were
+mine, not the implementers'.
+
+- **Task 7 — the resume body accumulated.** The plan originally wrote
+  `body = resume_body(&body, folder.assistant_blocks())`. Because `begin_request()` deliberately
+  does not clear `blocks`, `assistant_blocks()` returns the *cumulative* turn, so the second
+  resume sent `[user, assistant(B1), assistant(B1+B2)]` — the first batch duplicated,
+  `encrypted_content` and all, plus two consecutive assistant messages. Anthropic's documented
+  shape is base + exactly one assistant message, so the third request would have 400'd and
+  `MAX_RESUMES = 2` would have silently bought only one working resume.
+- **Tasks 7 and 8 — the usage counters were assigned, not accumulated.** `output_tokens`,
+  `thinking_tokens`, and later `search_requests` all read from `message_delta`, whose `usage` is
+  cumulative *within* a request and whose event can repeat. A naive `+=` double-counts; a plain
+  assignment reports only the last request of a multi-request turn. The shipped code snapshots a
+  per-request `*_before` base and assigns `before + n`. The same defect appeared twice because the
+  plan reasoned about the counters one at a time instead of about the `usage` object as a whole.
