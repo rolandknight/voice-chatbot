@@ -346,6 +346,13 @@ struct Folder {
     input_tokens: u64,
     output_tokens: u64,
     thinking_tokens: u64,
+    /// Output totals from the requests of this turn that have already ended.
+    /// `message_delta` reports `output_tokens` cumulative *within* a request
+    /// and may repeat, so the running total is this base plus the latest
+    /// per-request figure — never a sum of the deltas. Advanced by
+    /// `begin_request`.
+    output_tokens_before: u64,
+    thinking_tokens_before: u64,
     cache_read: u64,
     cache_write: u64,
     requested_at: Instant,
@@ -384,6 +391,8 @@ impl Folder {
             input_tokens: 0,
             output_tokens: 0,
             thinking_tokens: 0,
+            output_tokens_before: 0,
+            thinking_tokens_before: 0,
             cache_read: 0,
             cache_write: 0,
             requested_at: Instant::now(),
@@ -411,6 +420,8 @@ impl Folder {
     /// Start another request in the same logical turn (a `pause_turn` resume).
     /// Blocks and timings carry over; per-request state does not.
     fn begin_request(&mut self) {
+        self.output_tokens_before = self.output_tokens;
+        self.thinking_tokens_before = self.thinking_tokens;
         self.block_index_offset = self.blocks.keys().last().map_or(0, |k| k + 1);
         self.block_input.clear();
         self.tool_blocks.clear();
@@ -430,9 +441,12 @@ impl Folder {
         match ev["type"].as_str().unwrap_or("") {
             "message_start" => {
                 let u = &ev["message"]["usage"];
-                self.input_tokens = u["input_tokens"].as_u64().unwrap_or(0);
-                self.cache_read = u["cache_read_input_tokens"].as_u64().unwrap_or(0);
-                self.cache_write = u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+                // One `message_start` per request, and every request of a
+                // paused turn is billed its own input — so these add up over
+                // the turn rather than the last request replacing the rest.
+                self.input_tokens += u["input_tokens"].as_u64().unwrap_or(0);
+                self.cache_read += u["cache_read_input_tokens"].as_u64().unwrap_or(0);
+                self.cache_write += u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
             }
             "content_block_start" => {
                 let idx = ev["index"].as_u64().unwrap_or(0);
@@ -538,11 +552,14 @@ impl Folder {
                 }
             }
             "message_delta" => {
+                // Cumulative within the request and possibly repeated, so `n`
+                // replaces this request's share instead of adding to it; the
+                // earlier requests of the turn are in `*_before`.
                 if let Some(n) = ev["usage"]["output_tokens"].as_u64() {
-                    self.output_tokens = n;
+                    self.output_tokens = self.output_tokens_before + n;
                 }
                 if let Some(n) = ev["usage"]["output_tokens_details"]["thinking_tokens"].as_u64() {
-                    self.thinking_tokens = n;
+                    self.thinking_tokens = self.thinking_tokens_before + n;
                 }
                 if let Some(r) = ev["delta"]["stop_reason"].as_str() {
                     self.stop_reason = Some(r.to_string());
@@ -642,9 +659,15 @@ impl LlmService for ClaudeLlm {
     }
 
     async fn run_llm<'a>(&'a mut self, ctx: &'a LlmContext) -> Result<BoxStream<'a, Frame>> {
-        let mut body = self.request_body(ctx)?;
+        // The base request is never mutated: every resume is the base plus the
+        // *whole* paused turn. `assistant_blocks()` is cumulative across the
+        // turn, so appending it to the previous resume's body instead would
+        // re-send request 1's blocks — duplicated `server_tool_use` ids and
+        // `encrypted_content`, in two consecutive assistant messages.
+        let base = self.request_body(ctx)?;
         let this: &ClaudeLlm = self;
         Ok(async_stream::stream! {
+            let mut body = base.clone();
             let mut folder = Folder::new(this.model.clone());
             let mut resumes = 0u32;
             loop {
@@ -674,7 +697,7 @@ impl LlmService for ClaudeLlm {
                 if folder.stop_reason.as_deref() == Some("pause_turn") && resumes < MAX_RESUMES {
                     resumes += 1;
                     tracing::info!(resumes, "claude: resuming a paused search turn");
-                    body = resume_body(&body, folder.assistant_blocks());
+                    body = resume_body(&base, folder.assistant_blocks());
                     folder.begin_request();
                     continue;
                 }
@@ -1019,6 +1042,79 @@ mod tests {
             next["model"], body["model"],
             "everything else must be unchanged"
         );
+    }
+
+    /// `assistant_blocks()` is cumulative across the requests of a turn, so
+    /// each resume body must be derived from the *unmodified* base request.
+    /// Deriving the second one from the first would send request 1's blocks
+    /// twice — duplicated `server_tool_use` ids and `encrypted_content`, in two
+    /// consecutive assistant messages — which is not a shape the API accepts.
+    #[test]
+    fn a_second_resume_is_built_from_the_base_body_not_the_first_resume() {
+        let base = json!({
+            "model": "claude-opus-5",
+            "messages": [{"role": "user", "content": "showtimes?"}]
+        });
+        let b1 = vec![json!({"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search"})];
+        let mut b1_plus_b2 = b1.clone();
+        b1_plus_b2
+            .push(json!({"type": "server_tool_use", "id": "srvtoolu_2", "name": "web_search"}));
+
+        let first = resume_body(&base, b1.clone());
+        assert_eq!(first["messages"].as_array().unwrap().len(), 2);
+
+        let second = resume_body(&base, b1_plus_b2.clone());
+        let msgs = second["messages"].as_array().unwrap();
+        assert_eq!(
+            msgs.len(),
+            2,
+            "the base's user message and exactly one assistant message: {msgs:?}"
+        );
+        assert_eq!(msgs[0], base["messages"][0]);
+        assert_eq!(msgs[1], json!({"role": "assistant", "content": b1_plus_b2}));
+        assert_eq!(
+            base["messages"].as_array().unwrap().len(),
+            1,
+            "the base must not have been mutated"
+        );
+    }
+
+    /// Every request of a paused turn is billed, so the turn's one `Metrics`
+    /// frame has to sum them. `output_tokens` is cumulative *within* a request
+    /// and can arrive on several `message_delta` events, so it must not be
+    /// summed there.
+    #[test]
+    fn a_resumed_turn_bills_every_request_it_made() {
+        let mut f = Folder::new("m".into());
+        f.feed(
+            (SEARCH_STREAM.join("\n")
+                + "\n"
+                + r#"data: {"type":"message_delta","delta":{"stop_reason":"pause_turn"},"usage":{"output_tokens":9}}"#
+                + "\n"
+                + r#"data: {"type":"message_stop"}"#
+                + "\n")
+                .as_bytes(),
+        );
+        f.begin_request();
+        f.feed(
+            ([
+                r#"data: {"type":"message_start","message":{"usage":{"input_tokens":2000,"cache_read_input_tokens":5,"cache_creation_input_tokens":7}}}"#,
+                r#"data: {"type":"message_delta","delta":{},"usage":{"output_tokens":20,"output_tokens_details":{"thinking_tokens":2}}}"#,
+                r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":31,"output_tokens_details":{"thinking_tokens":3}}}"#,
+                r#"data: {"type":"message_stop"}"#,
+            ]
+            .join("\n")
+                + "\n")
+                .as_bytes(),
+        );
+        assert_eq!(f.input_tokens, 2010, "10 from the paused request + 2000");
+        assert_eq!(f.cache_read, 5);
+        assert_eq!(f.cache_write, 7);
+        assert_eq!(
+            f.output_tokens, 40,
+            "9 from the paused request + 31 (not 20 + 31) from the resume"
+        );
+        assert_eq!(f.thinking_tokens, 3, "0 + 3, not 2 + 3");
     }
 
     #[test]
