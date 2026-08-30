@@ -405,8 +405,11 @@ struct Folder {
     cache_read: u64,
     cache_write: u64,
     /// Server-side searches billed so far this turn, from
-    /// `usage.server_tool_use.web_search_requests`.
+    /// `usage.server_tool_use.web_search_requests`. Same shape as
+    /// `output_tokens`: cumulative *within* a request and possibly repeated,
+    /// so it is assigned as `search_requests_before + n`, never summed.
     search_requests: u64,
+    search_requests_before: u64,
     requested_at: Instant,
     /// First output of any kind, thinking included — the real time-to-first-token.
     first_output_at: Option<Instant>,
@@ -448,6 +451,7 @@ impl Folder {
             cache_read: 0,
             cache_write: 0,
             search_requests: 0,
+            search_requests_before: 0,
             requested_at: Instant::now(),
             first_output_at: None,
             first_text_at: None,
@@ -475,6 +479,7 @@ impl Folder {
     fn begin_request(&mut self) {
         self.output_tokens_before = self.output_tokens;
         self.thinking_tokens_before = self.thinking_tokens;
+        self.search_requests_before = self.search_requests;
         self.block_index_offset = self.blocks.keys().last().map_or(0, |k| k + 1);
         self.block_input.clear();
         self.tool_blocks.clear();
@@ -624,7 +629,7 @@ impl Folder {
                     self.stop_reason = Some(r.to_string());
                 }
                 if let Some(n) = ev["usage"]["server_tool_use"]["web_search_requests"].as_u64() {
-                    self.search_requests += n;
+                    self.search_requests = self.search_requests_before + n;
                 }
             }
             "message_stop" => self.request_done = true,
@@ -1197,6 +1202,42 @@ mod tests {
             "9 from the paused request + 31 (not 20 + 31) from the resume"
         );
         assert_eq!(f.thinking_tokens, 3, "0 + 3, not 2 + 3");
+    }
+
+    /// `web_search_requests` lives in the same `usage.server_tool_use` object
+    /// as `output_tokens`, and inherits the same trap: cumulative *within* a
+    /// request, and the request can emit `message_delta` more than once.
+    #[test]
+    fn search_requests_are_not_double_counted_across_a_resumed_turn() {
+        let mut f = Folder::new("m".into());
+        f.feed(
+            ([
+                r#"data: {"type":"message_delta","delta":{},"usage":{"server_tool_use":{"web_search_requests":1}}}"#,
+                r#"data: {"type":"message_delta","delta":{"stop_reason":"pause_turn"},"usage":{"server_tool_use":{"web_search_requests":2}}}"#,
+                r#"data: {"type":"message_stop"}"#,
+            ]
+            .join("\n")
+                + "\n")
+                .as_bytes(),
+        );
+        assert_eq!(
+            f.search_requests, 2,
+            "the second delta replaces the first within a request, it does not add to it"
+        );
+        f.begin_request();
+        f.feed(
+            ([
+                r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"server_tool_use":{"web_search_requests":1}}}"#,
+                r#"data: {"type":"message_stop"}"#,
+            ]
+            .join("\n")
+                + "\n")
+                .as_bytes(),
+        );
+        assert_eq!(
+            f.search_requests, 3,
+            "2 from the paused request + 1 from the resume (not 1+2+1=4, not just 1)"
+        );
     }
 
     #[test]
