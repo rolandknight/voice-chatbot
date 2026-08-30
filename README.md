@@ -10,9 +10,10 @@ shows, sound effects) is decoded in-process by `ffmpeg` and mixed into the
 client's own call audio (`brew install ffmpeg` / `apt install ffmpeg` where
 the client runs — this is now a hard requirement, not an optional one:
 without it radio, shows and sound effects don't play at all); Spotify plays
-on the client's librespot "Babel" endpoint as before. Config is `*` env in the
-repo-root `.env` (see `.env.example`), next to the secrets. Runtime artifacts
-live at the root too: `models/`, `.deps/`, `logs/`, `fixtures/`.
+on the client's librespot "Babel" endpoint as before. Config is environment
+variables in the repo-root `.env` (see `.env.example`), next to the secrets.
+Runtime artifacts live at the root too: `models/`, `.deps/`, `logs/`,
+`fixtures/`.
 
 - Audio devices: `make devices` lists them; `make call` with no
   `INPUT_DEVICE`/`OUTPUT_DEVICE` auto-selects the Jabra speakerphone on both

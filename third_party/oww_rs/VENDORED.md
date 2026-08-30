@@ -10,3 +10,8 @@ Local modifications for the PoC (docs/poc/flowcat-poc-plan.md Phase 1a):
 - `OwwModel::head_from_path` (frontend-less head; `audio` is now an `Option`) so
   the server's multi-wake-word bank shares one melspectrogram/embedding
   frontend across N heads via `OwwModel::detect(features)` (2026-08-26)
+- `poc_probe`'s two test-only env vars renamed to `OWW_PROBE_MODEL` /
+  `OWW_PROBE_WAV`. The repo-wide retirement of the old PoC-era variable prefix
+  had swept them to bare `MODEL`/`WAV`, which are far too collision-prone to
+  read out of a developer's environment; a distinctive prefix keeps the probe
+  opt-in without reviving the retired one (2026-08-30)

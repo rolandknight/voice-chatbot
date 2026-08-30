@@ -251,8 +251,10 @@ mod poc_probe {
     use super::*;
     #[test]
     fn probe_custom_model_on_wav() {
-        let (Ok(model_path), Ok(wav)) = (std::env::var("MODEL"), std::env::var("WAV"))
-        else {
+        let (Ok(model_path), Ok(wav)) = (
+            std::env::var("OWW_PROBE_MODEL"),
+            std::env::var("OWW_PROBE_WAV"),
+        ) else {
             return;
         };
         let mut m = OwwModel::new_from_path(std::path::Path::new(&model_path), 0.3).unwrap();
