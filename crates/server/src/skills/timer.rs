@@ -513,6 +513,31 @@ impl Skill for CancelTimer {
     }
 }
 
+pub struct ListTimers;
+
+#[async_trait]
+impl Skill for ListTimers {
+    fn name(&self) -> &str {
+        "list_timers"
+    }
+
+    async fn call(&self, _args: &Value, ctx: &CallCtx) -> String {
+        let entries = match &ctx.state {
+            Some(s) => s.with_timers(|b| b.entries()),
+            None => Vec::new(),
+        };
+        if entries.is_empty() {
+            return "You don't have any timers running.".to_string();
+        }
+        let now = Instant::now();
+        let parts: Vec<String> = entries
+            .iter()
+            .map(|t| timer_with_remaining(t, now))
+            .collect();
+        format!("You have {}.", join_and(&parts))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1084,6 +1109,49 @@ mod tests {
         let ctx = CallCtx::detached(1);
         assert_eq!(
             CancelTimer.call(&json!({"name": "pasta"}), &ctx).await,
+            "You don't have any timers running."
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn lists_nothing_one_and_several() {
+        let (ctx, _rx, _state) = live_ctx();
+        assert_eq!(
+            ListTimers.call(&json!({}), &ctx).await,
+            "You don't have any timers running."
+        );
+
+        SetTimer.call(&json!({"minutes": 5, "label": "pasta"}), &ctx).await;
+        assert_eq!(
+            ListTimers.call(&json!({}), &ctx).await,
+            "You have a pasta timer with about 5 minutes left."
+        );
+
+        SetTimer.call(&json!({"minutes": 10}), &ctx).await;
+        assert_eq!(
+            ListTimers.call(&json!({}), &ctx).await,
+            "You have a pasta timer with about 5 minutes left and a 10 minute \
+             timer with about 10 minutes left."
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_ringing_timer_is_reported_as_going_off() {
+        let (ctx, _rx, _state) = live_ctx();
+        SetTimer.call(&json!({"minutes": 1, "label": "pasta"}), &ctx).await;
+        tokio::time::advance(Duration::from_secs(61)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            ListTimers.call(&json!({}), &ctx).await,
+            "You have a pasta timer going off now."
+        );
+    }
+
+    #[tokio::test]
+    async fn listing_outside_a_call_answers_instead_of_failing() {
+        let ctx = CallCtx::detached(1);
+        assert_eq!(
+            ListTimers.call(&json!({}), &ctx).await,
             "You don't have any timers running."
         );
     }
