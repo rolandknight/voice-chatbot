@@ -388,6 +388,126 @@ impl Skill for SetTimer {
     }
 }
 
+/// "a pasta timer" / "a 10 minute timer" — for enumerating.
+fn a_timer(t: &TimerEntry) -> String {
+    match &t.spoken_name {
+        Some(n) => format!("a {n} timer"),
+        None => format!("a {} timer", duration_adjective(t.minutes)),
+    }
+}
+
+/// "the pasta timer" / "the 10 minute timer" — for confirming one.
+fn the_timer(t: &TimerEntry) -> String {
+    match &t.spoken_name {
+        Some(n) => format!("the {n} timer"),
+        None => format!("the {} timer", duration_adjective(t.minutes)),
+    }
+}
+
+/// "a pasta timer with about 5 minutes left", or "… going off now".
+fn timer_with_remaining(t: &TimerEntry, now: Instant) -> String {
+    if t.ringing {
+        return format!("{} going off now", a_timer(t));
+    }
+    let left = t.deadline.saturating_duration_since(now);
+    format!("{} with {} left", a_timer(t), format_remaining(left))
+}
+
+/// The spoken "which one?" question. Never cancels anything.
+fn ask_which(candidates: &[TimerEntry], now: Instant) -> String {
+    let parts: Vec<String> = candidates
+        .iter()
+        .map(|t| timer_with_remaining(t, now))
+        .collect();
+    format!("You have {}. Which should I cancel?", join_and(&parts))
+}
+
+pub struct CancelTimer;
+
+#[async_trait]
+impl Skill for CancelTimer {
+    fn name(&self) -> &str {
+        "cancel_timer"
+    }
+
+    async fn call(&self, args: &Value, ctx: &CallCtx) -> String {
+        // Outside a live call there is nothing to cancel — same answer as an
+        // empty board, because that is what the user hears either way.
+        let Some(state) = ctx.state.clone() else {
+            return "You don't have any timers running.".to_string();
+        };
+
+        if args.get("all").and_then(Value::as_bool).unwrap_or(false) {
+            return match state.with_timers(|b| b.cancel_all()) {
+                0 => "You don't have any timers running.".to_string(),
+                1 => "Cancelled your timer.".to_string(),
+                _ => "Cancelled all your timers.".to_string(),
+            };
+        }
+
+        let entries = state.with_timers(|b| b.entries());
+        if entries.is_empty() {
+            return "You don't have any timers running.".to_string();
+        }
+
+        let raw = arg_str(args, "name");
+        let wanted = normalize_name(raw);
+        let minutes = parse_minutes(args.get("minutes"));
+
+        let candidates: Vec<TimerEntry> = if let Some(w) = &wanted {
+            let exact: Vec<TimerEntry> = entries
+                .iter()
+                .filter(|t| t.name.as_deref() == Some(w.as_str()))
+                .cloned()
+                .collect();
+            if exact.is_empty() {
+                // "pasta" should still find "pasta sauce", and vice versa.
+                entries
+                    .iter()
+                    .filter(|t| {
+                        t.name
+                            .as_deref()
+                            .is_some_and(|n| n.contains(w.as_str()) || w.contains(n))
+                    })
+                    .cloned()
+                    .collect()
+            } else {
+                exact
+            }
+        } else if let Some(m) = minutes {
+            // Never `==` on f64.
+            entries
+                .iter()
+                .filter(|t| (t.minutes - m).abs() < 0.01)
+                .cloned()
+                .collect()
+        } else {
+            entries.clone()
+        };
+
+        let now = Instant::now();
+        match candidates.as_slice() {
+            [] => {
+                let running: Vec<String> = entries.iter().map(a_timer).collect();
+                let what = if raw.is_empty() {
+                    duration_adjective(minutes.unwrap_or_default())
+                } else {
+                    raw.to_string()
+                };
+                format!(
+                    "You don't have a {what} timer. You have {}.",
+                    join_and(&running)
+                )
+            }
+            [only] => {
+                state.with_timers(|b| b.cancel(only.id));
+                format!("Cancelled {}.", the_timer(only))
+            }
+            many => ask_which(many, now),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -761,5 +881,139 @@ mod tests {
         assert_eq!(state.with_timers(|b| b.len()), 1);
         drop(state);
         assert!(token.is_cancelled(), "dropping the call cancels its timers");
+    }
+
+    /// Set `n` timers and return the ctx/receiver/state, so a cancel test can
+    /// start from a known board.
+    async fn board(specs: &[(f64, Option<&str>)]) -> (
+        CallCtx,
+        mpsc::UnboundedReceiver<Frame>,
+        std::sync::Arc<CallState>,
+    ) {
+        let (ctx, rx, state) = live_ctx();
+        for (minutes, label) in specs {
+            let args = match label {
+                Some(l) => json!({"minutes": minutes, "label": l}),
+                None => json!({"minutes": minutes}),
+            };
+            SetTimer.call(&args, &ctx).await;
+        }
+        (ctx, rx, state)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancels_by_name_however_the_user_phrases_it() {
+        for phrasing in ["pasta", "the pasta timer", "Pasta"] {
+            let (ctx, _rx, state) = board(&[(5.0, Some("pasta")), (10.0, None)]).await;
+            assert_eq!(
+                CancelTimer.call(&json!({"name": phrasing}), &ctx).await,
+                "Cancelled the pasta timer."
+            );
+            assert_eq!(state.with_timers(|b| b.len()), 1);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancels_by_partial_name() {
+        let (ctx, _rx, state) = board(&[(5.0, Some("pasta sauce"))]).await;
+        assert_eq!(
+            CancelTimer.call(&json!({"name": "pasta"}), &ctx).await,
+            "Cancelled the pasta sauce timer."
+        );
+        assert!(state.with_timers(|b| b.is_empty()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancels_by_duration_including_fractions() {
+        let (ctx, _rx, state) = board(&[(5.0, None), (0.5, None)]).await;
+        assert_eq!(
+            CancelTimer.call(&json!({"minutes": 0.5}), &ctx).await,
+            "Cancelled the 30 second timer."
+        );
+        assert_eq!(state.with_timers(|b| b.len()), 1);
+        assert_eq!(
+            CancelTimer.call(&json!({"minutes": 5}), &ctx).await,
+            "Cancelled the 5 minute timer."
+        );
+        assert!(state.with_timers(|b| b.is_empty()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_bare_cancel_works_when_there_is_exactly_one_timer() {
+        let (ctx, _rx, state) = board(&[(5.0, Some("pasta"))]).await;
+        assert_eq!(
+            CancelTimer.call(&json!({"name": "the timer"}), &ctx).await,
+            "Cancelled the pasta timer."
+        );
+        assert!(state.with_timers(|b| b.is_empty()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_bare_cancel_with_several_timers_asks_instead_of_guessing() {
+        let (ctx, _rx, state) = board(&[(5.0, Some("pasta")), (10.0, None)]).await;
+        let reply = CancelTimer.call(&json!({}), &ctx).await;
+        assert_eq!(
+            reply,
+            "You have a pasta timer with about 5 minutes left and a 10 minute \
+             timer with about 10 minutes left. Which should I cancel?"
+        );
+        assert_eq!(state.with_timers(|b| b.len()), 2, "nothing was cancelled");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn duplicate_names_ask_instead_of_guessing() {
+        let (ctx, _rx, state) = board(&[(3.0, Some("pasta")), (8.0, Some("pasta"))]).await;
+        let reply = CancelTimer.call(&json!({"name": "pasta"}), &ctx).await;
+        assert_eq!(
+            reply,
+            "You have a pasta timer with about 3 minutes left and a pasta timer \
+             with about 8 minutes left. Which should I cancel?"
+        );
+        assert_eq!(state.with_timers(|b| b.len()), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unknown_name_says_what_is_running() {
+        let (ctx, _rx, state) = board(&[(5.0, Some("pasta")), (10.0, None)]).await;
+        assert_eq!(
+            CancelTimer.call(&json!({"name": "rice"}), &ctx).await,
+            "You don't have a rice timer. You have a pasta timer and a 10 minute timer."
+        );
+        assert_eq!(state.with_timers(|b| b.len()), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancel_all_clears_the_board() {
+        let (ctx, _rx, state) = board(&[(5.0, Some("pasta")), (10.0, None)]).await;
+        assert_eq!(
+            CancelTimer.call(&json!({"all": true}), &ctx).await,
+            "Cancelled all your timers."
+        );
+        assert!(state.with_timers(|b| b.is_empty()));
+        // And the call is still usable afterwards.
+        SetTimer.call(&json!({"minutes": 1, "label": "tea"}), &ctx).await;
+        assert_eq!(state.with_timers(|b| b.len()), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelling_with_nothing_running_says_so() {
+        let (ctx, _rx, _state) = live_ctx();
+        assert_eq!(
+            CancelTimer.call(&json!({"name": "pasta"}), &ctx).await,
+            "You don't have any timers running."
+        );
+        assert_eq!(
+            CancelTimer.call(&json!({"all": true}), &ctx).await,
+            "You don't have any timers running."
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_outside_a_call_answers_instead_of_failing() {
+        let ctx = CallCtx::detached(1);
+        assert_eq!(
+            CancelTimer.call(&json!({"name": "pasta"}), &ctx).await,
+            "You don't have any timers running."
+        );
     }
 }
