@@ -48,6 +48,13 @@ Runtime artifacts live at the root too: `models/`, `.deps/`, `logs/`,
   `switch_persona`) also switches the system prompt to
   `crates/server/prompt.<persona>.txt` when that file exists (`prompt.txt`
   otherwise). Plan and conventions: `docs/plans/wakeword-in-server.md`.
+- Raspberry Pi autostart: `make deploy-pi PI_HOST=pi@raspberrypi.local`
+  cross-builds the client, rsyncs it and the wake heads to the Pi, and installs
+  a systemd unit that starts it at boot (same command for updates). Config is
+  `/opt/voice-chatbot/.env`, seeded once and never overwritten — not a copy of
+  this repo's `.env`, which holds the server's keys. `deploy/rpi/README.md`
+  covers why it is a system unit and not a `--user` one, and what the three
+  non-boilerplate unit settings are for.
 
 The PoC trees and their Makefile are archived under `archive/`
 (`make -f archive/Makefile.old poc-chatterbox`, run from the repo root; the
