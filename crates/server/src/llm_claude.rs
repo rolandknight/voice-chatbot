@@ -40,6 +40,15 @@ pub const DEFAULT_EFFORT: &str = "low";
 /// just goes quiet on the caller.
 const EMPTY_TURN_FALLBACK: &str = "Sorry, I lost that one. Say it again?";
 
+/// Skills that must not reach Claude.
+///
+/// `web_search` because Anthropic's server-side tool carries the **same name**
+/// — two tools called `web_search` in one request is a collision, and the
+/// server-side one is the whole point of routing to Claude. `ask_claude`
+/// because Claude is already answering: calling it re-sets a flag that is
+/// already set and costs the caller a turn.
+const HIDDEN_FROM_CLAUDE: [&str; 2] = ["web_search", "ask_claude"];
+
 pub struct ClaudeLlm {
     http: reqwest::Client,
     api_key: String,
@@ -73,6 +82,7 @@ impl ClaudeLlm {
         };
         let mut out: Vec<Value> = tools
             .iter()
+            .filter(|t| !HIDDEN_FROM_CLAUDE.contains(&t.name.as_str()))
             .map(|t| {
                 json!({
                     "name": t.name,
@@ -579,6 +589,36 @@ mod tests {
             messages: vec![json!({"role": "user", "content": "hi"})],
             tools: vec![],
         }
+    }
+
+    #[test]
+    fn claude_is_not_shown_web_search_or_ask_claude() {
+        let mut llm = ClaudeLlm::new("k".into(), "claude-opus-5".into(), "low".into());
+        llm.set_tools(vec![
+            Tool {
+                name: "web_search".into(),
+                description: "local".into(),
+                params: json!({"type": "object", "properties": {}}),
+            },
+            Tool {
+                name: "ask_claude".into(),
+                description: "local".into(),
+                params: json!({"type": "object", "properties": {}}),
+            },
+            Tool {
+                name: "get_weather".into(),
+                description: "W".into(),
+                params: json!({"type": "object", "properties": {}}),
+            },
+        ]);
+        let body = llm.request_body(&plain_ctx()).unwrap();
+        let names: Vec<&str> = body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["get_weather"]);
     }
 
     #[test]
