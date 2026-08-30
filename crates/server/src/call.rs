@@ -499,10 +499,22 @@ pub async fn offer(
         ),
     };
     let claude = (!cfg.anthropic_key.trim().is_empty()).then(|| {
+        let search = cfg
+            .claude_web_search
+            .then(|| crate::llm_claude::SearchConfig {
+                tool: cfg.claude_search_tool.clone(),
+                max_uses: cfg.claude_search_max_uses,
+                user_location: cfg
+                    .search_location
+                    .as_ref()
+                    .map(|l| l.user_location())
+                    .unwrap_or(serde_json::Value::Null),
+            });
         crate::llm_claude::ClaudeLlm::new(
             cfg.anthropic_key.clone(),
             cfg.claude_model.clone(),
             cfg.claude_effort.clone(),
+            search,
         )
     });
     let inner = SwitchingLlm {

@@ -181,6 +181,13 @@ pub struct PocConfig {
     /// `output_config.effort` for the Claude turns; empty omits the field (for
     /// models that reject it). See `llm_claude::DEFAULT_EFFORT`.
     pub claude_effort: String,
+    /// Anthropic's server-side web search on the Claude turns: tool type, per-turn
+    /// cap, and whether it is declared at all.
+    pub claude_web_search: bool,
+    pub claude_search_tool: String,
+    pub claude_search_max_uses: u32,
+    /// `SEARCH_LOCATION`, shared with the Brave provider.
+    pub search_location: Option<crate::location::SearchLocation>,
     pub qwen_interval_s: f64,
     /// Host ICE candidate address to advertise (POC_ADVERTISE_IP). None →
     /// the interface that routes back to each caller.
@@ -437,6 +444,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         anthropic_key: env_or("ANTHROPIC_API_KEY", ""),
         claude_model: env_or("POC_CLAUDE_MODEL", "claude-opus-5"),
         claude_effort: env_or("POC_CLAUDE_EFFORT", llm_claude::DEFAULT_EFFORT),
+        claude_web_search: env_or("CLAUDE_WEB_SEARCH", "true").trim() != "false",
+        claude_search_tool: env_or("CLAUDE_SEARCH_TOOL", llm_claude::DEFAULT_SEARCH_TOOL),
+        claude_search_max_uses: env_or(
+            "CLAUDE_SEARCH_MAX_USES",
+            &llm_claude::DEFAULT_SEARCH_MAX_USES.to_string(),
+        )
+        .parse()
+        .map_err(|e| format!("invalid CLAUDE_SEARCH_MAX_USES: {e}"))?,
+        search_location: location::SearchLocation::parse(&env_or(
+            "SEARCH_LOCATION",
+            location::DEFAULT,
+        ))?,
         qwen_size: env_or("POC_QWEN_SIZE", "1.7B"),
         qwen_interval_s: env_or("POC_QWEN_INTERVAL_S", "0.32")
             .parse::<f64>()
@@ -544,9 +563,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let sfx_dir = runtime_dir.join("logs/sfx");
-    let search_location =
-        location::SearchLocation::parse(&env_or("SEARCH_LOCATION", location::DEFAULT))?;
-    let (registry, calls) = build_skills(&cfg, sfx_dir.clone(), search_location.as_ref())?;
+    let (registry, calls) = build_skills(&cfg, sfx_dir.clone(), cfg.search_location.as_ref())?;
     let session = SkillSession::new(registry, calls, runtime_dir.join("logs/artifacts"));
 
     // ADR-0007: the chatbot owns its LLM's lifecycle. Ensure a serve, pull the

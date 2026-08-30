@@ -36,6 +36,18 @@ const MAX_TOKENS: u32 = 4096;
 /// models that reject it.
 pub const DEFAULT_EFFORT: &str = "low";
 
+/// Anthropic's web search tool type. `_20260209` adds dynamic filtering —
+/// Claude writes and runs code that trims the results before they reach the
+/// context window, which cuts input tokens on a search-heavy turn. It needs
+/// Opus 4.6+ / Sonnet 4.6+; `claude_model` defaults to `claude-opus-5`. The
+/// older `web_search_20250305` is the fallback for other models and is the
+/// faster path (no code-execution step), at the cost of untrimmed results.
+pub const DEFAULT_SEARCH_TOOL: &str = "web_search_20260209";
+
+/// Searches allowed per turn. A cap is both a cost control ($10 per 1,000
+/// searches) and a latency one: every search is dead air on a voice call.
+pub const DEFAULT_SEARCH_MAX_USES: u32 = 3;
+
 /// Spoken when a turn ends with neither text nor a tool call, so the call never
 /// just goes quiet on the caller.
 const EMPTY_TURN_FALLBACK: &str = "Sorry, I lost that one. Say it again?";
@@ -49,6 +61,18 @@ const EMPTY_TURN_FALLBACK: &str = "Sorry, I lost that one. Say it again?";
 /// already set and costs the caller a turn.
 const HIDDEN_FROM_CLAUDE: [&str; 2] = ["web_search", "ask_claude"];
 
+/// Server-side web search settings for the Claude turns. `None` on the
+/// `ClaudeLlm` means the tool is not declared at all.
+#[derive(Clone, Debug)]
+pub struct SearchConfig {
+    /// Anthropic tool `type`, e.g. `web_search_20260209`.
+    pub tool: String,
+    /// `max_uses`; 0 omits the field and takes the API default.
+    pub max_uses: u32,
+    /// `user_location` object, or `Value::Null` for none.
+    pub user_location: Value,
+}
+
 pub struct ClaudeLlm {
     http: reqwest::Client,
     api_key: String,
@@ -56,16 +80,24 @@ pub struct ClaudeLlm {
     /// `output_config.effort`; empty omits the field.
     effort: String,
     tools: Vec<Tool>,
+    /// Anthropic's server-side web search, when configured.
+    search: Option<SearchConfig>,
 }
 
 impl ClaudeLlm {
-    pub fn new(api_key: String, model: String, effort: String) -> Self {
+    pub fn new(
+        api_key: String,
+        model: String,
+        effort: String,
+        search: Option<SearchConfig>,
+    ) -> Self {
         Self {
             http: reqwest::Client::new(),
             api_key,
             model,
             effort,
             tools: Vec::new(),
+            search,
         }
     }
 
@@ -91,6 +123,16 @@ impl ClaudeLlm {
                 })
             })
             .collect();
+        if let Some(s) = &self.search {
+            let mut tool = json!({ "type": s.tool, "name": "web_search" });
+            if s.max_uses > 0 {
+                tool["max_uses"] = json!(s.max_uses);
+            }
+            if !s.user_location.is_null() {
+                tool["user_location"] = s.user_location.clone();
+            }
+            out.push(tool);
+        }
         out.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
         out
     }
@@ -559,7 +601,7 @@ mod tests {
 
     #[test]
     fn request_body_shape() {
-        let mut llm = ClaudeLlm::new("k".into(), "claude-opus-5".into(), "low".into());
+        let mut llm = ClaudeLlm::new("k".into(), "claude-opus-5".into(), "low".into(), None);
         llm.set_tools(vec![Tool {
             name: "b".into(),
             description: "B".into(),
@@ -591,9 +633,54 @@ mod tests {
         }
     }
 
+    fn search_cfg() -> SearchConfig {
+        SearchConfig {
+            tool: DEFAULT_SEARCH_TOOL.to_string(),
+            max_uses: 3,
+            user_location: crate::location::SearchLocation::parse(crate::location::DEFAULT)
+                .unwrap()
+                .unwrap()
+                .user_location(),
+        }
+    }
+
+    #[test]
+    fn the_server_side_search_tool_is_declared_and_localized() {
+        let mut llm = ClaudeLlm::new(
+            "k".into(),
+            "claude-opus-5".into(),
+            "low".into(),
+            Some(search_cfg()),
+        );
+        llm.set_tools(vec![Tool {
+            name: "web_search".into(),
+            description: "local".into(),
+            params: json!({"type": "object", "properties": {}}),
+        }]);
+        let body = llm.request_body(&plain_ctx()).unwrap();
+        let tools = body["tools"].as_array().unwrap();
+        assert_eq!(
+            tools.len(),
+            1,
+            "the local skill must not survive: {tools:?}"
+        );
+        assert_eq!(tools[0]["type"], "web_search_20260209");
+        assert_eq!(tools[0]["name"], "web_search");
+        assert_eq!(tools[0]["max_uses"], 3);
+        assert_eq!(tools[0]["user_location"]["city"], "Toronto");
+        assert_eq!(tools[0]["user_location"]["country"], "CA");
+    }
+
+    #[test]
+    fn no_search_config_means_no_server_tool() {
+        let llm = ClaudeLlm::new("k".into(), "claude-opus-5".into(), "low".into(), None);
+        let body = llm.request_body(&plain_ctx()).unwrap();
+        assert!(body.get("tools").is_none(), "{body}");
+    }
+
     #[test]
     fn claude_is_not_shown_web_search_or_ask_claude() {
-        let mut llm = ClaudeLlm::new("k".into(), "claude-opus-5".into(), "low".into());
+        let mut llm = ClaudeLlm::new("k".into(), "claude-opus-5".into(), "low".into(), None);
         llm.set_tools(vec![
             Tool {
                 name: "web_search".into(),
@@ -623,7 +710,7 @@ mod tests {
 
     #[test]
     fn empty_effort_omits_output_config() {
-        let llm = ClaudeLlm::new("k".into(), "claude-haiku-4-5".into(), String::new());
+        let llm = ClaudeLlm::new("k".into(), "claude-haiku-4-5".into(), String::new(), None);
         let body = llm.request_body(&plain_ctx()).unwrap();
         assert!(body.get("output_config").is_none(), "{body}");
     }
@@ -699,12 +786,28 @@ mod network_tests {
     //! One real streamed turn: `cargo test -p voice-chatbot-server -- --ignored network_claude`.
     use super::*;
 
+    fn search_cfg() -> SearchConfig {
+        SearchConfig {
+            tool: DEFAULT_SEARCH_TOOL.to_string(),
+            max_uses: 3,
+            user_location: crate::location::SearchLocation::parse(crate::location::DEFAULT)
+                .unwrap()
+                .unwrap()
+                .user_location(),
+        }
+    }
+
     #[tokio::test]
     #[ignore]
     async fn network_claude_streams_a_short_reply() {
         crate::env_file::load_if_unset(std::path::Path::new("../../.env"));
         let key = std::env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY in .env");
-        let mut llm = ClaudeLlm::new(key, "claude-opus-5".into(), DEFAULT_EFFORT.into());
+        let mut llm = ClaudeLlm::new(
+            key,
+            "claude-opus-5".into(),
+            DEFAULT_EFFORT.into(),
+            Some(search_cfg()),
+        );
         let ctx = LlmContext {
             messages: vec![
                 json!({"role": "system", "content": "Reply with exactly the word: pong"}),
@@ -736,7 +839,12 @@ mod network_tests {
     async fn network_claude_answers_directly_with_the_handover_suffix() {
         crate::env_file::load_if_unset(std::path::Path::new("../../.env"));
         let key = std::env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY in .env");
-        let mut llm = ClaudeLlm::new(key, "claude-opus-5".into(), DEFAULT_EFFORT.into());
+        let mut llm = ClaudeLlm::new(
+            key,
+            "claude-opus-5".into(),
+            DEFAULT_EFFORT.into(),
+            Some(search_cfg()),
+        );
         let system = format!(
             "{}{}",
             include_str!("../prompt.babel.txt"),
