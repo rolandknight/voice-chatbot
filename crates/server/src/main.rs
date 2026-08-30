@@ -296,7 +296,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
     // The repo-root .env (run from the repo root; silently skipped otherwise)
-    // holds both the server profile (*) and the shared secrets (Spotify,
+    // holds both the server's own settings and the shared secrets (Spotify,
     // search keys). It never overrides variables already set.
     env_file::load_if_unset(std::path::Path::new(".env"));
     let retired = env_file::retired_names(std::env::vars().map(|(k, _)| k));
@@ -455,7 +455,7 @@ Rename them in .env (drop {prefix}; {prefix}PROMPT is now PROMPT_FILE and {prefi
         anthropic_key: env_or("ANTHROPIC_API_KEY", ""),
         claude_model: env_or("CLAUDE_MODEL", "claude-opus-5"),
         claude_effort: env_or("CLAUDE_EFFORT", llm_claude::DEFAULT_EFFORT),
-        claude_web_search: env_or("CLAUDE_WEB_SEARCH", "true").trim() != "false",
+        claude_web_search: env_flag("CLAUDE_WEB_SEARCH", true),
         claude_search_tool: env_or("CLAUDE_SEARCH_TOOL", llm_claude::DEFAULT_SEARCH_TOOL),
         claude_search_max_uses: env_or(
             "CLAUDE_SEARCH_MAX_USES",

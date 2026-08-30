@@ -191,11 +191,16 @@ caller is not sitting in silence while the search runs.";
 fn append_system_suffix(ctx: &mut flowcat_core::processor::frame::LlmContext, suffix: &str) {
     match ctx.messages.first_mut() {
         Some(first) if first.get("role").and_then(|r| r.as_str()) == Some("system") => {
+            // Not `as_str()`: a system message whose content is an array of
+            // blocks would then read as empty and be replaced wholesale by the
+            // bare suffix, losing Babel's entire persona prompt.
+            // `content_string` flattens the array the same way the Claude
+            // translation downstream does, so nothing Claude would have seen is
+            // dropped.
             let base = first
                 .get("content")
-                .and_then(|c| c.as_str())
-                .unwrap_or_default()
-                .to_string();
+                .map(crate::llm_claude::content_string)
+                .unwrap_or_default();
             *first = serde_json::json!({"role": "system", "content": format!("{base}{suffix}")});
         }
         _ => ctx.messages.insert(
@@ -785,6 +790,27 @@ mod prompt_tests {
         assert!(system.starts_with("Be Babel."), "{system}");
         assert!(system.contains("answering as Claude"), "{system}");
         assert!(system.contains("let me check"), "{system}");
+    }
+
+    /// A system message whose content is an array of blocks used to read as
+    /// empty through `as_str()`, so the suffix replaced Babel's entire persona
+    /// prompt instead of appending to it.
+    #[test]
+    fn the_claude_suffix_keeps_a_block_shaped_system_prompt() {
+        let mut ctx = flowcat_core::processor::frame::LlmContext {
+            messages: vec![serde_json::json!({
+                "role": "system",
+                "content": [
+                    {"type": "text", "text": "Be Babel."},
+                    {"type": "text", "text": " Be brief."},
+                ]
+            })],
+            tools: vec![],
+        };
+        append_system_suffix(&mut ctx, CLAUDE_SYSTEM_SUFFIX);
+        let system = ctx.messages[0]["content"].as_str().unwrap();
+        assert!(system.starts_with("Be Babel. Be brief."), "{system}");
+        assert!(system.contains("answering as Claude"), "{system}");
     }
 
     #[test]

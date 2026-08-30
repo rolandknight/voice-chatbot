@@ -35,6 +35,13 @@ const MAX_TOKENS: u32 = 4096;
 /// is another request, so the cap bounds both spend and the caller's silence.
 const MAX_RESUMES: u32 = 2;
 
+/// Reaching api.anthropic.com at all.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Longest gap *between* reads on the streamed body — not a cap on the whole
+/// response, which may legitimately run for the length of a searching turn.
+const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Default `output_config.effort`. Spoken one-or-two-sentence answers do not
 /// need the API default (`high`); `low` measured ~0.7 s to first token against
 /// ~1.0 s. `thinking.budget_tokens` is rejected with a 400 on Opus 5, so effort
@@ -55,17 +62,27 @@ pub const DEFAULT_SEARCH_TOOL: &str = "web_search_20260209";
 pub const DEFAULT_SEARCH_MAX_USES: u32 = 3;
 
 /// Spoken when a turn ends with neither text nor a tool call, so the call never
-/// just goes quiet on the caller.
+/// just goes quiet on the caller. Also the line for a turn that broke — a
+/// failed request or a truncated stream really is one Babel lost.
 const EMPTY_TURN_FALLBACK: &str = "Sorry, I lost that one. Say it again?";
 
-/// Skills that must not reach Claude.
-///
-/// `web_search` because Anthropic's server-side tool carries the **same name**
-/// — two tools called `web_search` in one request is a collision, and the
-/// server-side one is the whole point of routing to Claude. `ask_claude`
-/// because Claude is already answering: calling it re-sets a flag that is
-/// already set and costs the caller a turn.
-const HIDDEN_FROM_CLAUDE: [&str; 2] = ["web_search", "ask_claude"];
+/// Spoken when the turn is still paused on a server-side search after
+/// `MAX_RESUMES`. Distinct from [`EMPTY_TURN_FALLBACK`] because nothing was
+/// lost and repeating the question will not help: the search simply ran past
+/// what a voice call can wait for.
+const SEARCH_GAVE_UP_FALLBACK: &str = "That search is taking too long — ask me again in a moment.";
+
+/// Always hidden from Claude: Claude is already answering, so `ask_claude`
+/// re-sets a flag that is already set and costs the caller a turn.
+const ASK_CLAUDE: &str = "ask_claude";
+
+/// Hidden from Claude *only while* Anthropic's server-side tool is declared,
+/// because that tool carries the **same name** — two tools called `web_search`
+/// in one request is a collision, and the server-side one is the whole point of
+/// routing to Claude. With `CLAUDE_WEB_SEARCH=false`, or once the org kill
+/// switch has fired, there is no server tool and no collision, so Claude gets
+/// the local (Brave-backed) skill instead of no search at all.
+const LOCAL_WEB_SEARCH: &str = "web_search";
 
 /// Server-side web search settings for the Claude turns. `None` on the
 /// `ClaudeLlm` means the tool is not declared at all.
@@ -103,7 +120,19 @@ impl ClaudeLlm {
         search: Option<SearchConfig>,
     ) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            // Deliberately no total `timeout`: the response is a streamed SSE
+            // body that legitimately stays open for the length of the turn,
+            // server-side searches included, and a total cap would kill working
+            // turns. `connect_timeout` bounds reaching the API at all;
+            // `read_timeout` bounds the gap *between* reads, which is what a
+            // wedged stream looks like. The API pings during a search, so 60 s
+            // of complete silence on an open body is already pathological —
+            // while a live voice call must not hang on it forever.
+            http: reqwest::Client::builder()
+                .connect_timeout(CONNECT_TIMEOUT)
+                .read_timeout(READ_TIMEOUT)
+                .build()
+                .expect("reqwest client"),
             api_key,
             model,
             effort,
@@ -113,9 +142,12 @@ impl ClaudeLlm {
         }
     }
 
-    /// Switches Anthropic's server-side search tool off for the rest of the
-    /// process — called once, after the API refuses a request because web
-    /// search is disabled for the organisation.
+    /// Switches Anthropic's server-side search tool off for the rest of *this
+    /// call* — called once, after the API refuses a request because web search
+    /// is disabled for the organisation. The scope is the call, not the
+    /// process: `call.rs` builds a fresh `ClaudeLlm` per WebRTC call, so a
+    /// later call re-pays one refused request plus its retry before latching
+    /// again. Set `CLAUDE_WEB_SEARCH=false` to stop paying it at all.
     pub fn disable_search(&self) {
         self.search_disabled
             .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -132,9 +164,16 @@ impl ClaudeLlm {
         } else {
             &from_ctx
         };
+        // True exactly when Anthropic's server-side `web_search` is going into
+        // this request — the only reason to hide the identically-named local
+        // skill. When it is not, Claude keeps the local one.
+        let searching = self.search.is_some()
+            && !self
+                .search_disabled
+                .load(std::sync::atomic::Ordering::Relaxed);
         let mut out: Vec<Value> = tools
             .iter()
-            .filter(|t| !HIDDEN_FROM_CLAUDE.contains(&t.name.as_str()))
+            .filter(|t| t.name != ASK_CLAUDE && !(searching && t.name == LOCAL_WEB_SEARCH))
             .map(|t| {
                 json!({
                     "name": t.name,
@@ -143,11 +182,8 @@ impl ClaudeLlm {
                 })
             })
             .collect();
-        let searching = !self
-            .search_disabled
-            .load(std::sync::atomic::Ordering::Relaxed);
         if let (Some(s), true) = (&self.search, searching) {
-            let mut tool = json!({ "type": s.tool, "name": "web_search" });
+            let mut tool = json!({ "type": s.tool, "name": LOCAL_WEB_SEARCH });
             if s.max_uses > 0 {
                 tool["max_uses"] = json!(s.max_uses);
             }
@@ -238,6 +274,18 @@ fn is_web_search_disabled(status: u16, body: &str) -> bool {
     body.contains("web search") && (body.contains("not enabled") || body.contains("disabled"))
 }
 
+/// Whether an org-level search refusal may be answered by replaying the turn
+/// without the tool.
+///
+/// Only before the first resume. The retry re-sends request 1, and from resume
+/// 1 on the TTS has already spoken request 1's frames — the caller would hear
+/// the opening line and the answer twice — while `Folder::blocks` still holds
+/// the first pass at its old offset. Once per turn, too: the stripped request
+/// cannot name web search in a 400, but a loop here would be unbounded.
+fn may_replay_without_search(resumes: u32, already_retried: bool) -> bool {
+    resumes == 0 && !already_retried
+}
+
 /// The same request with Anthropic's server-side search tool removed, for the
 /// one retry after an org-level refusal.
 fn strip_server_search(body: &Value) -> Value {
@@ -257,6 +305,45 @@ fn strip_server_search(body: &Value) -> Value {
         next["tools"] = Value::Array(remaining);
     }
     next
+}
+
+/// How the request loop left the turn. Only [`TurnEnd::Completed`] may end in
+/// silence; the other two always speak, because by then the caller has usually
+/// already heard the "let me check" preamble the system suffix asks for and
+/// would otherwise be left waiting forever.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TurnEnd {
+    /// `message_stop` arrived with a terminal `stop_reason`.
+    Completed,
+    /// Still `pause_turn` after `MAX_RESUMES` resumes — the search outran the
+    /// call.
+    SearchCapped,
+    /// No 2xx, or the stream ended/broke before `message_stop`.
+    Failed,
+}
+
+/// What the loop does once one request of the turn has ended.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Step {
+    /// Send the next request of this turn (a `pause_turn` resume).
+    Resume,
+    /// Stop, and let `Folder::finish` speak for this outcome.
+    Stop(TurnEnd),
+}
+
+/// The loop's exit decision, pure so every branch is testable without a
+/// request. `request_done` is `message_stop`: without it the body ended early
+/// (a read error, or a server that just closed), which is a failure however
+/// much text arrived first.
+fn after_request(request_done: bool, stop_reason: Option<&str>, resumes: u32) -> Step {
+    if !request_done {
+        return Step::Stop(TurnEnd::Failed);
+    }
+    match stop_reason {
+        Some("pause_turn") if resumes < MAX_RESUMES => Step::Resume,
+        Some("pause_turn") => Step::Stop(TurnEnd::SearchCapped),
+        _ => Step::Stop(TurnEnd::Completed),
+    }
 }
 
 /// Why one request failed, kept apart so the caller can react to the status.
@@ -289,7 +376,11 @@ fn append_str(
     block[field] = json!(current);
 }
 
-fn content_string(v: &Value) -> String {
+/// An OpenAI-shaped `content` field as plain text: a bare string, or the
+/// concatenated `text` of a block array. `pub(crate)` because `call.rs` reads
+/// the same field when it appends the Claude system suffix, and must flatten
+/// the array shape the same way rather than dropping it.
+pub(crate) fn content_string(v: &Value) -> String {
     match v {
         Value::Null => String::new(),
         Value::String(s) => s.clone(),
@@ -641,7 +732,7 @@ impl Folder {
         }
     }
 
-    fn finish(&mut self) {
+    fn finish(&mut self, end: TurnEnd) {
         if self.finished {
             return;
         }
@@ -650,11 +741,32 @@ impl Folder {
         if self.stop_reason.as_deref() == Some("refusal") {
             tracing::warn!("claude: request was refused (stop_reason=refusal)");
         }
-        // Nothing to say and nothing to run. The way this happens in practice is
-        // adaptive thinking eating the whole `max_tokens` budget
-        // (`stop_reason: max_tokens`, every output token a thinking token), which
-        // used to leave the caller in silence with no clue why.
-        if self.calls.is_empty() && self.first_text_at.is_none() {
+        // A turn that did not complete always speaks, even when it already
+        // spoke. `first_text_at` is `Some` on exactly the paths that hurt most:
+        // the system suffix asks Claude to say "let me check" *before*
+        // searching, so a turn abandoned mid-search has already spoken a
+        // preamble and the empty-turn branch below would never fire — leaving
+        // the caller with an opening line and then permanent silence.
+        let interrupted = match end {
+            TurnEnd::Completed => None,
+            TurnEnd::SearchCapped => Some(SEARCH_GAVE_UP_FALLBACK),
+            TurnEnd::Failed => Some(EMPTY_TURN_FALLBACK),
+        };
+        if let Some(line) = interrupted {
+            tracing::warn!(
+                end = ?end,
+                spoke_first = self.first_text_at.is_some(),
+                search_requests = self.search_requests,
+                stop_reason = self.stop_reason.as_deref().unwrap_or(""),
+                "claude: turn did not complete; speaking the fallback"
+            );
+            self.pending.push_back(Frame::LlmText(line.to_string()));
+        } else if self.calls.is_empty() && self.first_text_at.is_none() {
+            // A completed turn with nothing to say and nothing to run. The way
+            // this happens in practice is adaptive thinking eating the whole
+            // `max_tokens` budget (`stop_reason: max_tokens`, every output
+            // token a thinking token), which used to leave the caller in
+            // silence with no clue why.
             tracing::warn!(
                 stop_reason = self.stop_reason.as_deref().unwrap_or(""),
                 output_tokens = self.output_tokens,
@@ -743,11 +855,15 @@ impl LlmService for ClaudeLlm {
             let mut folder = Folder::new(this.model.clone());
             let mut resumes = 0u32;
             let mut retried_without_search = false;
+            // `Failed` is the right default: the send arms below break out of
+            // the loop without ever reaching `after_request`, and a turn whose
+            // request never got a stream is exactly a failed one.
+            let mut end = TurnEnd::Failed;
             loop {
                 let stream = match this.send(&body).await {
-                    Ok(s) => s,
                     Err(SendFail::Http { status, body: err })
-                        if is_web_search_disabled(status, &err) && !retried_without_search =>
+                        if is_web_search_disabled(status, &err)
+                            && may_replay_without_search(resumes, retried_without_search) =>
                     {
                         tracing::error!(
                             "claude: web search is disabled for this organisation — enable it at \
@@ -760,17 +876,35 @@ Retrying this turn without it."
                         body = base.clone();
                         continue;
                     }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "claude: request failed");
+                    // The same refusal arriving on a resume. Latch the tool off
+                    // so the rest of the call stops paying for it, but give up
+                    // on this turn rather than replaying spoken frames.
+                    Err(SendFail::Http { status, body: err })
+                        if is_web_search_disabled(status, &err) =>
+                    {
+                        tracing::error!(
+                            resumes,
+                            "claude: web search refused for this organisation part-way through a \
+turn — search is off for the rest of this call, and this turn is abandoned"
+                        );
+                        this.disable_search();
                         break;
                     }
+                    Err(e) => {
+                        tracing::warn!(error = %e, resumes, "claude: request failed");
+                        break;
+                    }
+                    Ok(s) => s,
                 };
                 futures::pin_mut!(stream);
                 while let Some(chunk) = stream.next().await {
                     match chunk {
                         Ok(b) => folder.feed(b.as_ref()),
+                        // `request_done` stays false unless `message_stop` had
+                        // already arrived, so `after_request` turns this into
+                        // `TurnEnd::Failed` on its own.
                         Err(e) => {
-                            tracing::warn!(error = %e, "claude: stream read failed");
+                            tracing::warn!(error = %e, resumes, "claude: stream read failed");
                             break;
                         }
                     }
@@ -781,16 +915,34 @@ Retrying this turn without it."
                 while let Some(f) = folder.pending.pop_front() {
                     yield f;
                 }
-                if folder.stop_reason.as_deref() == Some("pause_turn") && resumes < MAX_RESUMES {
-                    resumes += 1;
-                    tracing::info!(resumes, "claude: resuming a paused search turn");
-                    body = resume_body(&base, folder.assistant_blocks());
-                    folder.begin_request();
-                    continue;
+                match after_request(
+                    folder.request_done,
+                    folder.stop_reason.as_deref(),
+                    resumes,
+                ) {
+                    Step::Resume => {
+                        resumes += 1;
+                        tracing::info!(resumes, "claude: resuming a paused search turn");
+                        body = resume_body(&base, folder.assistant_blocks());
+                        folder.begin_request();
+                    }
+                    Step::Stop(TurnEnd::SearchCapped) => {
+                        tracing::warn!(
+                            resumes,
+                            max_resumes = MAX_RESUMES,
+                            search_requests = folder.search_requests,
+                            "claude: search still paused after the resume cap; giving up on this turn"
+                        );
+                        end = TurnEnd::SearchCapped;
+                        break;
+                    }
+                    Step::Stop(e) => {
+                        end = e;
+                        break;
+                    }
                 }
-                break;
             }
-            folder.finish();
+            folder.finish(end);
             while let Some(f) = folder.pending.pop_front() {
                 yield f;
             }
@@ -845,7 +997,7 @@ mod tests {
             r#"data: {"type":"message_stop"}"#,
         ];
         f.feed((lines.join("\n") + "\n").as_bytes());
-        f.finish();
+        f.finish(TurnEnd::Completed);
         let frames: Vec<Frame> = f.pending.drain(..).collect();
         assert!(matches!(frames[0], Frame::LlmResponseStart));
         assert!(matches!(&frames[1], Frame::LlmText(t) if t == "One sec."));
@@ -940,34 +1092,98 @@ mod tests {
         assert!(body.get("tools").is_none(), "{body}");
     }
 
-    #[test]
-    fn claude_is_not_shown_web_search_or_ask_claude() {
-        let mut llm = ClaudeLlm::new("k".into(), "claude-opus-5".into(), "low".into(), None);
-        llm.set_tools(vec![
-            Tool {
-                name: "web_search".into(),
+    /// The local skill list every one of these cases starts from.
+    fn local_tools() -> Vec<Tool> {
+        ["web_search", "ask_claude", "get_weather"]
+            .into_iter()
+            .map(|name| Tool {
+                name: name.into(),
                 description: "local".into(),
                 params: json!({"type": "object", "properties": {}}),
-            },
-            Tool {
-                name: "ask_claude".into(),
-                description: "local".into(),
-                params: json!({"type": "object", "properties": {}}),
-            },
-            Tool {
-                name: "get_weather".into(),
-                description: "W".into(),
-                params: json!({"type": "object", "properties": {}}),
-            },
-        ]);
+            })
+            .collect()
+    }
+
+    /// Declared tool names, and whether a server-side tool (one with a `type`)
+    /// is among them.
+    fn declared(llm: &ClaudeLlm) -> (Vec<String>, bool) {
         let body = llm.request_body(&plain_ctx()).unwrap();
-        let names: Vec<&str> = body["tools"]
+        let tools = body["tools"].as_array().cloned().unwrap_or_default();
+        let server = tools.iter().any(|t| t.get("type").is_some());
+        (
+            tools
+                .iter()
+                .map(|t| t["name"].as_str().unwrap_or("").to_string())
+                .collect(),
+            server,
+        )
+    }
+
+    /// Claude is already answering, so `ask_claude` is hidden whatever search
+    /// is doing — its reason has nothing to do with the name collision.
+    #[test]
+    fn ask_claude_is_hidden_from_claude_either_way() {
+        for search in [None, Some(search_cfg())] {
+            let mut llm = ClaudeLlm::new("k".into(), "claude-opus-5".into(), "low".into(), search);
+            llm.set_tools(local_tools());
+            let (names, _) = declared(&llm);
+            assert!(!names.iter().any(|n| n == "ask_claude"), "{names:?}");
+        }
+    }
+
+    /// Search on: the server-side tool takes the `web_search` name, so the
+    /// local skill of the same name must not also be declared.
+    #[test]
+    fn with_search_on_the_server_tool_replaces_the_local_skill() {
+        let mut llm = ClaudeLlm::new(
+            "k".into(),
+            "claude-opus-5".into(),
+            "low".into(),
+            Some(search_cfg()),
+        );
+        llm.set_tools(local_tools());
+        let (names, server) = declared(&llm);
+        assert!(server, "the server-side search tool must be declared");
+        assert_eq!(
+            names.iter().filter(|n| *n == "web_search").count(),
+            1,
+            "exactly one web_search — the server-side one: {names:?}"
+        );
+        let body = llm.request_body(&plain_ctx()).unwrap();
+        let local = body["tools"]
             .as_array()
             .unwrap()
             .iter()
-            .map(|t| t["name"].as_str().unwrap())
-            .collect();
-        assert_eq!(names, vec!["get_weather"]);
+            .find(|t| t["name"] == "web_search")
+            .unwrap();
+        assert_eq!(local["type"], DEFAULT_SEARCH_TOOL, "{local}");
+    }
+
+    /// `CLAUDE_WEB_SEARCH=false`: no server tool, so no collision — and hiding
+    /// the local skill anyway would leave Claude with no search at all.
+    #[test]
+    fn with_search_off_claude_keeps_the_local_web_search_skill() {
+        let mut llm = ClaudeLlm::new("k".into(), "claude-opus-5".into(), "low".into(), None);
+        llm.set_tools(local_tools());
+        let (names, server) = declared(&llm);
+        assert!(!server, "no server-side tool may be declared: {names:?}");
+        assert_eq!(names, vec!["get_weather", "web_search"]);
+    }
+
+    /// Same, reached the other way: the org kill switch fired mid-call.
+    #[test]
+    fn the_org_kill_switch_hands_the_local_skill_back_to_claude() {
+        let mut llm = ClaudeLlm::new(
+            "k".into(),
+            "claude-opus-5".into(),
+            "low".into(),
+            Some(search_cfg()),
+        );
+        llm.set_tools(local_tools());
+        llm.disable_search();
+        let (names, server) = declared(&llm);
+        assert!(!server, "the refused tool must not come back: {names:?}");
+        assert_eq!(names, vec!["get_weather", "web_search"]);
     }
 
     #[test]
@@ -980,7 +1196,7 @@ mod tests {
     fn frames_of(lines: &[&str]) -> Vec<Frame> {
         let mut f = Folder::new("m".into());
         f.feed((lines.join("\n") + "\n").as_bytes());
-        f.finish();
+        f.finish(TurnEnd::Completed);
         f.pending.drain(..).collect()
     }
 
@@ -1319,6 +1535,143 @@ mod tests {
         assert!(!frames
             .iter()
             .any(|f| matches!(f, Frame::FunctionCallsStarted(_))));
+    }
+
+    /// A paused turn that has already spoken the "let me check" preamble the
+    /// system suffix asks for, folded up to (but not including) the resume.
+    fn paused_after_a_preamble() -> Folder {
+        let mut f = Folder::new("m".into());
+        f.feed(
+            (SEARCH_STREAM.join("\n")
+                + "\n"
+                + r#"data: {"type":"message_delta","delta":{"stop_reason":"pause_turn"},"usage":{"output_tokens":9}}"#
+                + "\n"
+                + r#"data: {"type":"message_stop"}"#
+                + "\n")
+                .as_bytes(),
+        );
+        assert!(f.first_text_at.is_some(), "the preamble must have spoken");
+        f
+    }
+
+    /// The silence bug: `CLAUDE_SYSTEM_SUFFIX` makes Claude say a filler line
+    /// *before* searching, so `first_text_at` is `Some` and the empty-turn
+    /// fallback never fires. Exhausting `MAX_RESUMES` then left the caller with
+    /// "Let me check." and nothing else, forever.
+    #[test]
+    fn a_capped_search_speaks_even_though_the_preamble_already_did() {
+        let mut f = paused_after_a_preamble();
+        f.finish(TurnEnd::SearchCapped);
+        let frames: Vec<Frame> = f.pending.drain(..).collect();
+        assert_eq!(
+            spoken(&frames),
+            format!("Let me check.{SEARCH_GAVE_UP_FALLBACK}"),
+            "the caller must not be left on the preamble alone"
+        );
+        assert_ne!(
+            SEARCH_GAVE_UP_FALLBACK, EMPTY_TURN_FALLBACK,
+            "a search that ran long is not a turn Babel lost"
+        );
+        assert!(matches!(frames.last(), Some(Frame::LlmResponseEnd)));
+    }
+
+    /// Same for a turn abandoned because a request failed or the stream broke
+    /// — including one that failed on a resume, after frames were spoken.
+    #[test]
+    fn a_failed_turn_speaks_even_though_the_preamble_already_did() {
+        let mut f = paused_after_a_preamble();
+        f.finish(TurnEnd::Failed);
+        let frames: Vec<Frame> = f.pending.drain(..).collect();
+        assert_eq!(
+            spoken(&frames),
+            format!("Let me check.{EMPTY_TURN_FALLBACK}")
+        );
+        assert!(matches!(frames.last(), Some(Frame::LlmResponseEnd)));
+    }
+
+    /// ...and a turn that completed normally must not have a fallback bolted
+    /// onto the end of a perfectly good answer.
+    #[test]
+    fn a_completed_turn_adds_no_fallback() {
+        let frames = frames_of(&[
+            r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Paris."}}"#,
+            r#"data: {"type":"content_block_stop","index":0}"#,
+            r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":9}}"#,
+            r#"data: {"type":"message_stop"}"#,
+        ]);
+        assert_eq!(spoken(&frames), "Paris.");
+    }
+
+    /// A turn with nothing spoken speaks the fallback exactly once, not twice
+    /// (the interrupted branch and the empty-turn branch are exclusive).
+    #[test]
+    fn a_failed_turn_that_never_spoke_says_the_line_once() {
+        let mut f = Folder::new("m".into());
+        f.finish(TurnEnd::Failed);
+        let frames: Vec<Frame> = f.pending.drain(..).collect();
+        assert_eq!(spoken(&frames), EMPTY_TURN_FALLBACK);
+    }
+
+    /// The loop's exit decision. Every branch that is not `Completed` speaks,
+    /// so this is what keeps a paused or truncated turn from going quiet.
+    #[test]
+    fn the_loop_gives_up_on_a_search_still_paused_at_the_cap() {
+        assert_eq!(
+            after_request(true, Some("pause_turn"), 0),
+            Step::Resume,
+            "under the cap, resume"
+        );
+        assert_eq!(
+            after_request(true, Some("pause_turn"), MAX_RESUMES - 1),
+            Step::Resume
+        );
+        assert_eq!(
+            after_request(true, Some("pause_turn"), MAX_RESUMES),
+            Step::Stop(TurnEnd::SearchCapped),
+            "the cap must end the turn as a give-up, not as a normal end"
+        );
+        assert_eq!(
+            after_request(true, Some("end_turn"), 0),
+            Step::Stop(TurnEnd::Completed)
+        );
+        assert_eq!(
+            after_request(true, Some("tool_use"), 1),
+            Step::Stop(TurnEnd::Completed)
+        );
+    }
+
+    /// A stream that broke (a read error) or was closed early never reached
+    /// `message_stop`, whatever it had already said.
+    #[test]
+    fn a_stream_that_never_reached_message_stop_is_a_failed_turn() {
+        assert_eq!(after_request(false, None, 0), Step::Stop(TurnEnd::Failed));
+        assert_eq!(
+            after_request(false, Some("pause_turn"), 0),
+            Step::Stop(TurnEnd::Failed),
+            "a broken resume is a failure, not another resume"
+        );
+        assert_eq!(
+            after_request(false, Some("end_turn"), 0),
+            Step::Stop(TurnEnd::Failed)
+        );
+    }
+
+    /// Replaying the turn without the tool is only safe before the first
+    /// resume: after one, the TTS has already spoken request 1's frames and
+    /// the caller would hear the opening line and the answer twice.
+    #[test]
+    fn an_org_refusal_is_only_replayed_before_the_first_resume() {
+        assert!(may_replay_without_search(0, false));
+        assert!(
+            !may_replay_without_search(1, false),
+            "a refusal on a resume must not replay spoken frames"
+        );
+        assert!(!may_replay_without_search(MAX_RESUMES, false));
+        assert!(
+            !may_replay_without_search(0, true),
+            "once per turn — the stripped request must not loop"
+        );
     }
 }
 
