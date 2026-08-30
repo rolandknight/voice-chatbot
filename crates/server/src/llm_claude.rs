@@ -724,9 +724,13 @@ impl Folder {
                 }
             }
             "message_stop" => self.request_done = true,
+            // Deliberately does NOT set `request_done`: an `overloaded_error`
+            // arriving after the spoken preamble would otherwise be read as a
+            // completed turn, so `finish()` would skip the fallback and leave
+            // the caller in silence. The read loop exits on stream close
+            // anyway, and `TurnEnd::Failed` is then the correct verdict.
             "error" => {
                 tracing::warn!(error = %ev["error"], "claude: stream error event");
-                self.request_done = true;
             }
             _ => {}
         }
@@ -910,6 +914,16 @@ turn — search is off for the rest of this call, and this turn is abandoned"
                     }
                     while let Some(f) = folder.pending.pop_front() {
                         yield f;
+                    }
+                    // `message_stop` ends this request's read. The old
+                    // `sse_to_frames` returned `None` on the same condition;
+                    // reading on until the HTTP body closes instead leaves the
+                    // generator parked after the last spoken frame, so
+                    // `finish()` never runs, `LlmResponseEnd` is never emitted,
+                    // and the pipeline's turn stays open — swallowing the
+                    // caller's next utterance until the wake session expires.
+                    if folder.request_done {
+                        break;
                     }
                 }
                 while let Some(f) = folder.pending.pop_front() {
