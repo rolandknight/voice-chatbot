@@ -164,9 +164,13 @@ a new skill, drop in a new folder — the loader picks it up at startup. The
 sees ~15 relevant tools no matter how many are registered. Skills shipped today:
 
 - `get_current_time`, `get_current_date` — local clock.
-- `set_timer(minutes, label?)` — counts down and speaks the alert out loud,
-  repeating it up to five times ten seconds apart. Several timers can run at
-  once; timers are per call and do not survive a disconnect.
+- `set_timer(minutes, label?)` — counts down, then sounds a two-tone chime and
+  speaks the alert out loud, repeating the pair up to five times ten seconds
+  apart. The chime is synthesized at the TTS backend's own sample rate
+  (`crates/server/src/alarm.rs`) and injected as `Frame::OutputAudio`, so it
+  rides the call's own audio path and ducks any radio or music the same way
+  speech does. Several timers can run at once; timers are per call and do not
+  survive a disconnect.
 - `cancel_timer(name?, minutes?, all?)` — cancels a timer by name ("the pasta
   timer"), by length ("the five minute timer"), or the only one running, and
   silences one that is going off. Ambiguity is answered with a question.

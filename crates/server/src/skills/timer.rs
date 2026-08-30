@@ -13,7 +13,7 @@ use serde_json::Value;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use flowcat_core::processor::frame::Frame;
+use flowcat_core::processor::frame::{AudioFrame, Frame};
 
 use super::{arg_str, CallCtx, Skill};
 
@@ -363,6 +363,17 @@ impl Skill for SetTimer {
 
         let run_id = ctx.run_id;
         let text = alert_text(spoken_name.as_deref().unwrap_or(""));
+        // Generated once per timer and shared by every announcement (the clone
+        // below is an `Arc` pointer copy, not the PCM). Must be at the backend's
+        // own rate: the output stage's resampler is built once for
+        // `tts_rate -> carrier_rate` and rejects a chunk at any other rate
+        // (`codec.rs:185`), which the sink drops and latches as the call's
+        // error. A call with no known rate gets the words alone.
+        let chime = ctx
+            .tts_rate
+            .map(|rate| (crate::alarm::alarm_pcm(rate), rate))
+            .filter(|(pcm, _)| !pcm.is_empty())
+            .map(|(pcm, rate)| std::sync::Arc::new(AudioFrame::mono(pcm, rate)));
         // Weak, never Arc: a strong reference would keep `CallState` — and so
         // the whole `TimerBook` — alive past the end of the call, and the
         // book's `Drop` would never cancel anything.
@@ -402,12 +413,30 @@ impl Skill for SetTimer {
                     // consumer of this field currently acts on it either way.
                     append_to_context: (i > 0).then_some(false),
                 };
+                // Both frames go under one `contains` check, taken on the lock
+                // `cancel()` uses: a timer cancelled between the chime and the
+                // words must play neither, not a chime with nothing after it.
                 let sent = s.with_timers(|b| {
-                    if b.contains(id) {
-                        Some(frames.send(frame))
-                    } else {
-                        None
+                    if !b.contains(id) {
+                        return None;
                     }
+                    if let Some(chime) = &chime {
+                        // The chime passes straight through the TTS stage while
+                        // the words wait on synthesis, so it reaches the sink
+                        // first and the pair plays in order. Sending it also
+                        // raises the bot-speaking edge that ducks any radio or
+                        // music, which restores itself when playout ends.
+                        if let Err(e) = frames.send(Frame::OutputAudio(chime.clone())) {
+                            return Some(Err(e));
+                        }
+                        // Note this widens the barge-in window: the chime raises
+                        // the bot-speaking edge before synthesis starts, so a
+                        // user who reacts out loud ("oh, the pasta!") can now
+                        // interrupt the alert where previously they could not.
+                        // Accepted — saying "stop" *should* stop it, and an
+                        // announcement lost this way returns on the next repeat.
+                    }
+                    Some(frames.send(frame))
                 });
                 match sent {
                     None => {
@@ -650,6 +679,10 @@ mod tests {
         assert_eq!(parse_minutes(None), None);
     }
 
+    /// Stand-in for a TTS backend's rate. The chime is generated at whatever
+    /// the live backend reports, so the tests pin a plausible one.
+    const TEST_TTS_RATE: u32 = 24_000;
+
     /// A `CallCtx` with a live pipeline and live per-call state.
     fn live_ctx() -> (
         CallCtx,
@@ -664,14 +697,35 @@ mod tests {
             media: None,
             spotify: None,
             state: Some(state.clone()),
+            tts_rate: Some(TEST_TTS_RATE),
         };
         (ctx, rx, state)
     }
 
+    /// Every alert the call would speak, in order.
+    ///
+    /// Skips the chime rather than stopping at it: a `while let` bound to the
+    /// `TtsSpeak` pattern would halt on the first `OutputAudio` and silently
+    /// report the rest of the queue as silence.
     fn spoken(rx: &mut mpsc::UnboundedReceiver<Frame>) -> Vec<String> {
         let mut out = Vec::new();
-        while let Ok(Frame::TtsSpeak { text, .. }) = rx.try_recv() {
-            out.push(text);
+        while let Ok(frame) = rx.try_recv() {
+            if let Frame::TtsSpeak { text, .. } = frame {
+                out.push(text);
+            }
+        }
+        out
+    }
+
+    /// Frame kinds in the order the call would play them.
+    fn frame_kinds(rx: &mut mpsc::UnboundedReceiver<Frame>) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        while let Ok(frame) = rx.try_recv() {
+            out.push(match frame {
+                Frame::OutputAudio(_) => "chime",
+                Frame::TtsSpeak { .. } => "alert",
+                _ => "other",
+            });
         }
         out
     }
@@ -1480,5 +1534,120 @@ mod tests {
             ListTimers.call(&json!({}), &ctx).await,
             "You don't have any timers running."
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn every_announcement_is_a_chime_then_the_message() {
+        let (ctx, mut rx, _state) = live_ctx();
+        SetTimer
+            .call(&json!({"minutes": 1, "label": "tea"}), &ctx)
+            .await;
+        tokio::time::advance(Duration::from_secs(61)).await;
+        tokio::task::yield_now().await;
+
+        match rx.try_recv() {
+            Ok(Frame::OutputAudio(audio)) => {
+                assert_eq!(audio.sample_rate, TEST_TTS_RATE, "chime is at the TTS rate");
+                assert!(!audio.pcm.is_empty(), "the chime carries audio");
+            }
+            other => panic!("expected the chime first, got {other:?}"),
+        }
+        match rx.try_recv() {
+            Ok(Frame::TtsSpeak { text, .. }) => assert_eq!(text, "Your tea timer is up."),
+            other => panic!("expected the alert second, got {other:?}"),
+        }
+
+        // Each repeat is the same pair, in the same order.
+        tokio::time::advance(REPEAT_EVERY).await;
+        tokio::task::yield_now().await;
+        assert_eq!(frame_kinds(&mut rx), vec!["chime", "alert"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelling_a_ringing_timer_silences_the_chime_too() {
+        let (ctx, mut rx, _state) = live_ctx();
+        SetTimer
+            .call(&json!({"minutes": 1, "label": "tea"}), &ctx)
+            .await;
+        tokio::time::advance(Duration::from_secs(61)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(frame_kinds(&mut rx), vec!["chime", "alert"]);
+
+        CancelTimer.call(&json!({"name": "tea"}), &ctx).await;
+        tokio::time::advance(REPEAT_EVERY * 10).await;
+        tokio::task::yield_now().await;
+        assert!(
+            frame_kinds(&mut rx).is_empty(),
+            "a cancelled timer plays neither chime nor alert"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn without_a_known_tts_rate_the_alert_still_speaks() {
+        // A call whose backend rate is unknown gets the words with no chime,
+        // rather than audio at the wrong pitch or no alert at all.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let state = std::sync::Arc::new(CallState::default());
+        let ctx = CallCtx {
+            run_id: 7,
+            frames: Some(tx),
+            media: None,
+            spotify: None,
+            state: Some(state),
+            tts_rate: None,
+        };
+        SetTimer
+            .call(&json!({"minutes": 1, "label": "tea"}), &ctx)
+            .await;
+        tokio::time::advance(Duration::from_secs(61)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(frame_kinds(&mut rx), vec!["alert"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_zero_tts_rate_speaks_the_words_without_a_chime() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let state = std::sync::Arc::new(CallState::default());
+        let ctx = CallCtx {
+            run_id: 7,
+            frames: Some(tx),
+            media: None,
+            spotify: None,
+            state: Some(state),
+            tts_rate: Some(0),
+        };
+        SetTimer
+            .call(&json!({"minutes": 1, "label": "tea"}), &ctx)
+            .await;
+        tokio::time::advance(Duration::from_secs(61)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(frame_kinds(&mut rx), vec!["alert"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn all_five_announcements_carry_the_chime() {
+        let (ctx, mut rx, _state) = live_ctx();
+        SetTimer
+            .call(&json!({"minutes": 1, "label": "tea"}), &ctx)
+            .await;
+        tokio::time::advance(Duration::from_secs(61)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            frame_kinds(&mut rx),
+            vec!["chime", "alert"],
+            "announcement 1"
+        );
+        for n in 2..=MAX_ANNOUNCEMENTS {
+            tokio::time::advance(REPEAT_EVERY).await;
+            tokio::task::yield_now().await;
+            assert_eq!(
+                frame_kinds(&mut rx),
+                vec!["chime", "alert"],
+                "announcement {n}"
+            );
+        }
+        tokio::time::advance(REPEAT_EVERY * 10).await;
+        tokio::task::yield_now().await;
+        assert!(frame_kinds(&mut rx).is_empty(), "stops after the cap");
     }
 }
