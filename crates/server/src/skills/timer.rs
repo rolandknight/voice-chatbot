@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use flowcat_core::processor::frame::Frame;
 
-use super::{arg_str, CallCtx, CallState, Skill};
+use super::{arg_str, CallCtx, Skill};
 
 /// "45 seconds", "1 minute", "5 minutes", "2.5 minutes".
 pub fn format_duration(minutes: f64) -> String {
@@ -541,6 +541,7 @@ impl Skill for ListTimers {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::skills::CallState;
     use serde_json::json;
     use tokio::sync::mpsc;
 
@@ -604,7 +605,10 @@ mod tests {
             .call(&json!({"minutes": 0.5, "label": "tea"}), &ctx)
             .await;
         assert_eq!(reply, "Timer set for 30 seconds for tea.");
-        assert!(spoken(&mut rx).is_empty(), "nothing spoken before the delay");
+        assert!(
+            spoken(&mut rx).is_empty(),
+            "nothing spoken before the delay"
+        );
         tokio::time::advance(Duration::from_secs(31)).await;
         tokio::task::yield_now().await;
         assert_eq!(spoken(&mut rx), vec!["Your tea timer is up."]);
@@ -613,7 +617,9 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn alert_repeats_a_bounded_number_of_times() {
         let (ctx, mut rx, state) = live_ctx();
-        SetTimer.call(&json!({"minutes": 1, "label": "tea"}), &ctx).await;
+        SetTimer
+            .call(&json!({"minutes": 1, "label": "tea"}), &ctx)
+            .await;
         tokio::time::advance(Duration::from_secs(61)).await;
         tokio::task::yield_now().await;
         assert_eq!(spoken(&mut rx).len(), 1, "one announcement on firing");
@@ -639,7 +645,9 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn cancelling_before_it_fires_speaks_nothing() {
         let (ctx, mut rx, state) = live_ctx();
-        SetTimer.call(&json!({"minutes": 5, "label": "tea"}), &ctx).await;
+        SetTimer
+            .call(&json!({"minutes": 5, "label": "tea"}), &ctx)
+            .await;
         let id = state.with_timers(|b| b.entries()[0].id);
         assert!(state.with_timers(|b| b.cancel(id)));
         tokio::time::advance(Duration::from_secs(600)).await;
@@ -651,7 +659,9 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn cancelling_while_ringing_stops_the_announcements() {
         let (ctx, mut rx, state) = live_ctx();
-        SetTimer.call(&json!({"minutes": 1, "label": "tea"}), &ctx).await;
+        SetTimer
+            .call(&json!({"minutes": 1, "label": "tea"}), &ctx)
+            .await;
         tokio::time::advance(Duration::from_secs(61)).await;
         tokio::task::yield_now().await;
         assert_eq!(spoken(&mut rx).len(), 1);
@@ -680,7 +690,9 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn entry_removed_without_cancelling_the_token_still_silences_the_timer() {
         let (ctx, mut rx, state) = live_ctx();
-        SetTimer.call(&json!({"minutes": 1, "label": "tea"}), &ctx).await;
+        SetTimer
+            .call(&json!({"minutes": 1, "label": "tea"}), &ctx)
+            .await;
         tokio::time::advance(Duration::from_secs(61)).await;
         tokio::task::yield_now().await;
         assert_eq!(spoken(&mut rx).len(), 1, "one announcement on firing");
@@ -688,7 +700,10 @@ mod tests {
         let id = state.with_timers(|b| b.entries()[0].id);
         let token = state.with_timers(|b| b.entries()[0].cancel.clone());
         state.with_timers(|b| b.remove(id));
-        assert!(!token.is_cancelled(), "remove() alone must not cancel the token");
+        assert!(
+            !token.is_cancelled(),
+            "remove() alone must not cancel the token"
+        );
         assert!(state.with_timers(|b| !b.contains(id)));
 
         tokio::time::advance(REPEAT_EVERY * 10).await;
@@ -702,8 +717,12 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn several_timers_run_at_once_and_each_says_its_own_name() {
         let (ctx, mut rx, state) = live_ctx();
-        SetTimer.call(&json!({"minutes": 1, "label": "tea"}), &ctx).await;
-        SetTimer.call(&json!({"minutes": 2, "label": "pasta"}), &ctx).await;
+        SetTimer
+            .call(&json!({"minutes": 1, "label": "tea"}), &ctx)
+            .await;
+        SetTimer
+            .call(&json!({"minutes": 2, "label": "pasta"}), &ctx)
+            .await;
         SetTimer.call(&json!({"minutes": 3}), &ctx).await;
         assert_eq!(state.with_timers(|b| b.len()), 3);
 
@@ -715,7 +734,10 @@ mod tests {
         tokio::task::yield_now().await;
         let heard = spoken(&mut rx);
         assert!(heard.contains(&"Your pasta timer is up.".to_string()));
-        assert!(heard.contains(&"Your tea timer is up.".to_string()), "tea repeats");
+        assert!(
+            heard.contains(&"Your tea timer is up.".to_string()),
+            "tea repeats"
+        );
 
         // By t=181s the tea (last announcement at t=100) and pasta (last at
         // t=160) timers have both finished their five announcements each;
@@ -732,7 +754,9 @@ mod tests {
     async fn a_timer_whose_call_ended_is_dropped() {
         let (ctx, rx, state) = live_ctx();
         let weak = std::sync::Arc::downgrade(&state);
-        SetTimer.call(&json!({"minutes": 1, "label": "tea"}), &ctx).await;
+        SetTimer
+            .call(&json!({"minutes": 1, "label": "tea"}), &ctx)
+            .await;
         drop(rx);
         drop(ctx);
         // Only this test's own handle should be left: if `SetTimer::call`
@@ -818,8 +842,14 @@ mod tests {
         assert_eq!(format_remaining(Duration::from_secs(30)), "30 seconds");
         assert_eq!(format_remaining(Duration::from_secs(59)), "59 seconds");
         assert_eq!(format_remaining(Duration::from_secs(60)), "about a minute");
-        assert_eq!(format_remaining(Duration::from_secs(200)), "about 3 minutes");
-        assert_eq!(format_remaining(Duration::from_secs(600)), "about 10 minutes");
+        assert_eq!(
+            format_remaining(Duration::from_secs(200)),
+            "about 3 minutes"
+        );
+        assert_eq!(
+            format_remaining(Duration::from_secs(600)),
+            "about 10 minutes"
+        );
     }
 
     #[test]
@@ -888,7 +918,10 @@ mod tests {
         // A cancelled CancellationToken stays cancelled forever, so cancel_all
         // must install a *fresh* parent or every later timer is born dead.
         let (_, t3) = book.insert(None, None, 3.0, at(180));
-        assert!(!t3.is_cancelled(), "timers set after a cancel-all must still fire");
+        assert!(
+            !t3.is_cancelled(),
+            "timers set after a cancel-all must still fire"
+        );
         assert_eq!(book.cancel_all(), 1);
     }
 
@@ -915,7 +948,9 @@ mod tests {
 
     /// Set `n` timers and return the ctx/receiver/state, so a cancel test can
     /// start from a known board.
-    async fn board(specs: &[(f64, Option<&str>)]) -> (
+    async fn board(
+        specs: &[(f64, Option<&str>)],
+    ) -> (
         CallCtx,
         mpsc::UnboundedReceiver<Frame>,
         std::sync::Arc<CallState>,
@@ -1021,7 +1056,9 @@ mod tests {
     async fn an_unknown_wrapped_name_speaks_the_normalized_name() {
         let (ctx, _rx, state) = board(&[(5.0, Some("pasta"))]).await;
         assert_eq!(
-            CancelTimer.call(&json!({"name": "the rice timer"}), &ctx).await,
+            CancelTimer
+                .call(&json!({"name": "the rice timer"}), &ctx)
+                .await,
             "You don't have a rice timer. You have a pasta timer."
         );
         assert_eq!(state.with_timers(|b| b.len()), 1);
@@ -1046,7 +1083,9 @@ mod tests {
         );
         assert!(state.with_timers(|b| b.is_empty()));
         // And the call is still usable afterwards.
-        SetTimer.call(&json!({"minutes": 1, "label": "tea"}), &ctx).await;
+        SetTimer
+            .call(&json!({"minutes": 1, "label": "tea"}), &ctx)
+            .await;
         assert_eq!(state.with_timers(|b| b.len()), 1);
     }
 
@@ -1068,10 +1107,16 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn cancelling_a_ringing_timer_silences_it_end_to_end() {
         let (ctx, mut rx, state) = live_ctx();
-        SetTimer.call(&json!({"minutes": 1, "label": "tea"}), &ctx).await;
+        SetTimer
+            .call(&json!({"minutes": 1, "label": "tea"}), &ctx)
+            .await;
         tokio::time::advance(Duration::from_secs(61)).await;
         tokio::task::yield_now().await;
-        assert_eq!(spoken(&mut rx), vec!["Your tea timer is up."], "first announcement");
+        assert_eq!(
+            spoken(&mut rx),
+            vec!["Your tea timer is up."],
+            "first announcement"
+        );
         assert!(
             state.with_timers(|b| b.entries()[0].ringing),
             "the timer is mid-ring when we cancel it"
@@ -1121,7 +1166,9 @@ mod tests {
             "You don't have any timers running."
         );
 
-        SetTimer.call(&json!({"minutes": 5, "label": "pasta"}), &ctx).await;
+        SetTimer
+            .call(&json!({"minutes": 5, "label": "pasta"}), &ctx)
+            .await;
         assert_eq!(
             ListTimers.call(&json!({}), &ctx).await,
             "You have a pasta timer with about 5 minutes left."
@@ -1138,7 +1185,9 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_ringing_timer_is_reported_as_going_off() {
         let (ctx, _rx, _state) = live_ctx();
-        SetTimer.call(&json!({"minutes": 1, "label": "pasta"}), &ctx).await;
+        SetTimer
+            .call(&json!({"minutes": 1, "label": "pasta"}), &ctx)
+            .await;
         tokio::time::advance(Duration::from_secs(61)).await;
         tokio::task::yield_now().await;
         assert_eq!(
