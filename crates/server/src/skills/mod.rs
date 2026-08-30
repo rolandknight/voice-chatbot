@@ -105,6 +105,9 @@ pub struct CallState {
     /// Consumed once by `wake::WakeGrace` to hold the first end-of-speech edge
     /// after the wake, so "Hey Marvin … what time is it" is one turn.
     wake_armed_at: Mutex<Option<std::time::Instant>>,
+    /// Live countdown timers for this call (`skills/timer.rs`). Dropping
+    /// `CallState` cancels them all, so nothing outlives the call.
+    timers: Mutex<timer::TimerBook>,
 }
 
 /// `prompt.<persona>.txt` lookup key: lowercase, `_` as `-` (the persona
@@ -175,6 +178,12 @@ impl CallState {
             Some(at) => at.elapsed() <= max_age,
             None => false,
         }
+    }
+
+    /// Operate on this call's timers. The lock never escapes, so it cannot be
+    /// held across an `.await`.
+    pub fn with_timers<R>(&self, f: impl FnOnce(&mut timer::TimerBook) -> R) -> R {
+        f(&mut self.timers.lock().unwrap())
     }
 }
 

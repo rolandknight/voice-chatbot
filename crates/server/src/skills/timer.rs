@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 
 use flowcat_core::processor::frame::Frame;
 
-use super::{arg_str, CallCtx, Skill};
+use super::{arg_str, CallCtx, CallState, Skill};
 
 /// "45 seconds", "1 minute", "5 minutes", "2.5 minutes".
 pub fn format_duration(minutes: f64) -> String {
@@ -484,5 +484,15 @@ mod tests {
             token.is_cancelled(),
             "the call ended, so a sleeping task must wake and exit"
         );
+    }
+
+    #[test]
+    fn call_state_owns_a_timer_book() {
+        let state = CallState::default();
+        assert!(state.with_timers(|b| b.is_empty()));
+        let token = state.with_timers(|b| b.insert(None, None, 1.0, at(60)).1);
+        assert_eq!(state.with_timers(|b| b.len()), 1);
+        drop(state);
+        assert!(token.is_cancelled(), "dropping the call cancels its timers");
     }
 }
