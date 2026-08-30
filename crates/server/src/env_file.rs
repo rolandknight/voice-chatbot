@@ -55,6 +55,18 @@ pub fn load_if_unset(path: &Path) -> usize {
     loaded
 }
 
+/// Names dropped when the `POC_` prefix was retired. A stale `.env` would
+/// otherwise be read as "unset" and silently take the defaults — on a home
+/// server that surfaces days later as the wrong STT model or a missing skill.
+pub const RETIRED_PREFIX: &str = "POC_";
+
+/// Every `POC_*` name found in the environment, so startup can refuse to run.
+pub fn retired_names<I: Iterator<Item = String>>(keys: I) -> Vec<String> {
+    let mut found: Vec<String> = keys.filter(|k| k.starts_with(RETIRED_PREFIX)).collect();
+    found.sort();
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -83,5 +95,31 @@ mod tests {
         assert_eq!(parse_line(""), None);
         assert_eq!(parse_line("hey babel,hey babe,hey baby"), None);
         assert_eq!(parse_line("bad key=1"), None);
+    }
+}
+
+#[cfg(test)]
+mod retired_tests {
+    use super::*;
+
+    #[test]
+    fn flags_only_the_retired_prefix() {
+        let keys = [
+            "POC_STT_BACKEND",
+            "SERVER_URL",
+            "POC_LLM_MODEL",
+            "BRAVE_API_KEY",
+        ]
+        .into_iter()
+        .map(String::from);
+        assert_eq!(
+            retired_names(keys),
+            vec!["POC_LLM_MODEL".to_string(), "POC_STT_BACKEND".to_string()]
+        );
+    }
+
+    #[test]
+    fn an_environment_without_them_is_clean() {
+        assert!(retired_names(["SERVER_URL".to_string()].into_iter()).is_empty());
     }
 }

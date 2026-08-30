@@ -13,6 +13,7 @@ mod env_file;
 mod llm;
 mod llm_claude;
 mod llm_ollama;
+mod location;
 mod media;
 #[cfg(feature = "moonshine")]
 mod moonshine;
@@ -68,7 +69,7 @@ impl SttBackend {
             }),
             "nemotron-sidecar" => Ok(Self::NemotronSidecar),
             _ => Err(format!(
-                "unsupported POC_STT_BACKEND {value:?} (expected \"whisper\", \"moonshine\", \"nemotron\", or \"nemotron-sidecar\")"
+                "unsupported STT_BACKEND {value:?} (expected \"whisper\", \"moonshine\", \"nemotron\", or \"nemotron-sidecar\")"
             )),
         }
     }
@@ -148,15 +149,15 @@ pub struct PocConfig {
     /// Silence needed to close a speech turn. The default matches the Python
     /// chatbot's `wake.vad_stop_secs` setting.
     pub vad_stop_secs: f32,
-    /// Listen mode: wake heads as `(path, persona)`, from `POC_WAKE_DIR` (every
+    /// Listen mode: wake heads as `(path, persona)`, from `WAKE_DIR` (every
     /// `*.onnx`; persona = stem minus `hey_`, `_` as `-`) or the single
-    /// `POC_WAKE_MODEL`. Empty → push mode (no server wake).
+    /// `WAKE_MODEL`. Empty → push mode (no server wake).
     pub wake_heads: Vec<(std::path::PathBuf, String)>,
     pub wake_threshold: f32,
-    /// Silence that ends a wake session (POC_WAKE_SESSION_SECS).
+    /// Silence that ends a wake session (WAKE_SESSION_SECS).
     pub wake_session_secs: f32,
     /// How long the first end-of-speech after a wake is held for the command
-    /// to follow (POC_WAKE_GRACE_SECS; 0 disables). See `wake::WakeGrace`.
+    /// to follow (WAKE_GRACE_SECS; 0 disables). See `wake::WakeGrace`.
     pub wake_grace_secs: f32,
     /// TTS backend: "kokoro" (default) or "chatterbox" (Phase 1b cloned voice).
     pub tts_backend: String,
@@ -176,15 +177,26 @@ pub struct PocConfig {
     pub qwen_size: String,
     /// `ask_claude`: Anthropic API key (empty → the tool is not advertised) and model.
     pub anthropic_key: String,
+    /// Messages API endpoint override (`ANTHROPIC_BASE_URL`). Empty uses
+    /// Anthropic directly; set it to route Claude through a gateway or proxy,
+    /// the way `OPENROUTER_BASE_URL` already does for the local backend.
+    pub anthropic_base_url: String,
     pub claude_model: String,
     /// `output_config.effort` for the Claude turns; empty omits the field (for
     /// models that reject it). See `llm_claude::DEFAULT_EFFORT`.
     pub claude_effort: String,
+    /// Anthropic's server-side web search on the Claude turns: tool type, per-turn
+    /// cap, and whether it is declared at all.
+    pub claude_web_search: bool,
+    pub claude_search_tool: String,
+    pub claude_search_max_uses: u32,
+    /// `SEARCH_LOCATION`, shared with the Brave provider.
+    pub search_location: Option<crate::location::SearchLocation>,
     pub qwen_interval_s: f64,
-    /// Host ICE candidate address to advertise (POC_ADVERTISE_IP). None →
+    /// Host ICE candidate address to advertise (ADVERTISE_IP). None →
     /// the interface that routes back to each caller.
     pub advertise_ip: Option<std::net::IpAddr>,
-    /// Optional HTTPS listener (POC_TLS_BIND + POC_TLS_CERT/KEY): browsers only
+    /// Optional HTTPS listener (TLS_BIND + TLS_CERT/KEY): browsers only
     /// expose getUserMedia on secure origins, so a LAN browser needs this; the
     /// plain listener stays for the harness and the native client.
     pub tls_bind: String,
@@ -206,7 +218,7 @@ pub struct PocState {
     /// ICE timeout (10–30 s) — long enough to exhaust the Nemotron sidecar's
     /// two realtime sessions on quick reconnects.
     pub hangups: std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Notify>>>,
-    /// Shared Qwen engine + voice when `POC_TTS_BACKEND=qwen`.
+    /// Shared Qwen engine + voice when `TTS_BACKEND=qwen`.
     #[cfg(feature = "qwen-tts")]
     pub qwen: Option<tts_qwen::QwenShared>,
 }
@@ -288,9 +300,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
     // The repo-root .env (run from the repo root; silently skipped otherwise)
-    // holds both the server profile (POC_*) and the shared secrets (Spotify,
+    // holds both the server's own settings and the shared secrets (Spotify,
     // search keys). It never overrides variables already set.
     env_file::load_if_unset(std::path::Path::new(".env"));
+    let retired = env_file::retired_names(std::env::vars().map(|(k, _)| k));
+    if !retired.is_empty() {
+        let prefix = env_file::RETIRED_PREFIX;
+        return Err(format!(
+            "these environment variables lost their {prefix} prefix and are no longer read: {}. \
+Rename them in .env (drop {prefix}; {prefix}PROMPT is now PROMPT_FILE and {prefix}PYTHON is now QWEN_PYTHON) \
+— leaving them set means silently running on the defaults.",
+            retired.join(", ")
+        )
+        .into());
+    }
     if let Some(pos) = std::env::args().position(|a| a == "spotify-login") {
         let headless = std::env::args().skip(pos + 1).any(|a| a == "--headless");
         return spotify_login::run(
@@ -308,30 +331,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let repo_root = manifest_dir.parent().unwrap().parent().unwrap();
     let runtime_dir = repo_root;
-    let stt_backend = SttBackend::parse(&env_or("POC_STT_BACKEND", "whisper"))?;
+    let stt_backend = SttBackend::parse(&env_or("STT_BACKEND", "whisper"))?;
 
     // Use the physical-core count as a practical default on SMT machines,
     // capped for predictable thermals. This laptop is 8C/16T, so it selects 8.
     let default_whisper_threads = std::thread::available_parallelism()
         .map(|parallelism| parallelism.get().div_ceil(2).min(8))
         .unwrap_or(4);
-    let whisper_threads = env_or("POC_WHISPER_THREADS", &default_whisper_threads.to_string())
+    let whisper_threads = env_or("WHISPER_THREADS", &default_whisper_threads.to_string())
         .parse::<usize>()
-        .map_err(|error| format!("invalid POC_WHISPER_THREADS: {error}"))?;
+        .map_err(|error| format!("invalid WHISPER_THREADS: {error}"))?;
     if whisper_threads == 0 {
-        return Err("POC_WHISPER_THREADS must be greater than zero".into());
+        return Err("WHISPER_THREADS must be greater than zero".into());
     }
-    let moonshine_update_interval_ms = env_or("POC_MOONSHINE_UPDATE_INTERVAL_MS", "250")
+    let moonshine_update_interval_ms = env_or("MOONSHINE_UPDATE_INTERVAL_MS", "250")
         .parse::<u64>()
-        .map_err(|error| format!("invalid POC_MOONSHINE_UPDATE_INTERVAL_MS: {error}"))?;
+        .map_err(|error| format!("invalid MOONSHINE_UPDATE_INTERVAL_MS: {error}"))?;
     if !(200..=2_000).contains(&moonshine_update_interval_ms) {
-        return Err("POC_MOONSHINE_UPDATE_INTERVAL_MS must be in [200, 2000]".into());
+        return Err("MOONSHINE_UPDATE_INTERVAL_MS must be in [200, 2000]".into());
     }
-    let vad_stop_secs = env_or("POC_VAD_STOP_SECS", "0.2")
+    let vad_stop_secs = env_or("VAD_STOP_SECS", "0.2")
         .parse::<f32>()
-        .map_err(|error| format!("invalid POC_VAD_STOP_SECS: {error}"))?;
+        .map_err(|error| format!("invalid VAD_STOP_SECS: {error}"))?;
     if !vad_stop_secs.is_finite() || vad_stop_secs <= 0.0 || vad_stop_secs > 2.0 {
-        return Err("POC_VAD_STOP_SECS must be finite and in (0, 2]".into());
+        return Err("VAD_STOP_SECS must be finite and in (0, 2]".into());
     }
 
     let cfg = PocConfig {
@@ -340,34 +363,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "OPENROUTER_BASE_URL",
             "https://openrouter.ai/api/v1",
         ),
-        llm_model: env_or("POC_LLM_MODEL", "anthropic/claude-haiku-4.5"),
+        llm_model: env_or("LLM_MODEL", "anthropic/claude-haiku-4.5"),
         llm_provider: {
             let base = env_or("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1");
             env_or(
-                "POC_LLM_PROVIDER",
+                "LLM_PROVIDER",
                 if base.contains(":11434") { "ollama" } else { "openrouter" },
             )
         },
-        llm_num_ctx: env_or("POC_LLM_NUM_CTX", "8192")
+        llm_num_ctx: env_or("LLM_NUM_CTX", "8192")
             .parse::<u32>()
-            .map_err(|error| format!("invalid POC_LLM_NUM_CTX: {error}"))?,
-        ollama_supervise: ollama_serve::Supervise::parse(&env_or("POC_OLLAMA_SUPERVISE", "auto"))?,
-        ollama_bin: env_or("POC_OLLAMA_BIN", "ollama"),
-        ollama_host: env_or("POC_OLLAMA_HOST", "127.0.0.1"),
-        ollama_unload_on_exit: env_or("POC_OLLAMA_UNLOAD_ON_EXIT", "true")
+            .map_err(|error| format!("invalid LLM_NUM_CTX: {error}"))?,
+        ollama_supervise: ollama_serve::Supervise::parse(&env_or("OLLAMA_SUPERVISE", "auto"))?,
+        ollama_bin: env_or("OLLAMA_BIN", "ollama"),
+        ollama_host: env_or("OLLAMA_HOST", "127.0.0.1"),
+        ollama_unload_on_exit: env_or("OLLAMA_UNLOAD_ON_EXIT", "true")
             .parse::<bool>()
-            .map_err(|error| format!("invalid POC_OLLAMA_UNLOAD_ON_EXIT: {error}"))?,
-        ollama_keepwarm_secs: env_or("POC_OLLAMA_KEEPWARM_SECS", "60")
+            .map_err(|error| format!("invalid OLLAMA_UNLOAD_ON_EXIT: {error}"))?,
+        ollama_keepwarm_secs: env_or("OLLAMA_KEEPWARM_SECS", "60")
             .parse::<u64>()
-            .map_err(|error| format!("invalid POC_OLLAMA_KEEPWARM_SECS: {error}"))?,
+            .map_err(|error| format!("invalid OLLAMA_KEEPWARM_SECS: {error}"))?,
         stt_backend,
         whisper_model: env_or(
-            "POC_WHISPER_MODEL",
+            "WHISPER_MODEL",
             &runtime_dir.join("models/ggml-base.en.bin").to_string_lossy(),
         ),
         whisper_threads,
         moonshine_model: env_or(
-            "POC_MOONSHINE_MODEL",
+            "MOONSHINE_MODEL",
             &runtime_dir
                 .join(
                     "models/moonshine/download.moonshine.ai/model/medium-streaming-en/quantized_26_07_30",
@@ -375,80 +398,93 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .to_string_lossy(),
         ),
         moonshine_update_interval_ms,
-        moonshine_keyterms: env_or("POC_MOONSHINE_KEYTERMS", ""),
-        nemotron_url: env_or("POC_NEMOTRON_URL", "http://127.0.0.1:8178"),
+        moonshine_keyterms: env_or("MOONSHINE_KEYTERMS", ""),
+        nemotron_url: env_or("NEMOTRON_URL", "http://127.0.0.1:8178"),
         nemotron_model: env_or(
-            "POC_NEMOTRON_MODEL",
+            "NEMOTRON_MODEL",
             &runtime_dir
                 .join("models/nemotron/nvidia/nemotron-speech-streaming-en-0.6b/ebe59e5a817142986528bbbee5dba8db7b38ed50/nemotron-speech-streaming-en-0.6b.q8_0.gguf")
                 .to_string_lossy(),
         ),
-        nemotron_device: env_or("POC_NEMOTRON_DEVICE", "auto"),
-        nemotron_right_context: env_or("POC_NEMOTRON_RIGHT_CONTEXT", "6")
+        nemotron_device: env_or("NEMOTRON_DEVICE", "auto"),
+        nemotron_right_context: env_or("NEMOTRON_RIGHT_CONTEXT", "6")
             .parse::<i32>()
-            .map_err(|error| format!("invalid POC_NEMOTRON_RIGHT_CONTEXT: {error}"))?,
-        nemotron_speech_contexts: env_or("POC_NEMOTRON_SPEECH_CONTEXTS", "")
+            .map_err(|error| format!("invalid NEMOTRON_RIGHT_CONTEXT: {error}"))?,
+        nemotron_speech_contexts: env_or("NEMOTRON_SPEECH_CONTEXTS", "")
             .split(',')
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_owned)
             .collect(),
-        kokoro_url: env_or("POC_KOKORO_URL", "http://127.0.0.1:8880"),
-        kokoro_voice: env_or("POC_KOKORO_VOICE", "af_heart"),
+        kokoro_url: env_or("KOKORO_URL", "http://127.0.0.1:8880"),
+        kokoro_voice: env_or("KOKORO_VOICE", "af_heart"),
         system_prompt: std::fs::read_to_string(env_or(
-            "POC_PROMPT",
+            "PROMPT_FILE",
             &manifest_dir.join("prompt.txt").to_string_lossy(),
         ))?,
         persona_prompts: load_persona_prompts(manifest_dir)?,
         vad_model: env_or(
-            "POC_VAD_MODEL",
+            "VAD_MODEL",
             &runtime_dir.join("models/silero_vad.onnx").to_string_lossy(),
         ),
         vad_stop_secs,
         wake_heads: voice_chatbot_wake::resolve_heads(
             repo_root,
-            &env_or("POC_WAKE_DIR", ""),
-            &env_or("POC_WAKE_MODEL", ""),
+            &env_or("WAKE_DIR", ""),
+            &env_or("WAKE_MODEL", ""),
         )?,
-        wake_threshold: env_or("POC_WAKE_THRESHOLD", "0.5").parse().unwrap_or(0.5),
-        wake_session_secs: env_or("POC_WAKE_SESSION_SECS", "15")
+        wake_threshold: env_or("WAKE_THRESHOLD", "0.5").parse().unwrap_or(0.5),
+        wake_session_secs: env_or("WAKE_SESSION_SECS", "15")
             .parse::<f32>()
-            .map_err(|error| format!("invalid POC_WAKE_SESSION_SECS: {error}"))?,
-        wake_grace_secs: env_or("POC_WAKE_GRACE_SECS", "0.8")
+            .map_err(|error| format!("invalid WAKE_SESSION_SECS: {error}"))?,
+        wake_grace_secs: env_or("WAKE_GRACE_SECS", "0.8")
             .parse::<f32>()
-            .map_err(|error| format!("invalid POC_WAKE_GRACE_SECS: {error}"))?,
-        tts_backend: env_or("POC_TTS_BACKEND", "kokoro"),
-        chatterbox_url: env_or("POC_CHATTERBOX_URL", "http://127.0.0.1:8004"),
-        chatterbox_voice: env_or("POC_CHATTERBOX_VOICE", "marvin.wav"),
+            .map_err(|error| format!("invalid WAKE_GRACE_SECS: {error}"))?,
+        tts_backend: env_or("TTS_BACKEND", "kokoro"),
+        chatterbox_url: env_or("CHATTERBOX_URL", "http://127.0.0.1:8004"),
+        chatterbox_voice: env_or("CHATTERBOX_VOICE", "marvin.wav"),
         qwen_config: env_or(
-            "POC_QWEN_CONFIG",
+            "QWEN_CONFIG",
             &manifest_dir
                 .join("../qwen-tts/config/server.yaml")
                 .to_string_lossy(),
         ),
-        qwen_voice: env_or("POC_QWEN_VOICE", "babel"),
-        qwen_voices: env_or("POC_QWEN_VOICES", "")
+        qwen_voice: env_or("QWEN_VOICE", "babel"),
+        qwen_voices: env_or("QWEN_VOICES", "")
             .split(',')
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty())
             .collect(),
         voice_presets: voice_presets(&repo_root.join("voices")),
         anthropic_key: env_or("ANTHROPIC_API_KEY", ""),
-        claude_model: env_or("POC_CLAUDE_MODEL", "claude-opus-5"),
-        claude_effort: env_or("POC_CLAUDE_EFFORT", llm_claude::DEFAULT_EFFORT),
-        qwen_size: env_or("POC_QWEN_SIZE", "1.7B"),
-        qwen_interval_s: env_or("POC_QWEN_INTERVAL_S", "0.32")
+        anthropic_base_url: env_or("ANTHROPIC_BASE_URL", ""),
+        claude_model: env_or("CLAUDE_MODEL", "claude-opus-5"),
+        claude_effort: env_or("CLAUDE_EFFORT", llm_claude::DEFAULT_EFFORT),
+        claude_web_search: env_flag("CLAUDE_WEB_SEARCH", true),
+        claude_search_tool: env_or("CLAUDE_SEARCH_TOOL", llm_claude::DEFAULT_SEARCH_TOOL),
+        claude_search_max_uses: env_or(
+            "CLAUDE_SEARCH_MAX_USES",
+            &llm_claude::DEFAULT_SEARCH_MAX_USES.to_string(),
+        )
+        .parse()
+        .map_err(|e| format!("invalid CLAUDE_SEARCH_MAX_USES: {e}"))?,
+        search_location: location::SearchLocation::parse(&env_or(
+            "SEARCH_LOCATION",
+            location::DEFAULT,
+        ))?,
+        qwen_size: env_or("QWEN_SIZE", "1.7B"),
+        qwen_interval_s: env_or("QWEN_INTERVAL_S", "0.32")
             .parse::<f64>()
-            .map_err(|error| format!("invalid POC_QWEN_INTERVAL_S: {error}"))?,
-        tls_bind: env_or("POC_TLS_BIND", ""),
-        tls_cert: env_or("POC_TLS_CERT", ""),
-        tls_key: env_or("POC_TLS_KEY", ""),
+            .map_err(|error| format!("invalid QWEN_INTERVAL_S: {error}"))?,
+        tls_bind: env_or("TLS_BIND", ""),
+        tls_cert: env_or("TLS_CERT", ""),
+        tls_key: env_or("TLS_KEY", ""),
         advertise_ip: {
-            let raw = env_or("POC_ADVERTISE_IP", "");
+            let raw = env_or("ADVERTISE_IP", "");
             if raw.trim().is_empty() {
                 None
             } else {
-                Some(raw.trim().parse::<std::net::IpAddr>().map_err(|error| format!("invalid POC_ADVERTISE_IP: {error}"))?)
+                Some(raw.trim().parse::<std::net::IpAddr>().map_err(|error| format!("invalid ADVERTISE_IP: {error}"))?)
             }
         },
     };
@@ -466,7 +502,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
     if cfg.stt_backend == SttBackend::NemotronSidecar {
-        require_nonempty(&cfg.nemotron_url, "POC_NEMOTRON_URL")?;
+        require_nonempty(&cfg.nemotron_url, "NEMOTRON_URL")?;
     }
     if cfg.stt_backend == SttBackend::Nemotron
         && !std::path::Path::new(&cfg.nemotron_model).exists()
@@ -481,16 +517,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("silero vad model missing: {}", cfg.vad_model).into());
     }
     if !(cfg.wake_grace_secs >= 0.0 && cfg.wake_grace_secs <= 3.0) {
-        return Err("POC_WAKE_GRACE_SECS must be in [0, 3]".into());
+        return Err("WAKE_GRACE_SECS must be in [0, 3]".into());
     }
     if cfg.wake_heads.is_empty() {
-        tracing::info!("wake: push mode (no POC_WAKE_DIR / POC_WAKE_MODEL)");
+        tracing::info!("wake: push mode (no WAKE_DIR / WAKE_MODEL)");
     } else {
         if !(0.0..=1.0).contains(&cfg.wake_threshold) {
-            return Err("POC_WAKE_THRESHOLD must be in [0, 1]".into());
+            return Err("WAKE_THRESHOLD must be in [0, 1]".into());
         }
         if !(cfg.wake_session_secs > 0.0 && cfg.wake_session_secs.is_finite()) {
-            return Err("POC_WAKE_SESSION_SECS must be a positive number".into());
+            return Err("WAKE_SESSION_SECS must be a positive number".into());
         }
         for (path, persona) in &cfg.wake_heads {
             tracing::info!(head = %path.display(), %persona, "wake: listen mode head");
@@ -502,18 +538,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     }
-    require_nonempty(&cfg.llm_model, "POC_LLM_MODEL")?;
+    require_nonempty(&cfg.llm_model, "LLM_MODEL")?;
     require_nonempty(&cfg.llm_base_url, "OPENROUTER_BASE_URL")?;
     match cfg.llm_provider.as_str() {
         "openrouter" => require_nonempty(&cfg.openrouter_key, "OPENROUTER_API_KEY")?,
         "ollama" => {
             if cfg.llm_num_ctx < 2048 {
-                return Err("POC_LLM_NUM_CTX must be >= 2048".into());
+                return Err("LLM_NUM_CTX must be >= 2048".into());
             }
         }
         other => {
             return Err(format!(
-                "unsupported POC_LLM_PROVIDER {other:?} (expected \"ollama\" or \"openrouter\")"
+                "unsupported LLM_PROVIDER {other:?} (expected \"ollama\" or \"openrouter\")"
             )
             .into())
         }
@@ -521,29 +557,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cfg.tts_backend.as_str() {
         "kokoro" => {}
         "chatterbox" => {
-            require_nonempty(&cfg.chatterbox_url, "POC_CHATTERBOX_URL")?;
-            require_nonempty(&cfg.chatterbox_voice, "POC_CHATTERBOX_VOICE")?;
+            require_nonempty(&cfg.chatterbox_url, "CHATTERBOX_URL")?;
+            require_nonempty(&cfg.chatterbox_voice, "CHATTERBOX_VOICE")?;
         }
         "qwen" => {
             if !cfg!(feature = "qwen-tts") {
-                return Err("POC_TTS_BACKEND=qwen needs the qwen-tts build: POC_TTS_BACKEND=qwen make build".into());
+                return Err(
+                    "TTS_BACKEND=qwen needs the qwen-tts build: TTS_BACKEND=qwen make build".into(),
+                );
             }
-            require_nonempty(&cfg.qwen_config, "POC_QWEN_CONFIG")?;
-            require_nonempty(&cfg.qwen_voice, "POC_QWEN_VOICE")?;
+            require_nonempty(&cfg.qwen_config, "QWEN_CONFIG")?;
+            require_nonempty(&cfg.qwen_voice, "QWEN_VOICE")?;
             if !std::path::Path::new(&cfg.qwen_config).exists() {
                 return Err(format!("qwen engine config missing: {}", cfg.qwen_config).into());
             }
         }
         other => {
             return Err(format!(
-                "unsupported POC_TTS_BACKEND {other:?} (expected \"kokoro\", \"chatterbox\", or \"qwen\")"
-            )
+            "unsupported TTS_BACKEND {other:?} (expected \"kokoro\", \"chatterbox\", or \"qwen\")"
+        )
             .into())
         }
     }
 
     let sfx_dir = runtime_dir.join("logs/sfx");
-    let (registry, calls) = build_skills(&cfg, sfx_dir.clone())?;
+    let (registry, calls) = build_skills(&cfg, sfx_dir.clone(), cfg.search_location.as_ref())?;
     let session = SkillSession::new(registry, calls, runtime_dir.join("logs/artifacts"));
 
     // ADR-0007: the chatbot owns its LLM's lifecycle. Ensure a serve, pull the
@@ -570,7 +608,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // without the file still work, but fall back to normal TTS synthesis.
     let ready_pcm = if cfg.tts_backend == "chatterbox" {
         let path = env_or(
-            "POC_GREETING_WAV",
+            "GREETING_WAV",
             &runtime_dir
                 .join("logs/chatterbox-health.wav")
                 .to_string_lossy(),
@@ -607,7 +645,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             #[cfg(not(feature = "moonshine"))]
             {
                 return Err(
-                    "POC_STT_BACKEND=moonshine requires a Moonshine build; build with the moonshine feature: SERVER_FEATURES=moonshine,... make server-build"
+                    "STT_BACKEND=moonshine requires a Moonshine build; build with the moonshine feature: SERVER_FEATURES=moonshine,... make server-build"
                         .into(),
                 );
             }
@@ -719,7 +757,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    let bind = env_or("POC_BIND", "127.0.0.1:6210");
+    let bind = env_or("BIND", "127.0.0.1:6210");
     let app = Router::new()
         .route("/", get(playground::page))
         .route("/healthz", get(healthz))
@@ -731,7 +769,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(%bind, "voice-chatbot-server listening");
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     // ConnectInfo gives the offer handler the caller's address so it can
-    // advertise a reachable ICE candidate (POC_BIND=0.0.0.0:6210 for the LAN).
+    // advertise a reachable ICE candidate (BIND=0.0.0.0:6210 for the LAN).
     // Optional HTTPS twin of the same router for LAN browsers (secure context).
     let tls_handle = axum_server::Handle::new();
     let tls_task = if state.cfg.tls_bind.trim().is_empty() {
@@ -739,7 +777,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         let cfg = &state.cfg;
         if cfg.tls_cert.is_empty() || cfg.tls_key.is_empty() {
-            return Err("POC_TLS_BIND needs POC_TLS_CERT and POC_TLS_KEY (make tls-cert)".into());
+            return Err("TLS_BIND needs TLS_CERT and TLS_KEY (make tls-cert)".into());
         }
         let rustls_cfg =
             axum_server::tls_rustls::RustlsConfig::from_pem_file(&cfg.tls_cert, &cfg.tls_key)
@@ -750,7 +788,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let addr: std::net::SocketAddr = cfg
             .tls_bind
             .parse()
-            .map_err(|e| format!("invalid POC_TLS_BIND: {e}"))?;
+            .map_err(|e| format!("invalid TLS_BIND: {e}"))?;
         tracing::info!(%addr, cert = %cfg.tls_cert, "voice-chatbot-server listening (https)");
         let app = app.clone();
         let handle = tls_handle.clone();
@@ -974,7 +1012,7 @@ async fn start_ollama(
     Ok(serve)
 }
 
-/// `POC_QWEN_VOICE` followed by `POC_QWEN_VOICES`, the personas the server's
+/// `QWEN_VOICE` followed by `QWEN_VOICES`, the personas the server's
 /// wake heads select, and every preset in `voices/` (deduplicated,
 /// `-`/`_`-insensitive), when the TTS backend is Qwen; otherwise just the one
 /// configured voice. Every persona a wake word can name — from the server
@@ -1007,6 +1045,7 @@ fn qwen_persona_names(cfg: &PocConfig) -> Vec<String> {
 fn build_skills(
     cfg: &PocConfig,
     sfx_dir: std::path::PathBuf,
+    search_location: Option<&location::SearchLocation>,
 ) -> Result<(skills::Registry, skills::CallRegistry), Box<dyn std::error::Error>> {
     use std::sync::Arc;
     let mut list: Vec<Arc<dyn skills::Skill>> = vec![
@@ -1016,28 +1055,35 @@ fn build_skills(
         Arc::new(skills::timer::CancelTimer),
         Arc::new(skills::timer::ListTimers),
         Arc::new(skills::weather::GetWeather::new(env_or(
-            "POC_WEATHER_DEFAULT_LOCATION",
+            "WEATHER_DEFAULT_LOCATION",
             "",
         ))),
     ];
-    let provider = skills::web_search::Provider::parse(&env_or("POC_WEB_SEARCH_PROVIDER", ""))?;
+    let provider = skills::web_search::Provider::parse(&env_or("WEB_SEARCH_PROVIDER", ""))?;
+    let brave_key = env_or("BRAVE_API_KEY", "");
+    if provider == skills::web_search::Provider::Brave && brave_key.trim().is_empty() {
+        return Err("WEB_SEARCH_PROVIDER=brave (the default) needs BRAVE_API_KEY in .env — \
+free tier at https://brave.com/search/api/. Set WEB_SEARCH_PROVIDER=duckduckgo to run without a key."
+            .into());
+    }
     list.push(Arc::new(skills::web_search::WebSearch::new(
         provider,
-        env_or("BRAVE_API_KEY", ""),
+        brave_key,
         env_or("TAVILY_API_KEY", ""),
+        search_location.map(|l| l.country.clone()),
     )));
     // Playback happens on the native client; the browser playground has
     // no media, so these can be switched off for browser-only setups.
-    if env_flag("POC_SKILLS_RADIO", true) {
+    if env_flag("SKILLS_RADIO", true) {
         list.push(Arc::new(skills::radio::PlayBbcRadio::new()));
         list.push(Arc::new(skills::radio::StopBbcRadio));
     }
-    if env_flag("POC_SKILLS_SHOWS", true) {
+    if env_flag("SKILLS_SHOWS", true) {
         list.push(Arc::new(skills::shows::PlayBbcShow::new()));
     }
     // Spotify needs a client id and a cached PKCE token (`spotify-login`);
     // without them the seven tools are simply not advertised.
-    let spotify = if env_flag("POC_SKILLS_SPOTIFY", true) {
+    let spotify = if env_flag("SKILLS_SPOTIFY", true) {
         match skills::spotify_client::SpotifyClient::new(env_or("SPOTIPY_CLIENT_ID", "")) {
             Ok(c) => Some(Arc::new(c)),
             Err(reason) => {
@@ -1053,11 +1099,11 @@ fn build_skills(
     }
     // The generators are separate model servers (`make sfx-up`); the tool is
     // advertised regardless and reports "not running" per call.
-    if env_flag("POC_SKILLS_SFX", true) {
+    if env_flag("SKILLS_SFX", true) {
         list.push(Arc::new(skills::sfx::GenerateSoundEffect::new(
-            env_or("POC_SFX_WOOSH_URL", "http://127.0.0.1:8005"),
-            env_or("POC_SFX_SAO_URL", "http://127.0.0.1:8006"),
-            skills::sfx::Routing::parse(&env_or("POC_SFX_BACKEND", "auto"))?,
+            env_or("SFX_WOOSH_URL", "http://127.0.0.1:8005"),
+            env_or("SFX_SAO_URL", "http://127.0.0.1:8006"),
+            skills::sfx::Routing::parse(&env_or("SFX_BACKEND", "auto"))?,
             sfx_dir,
         )));
     }
@@ -1162,7 +1208,11 @@ async fn start_qwen(cfg: &PocConfig) -> Result<tts_qwen::QwenShared, Box<dyn std
         let entry = catalog["voices"]
             .as_array()
             .and_then(|vs| vs.iter().find(|v| v["name"] == name.as_str()))
-            .ok_or_else(|| format!("voice {name:?} (POC_QWEN_VOICE/POC_QWEN_VOICES) not in the engine's voices/ catalog"))?;
+            .ok_or_else(|| {
+                format!(
+                    "voice {name:?} (QWEN_VOICE/QWEN_VOICES) not in the engine's voices/ catalog"
+                )
+            })?;
         let ref_text = entry["transcript"]
             .as_str()
             .unwrap_or("")
@@ -1217,7 +1267,7 @@ mod tests {
             SttBackend::NemotronSidecar
         );
         let error = SttBackend::parse("cloud").expect_err("cloud STT is unsupported");
-        assert!(error.contains("POC_STT_BACKEND"));
+        assert!(error.contains("STT_BACKEND"));
     }
 
     /// `nemotron` means "in-process if this binary has it, else the sidecar",

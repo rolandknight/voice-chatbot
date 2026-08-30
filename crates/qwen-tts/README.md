@@ -1,6 +1,6 @@
 # qwen-tts — Qwen3-TTS (mlx-audio) embedded in the server via PyO3
 
-The chatbot's TTS backend for `POC_TTS_BACKEND=qwen`: a Rust `Engine` that
+The chatbot's TTS backend for `TTS_BACKEND=qwen`: a Rust `Engine` that
 owns one Python thread, and a Python package (`python/qwen_tts`) that runs
 mlx-audio's Qwen3-TTS models on Metal. Audio streams out of `Engine::generate`
 as int16 PCM chunks ~0.18 s after the request (1.7B, M4 Max).
@@ -18,7 +18,7 @@ config/server.yaml         the server's engine profile: clone-only, one model re
 python/qwen_tts/
   engine.py                Qwen3Engine: model load/LRU/warm on the mlx-worker thread, clone/custom/design, transcribe
   bridge.py                Bridge: the object the Rust thread calls; stream(tab, params, stop) for all three tabs
-  text.py config.py        sentence chunking; profile loading with POC_QWEN_<SECTION>_<KEY> overrides
+  text.py config.py        sentence chunking; profile loading with QWEN_<SECTION>_<KEY> overrides
   bench.py                 the three bench sentences shared with the other TTS PoCs
 python/tests/              pytest, no GPU (tests/config.yaml is the test profile)
 requirements.txt setup.sh mise.toml   the venv; .venv/ is gitignored
@@ -52,7 +52,7 @@ tokio ──Cmd (std mpsc)──▶ "python" thread (holds the GIL) ──▶ Br
 - **Interpreter wiring.** `PYO3_PYTHON` must be this crate's venv Python at
   build time (the root Makefile and `poc/platform.sh` set it). `build.rs`
   adds libpython's directory to the rpath and bakes the interpreter path in
-  as `POC_PYTHON`, which `init_bridge` installs as `sys.executable` — an
+  as `QWEN_PYTHON`, which `init_bridge` installs as `sys.executable` — an
   embedded interpreter otherwise reports the host binary, and libraries that
   spawn `sys.executable -c …` would launch the server. A dependency's
   `rustc-link-arg` is not transitive, so `crates/server/build.rs` and

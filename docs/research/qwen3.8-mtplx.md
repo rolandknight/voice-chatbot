@@ -141,7 +141,7 @@ speed, not about whether caching exists.
   adds a launcher, a schema builder that mirrors `_loader.py` without
   importing pipecat (poc venv stays small), the eval suite, the GUI, and
   reports. Same shape as `poc-qwen`: mise Python 3.12, `.venv`, stamp file,
-  `config.yaml` + `POC_MTPLX_*` env overrides, `reports/*.jsonl` gitignored.
+  `config.yaml` + `MTPLX_*` env overrides, `reports/*.jsonl` gitignored.
 - **Port 8009** for the GUI, **8012** for `mtplx serve` (8007/8008 are the
   TTS PoCs, 8010/8011 reserved by the LLM-server plan, 8000 is MTPLX's
   default and may collide with other tools).
@@ -157,7 +157,7 @@ poc-qwen-3.8-mtplx/
   Makefile  mise.toml  requirements.txt  setup.sh  config.yaml  README.md
   poc_mtplx/
     __init__.py
-    config.py        # load config.yaml + POC_MTPLX_* overrides (copy of poc-qwen/config.py)
+    config.py        # load config.yaml + MTPLX_* overrides (copy of poc-qwen/config.py)
     schemas.py       # SKILL.md frontmatter -> OpenAI tool dicts; filter_for_turn clone
     prompt.py        # system prompt (+ tool hint) identical to server.py/app.py
     client.py        # streaming chat call: TTFT, tok/s, tool_call delta assembly, think-leak detection

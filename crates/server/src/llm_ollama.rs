@@ -1,4 +1,4 @@
-//! Native Ollama `LlmService` (`POC_LLM_PROVIDER=ollama`) — ADR-0007 Layer 1.
+//! Native Ollama `LlmService` (`LLM_PROVIDER=ollama`) — ADR-0007 Layer 1.
 //!
 //! Streams `POST /api/chat` (NDJSON) instead of Ollama's OpenAI-compatible
 //! `/v1`, because only the native endpoint lets a *request* carry what keeps

@@ -3,7 +3,7 @@
 # Read by both the Rust side (server:, python:, bench:) and qwen_tts.config
 # for the engine (models:, generation:, voices:, preload:, transcribe:).
 # Scalars in the engine sections can be overridden with
-# POC_QWEN_<SECTION>_<KEY>=value.
+# QWEN_<SECTION>_<KEY>=value.
 server:
   host: 127.0.0.1
   port: 8008

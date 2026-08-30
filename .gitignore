@@ -50,3 +50,5 @@ cuda_*.run
 .pytest_cache/
 *.egg-info/
 /wakeword/_work/
+# Subagent-driven-development scratch (ledgers, briefs, review packages).
+.superpowers/

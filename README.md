@@ -10,9 +10,10 @@ shows, sound effects) is decoded in-process by `ffmpeg` and mixed into the
 client's own call audio (`brew install ffmpeg` / `apt install ffmpeg` where
 the client runs — this is now a hard requirement, not an optional one:
 without it radio, shows and sound effects don't play at all); Spotify plays
-on the client's librespot "Babel" endpoint as before. Config is `POC_*` env in the
-repo-root `.env` (see `.env.example`), next to the secrets. Runtime artifacts
-live at the root too: `models/`, `.deps/`, `logs/`, `fixtures/`.
+on the client's librespot "Babel" endpoint as before. Config is environment
+variables in the repo-root `.env` (see `.env.example`), next to the secrets.
+Runtime artifacts live at the root too: `models/`, `.deps/`, `logs/`,
+`fixtures/`.
 
 - Audio devices: `make devices` lists them; `make call` with no
   `INPUT_DEVICE`/`OUTPUT_DEVICE` auto-selects the Jabra speakerphone on both
@@ -34,9 +35,9 @@ live at the root too: `models/`, `.deps/`, `logs/`, `fixtures/`.
   host (`brew install yt-dlp`).
 - Personas: every preset in `voices/` (`<name>.mp3` + `<name>.txt`) is loaded
   for the Qwen backend and exposed through `switch_persona`
-  (`POC_QWEN_VOICES` is no longer needed); `ANTHROPIC_API_KEY` exposes
+  (`QWEN_VOICES` is no longer needed); `ANTHROPIC_API_KEY` exposes
   `ask_claude`. Both last for the current call.
-- Wake words: `POC_WAKE_DIR=models/wakeword` puts the server in Listen mode
+- Wake words: `WAKE_DIR=models/wakeword` puts the server in Listen mode
   with every `hey_<persona>.onnx` in that directory (`hey_one_one` → the
   `one-one` voice); saying one selects that persona's voice for the session
   and the client shows `[awake: marvin 0.87]` / `[asleep]`. The native client

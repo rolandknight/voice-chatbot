@@ -231,8 +231,8 @@ InputAudio → VadProcessor → WakeGate → WakeGrace → [SpeakerGate] → Spe
   set a `speaker: Mutex<Option<SpeakerId>>` field on `CallState`
   (`skills/mod.rs:96`) so skills and the prompt builder can read it, and publish
   a `speaker` event on `CallEvents` alongside `WAKE_EVENT` for the client UI.
-- **Config.** `POC_SPEAKER_MODEL`, `POC_SPEAKER_THRESHOLD`, `POC_SPEAKER_ENABLED`
-  in the root `.env`, matching the existing `POC_WAKE_*` convention. Absent model
+- **Config.** `SPEAKER_MODEL`, `SPEAKER_THRESHOLD`, `SPEAKER_ENABLED`
+  in the root `.env`, matching the existing `WAKE_*` convention. Absent model
   path = feature off, like `cfg.wake_heads.is_empty()` today.
 - **Concurrency.** Spawn the embed on a blocking task at the falling edge and let
   it race whisper. Resolve before the LLM call. Do **not** make the turn wait on

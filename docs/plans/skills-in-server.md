@@ -136,13 +136,13 @@ pub struct CallCtx {
   the call is gone the send fails; log and drop (Python did the same).
   Timers are per-call, not persisted. Duration phrasing ported verbatim.
 - **weather**: Open-Meteo geocode → forecast; location precedence
-  `POC_WEATHER_DEFAULT_LOCATION` → `CoreLocationCLI` (macOS only, 5 s cap,
+  `WEATHER_DEFAULT_LOCATION` → `CoreLocationCLI` (macOS only, 5 s cap,
   `tokio::process`) → `ipwho.is` (3 s) → "ask again with a city". Cache the
   resolved current location for the process. WMO table and imperial-if-US
   rule ported.
 - **web_search**: three providers behind one `match`; snippet extraction
   rules copied. Keys from `.env` (`BRAVE_API_KEY`, `TAVILY_API_KEY`),
-  provider from `POC_WEB_SEARCH_PROVIDER` (default duckduckgo).
+  provider from `WEB_SEARCH_PROVIDER` (default duckduckgo).
 - **radio**: station table + `build_alias_table`/`match_alias`
   (longest-alias-first is load-bearing) ported and unit-tested against the
   Python alias cases. HLS URL builders `_ww`/`_uk` kept with the refresh
@@ -178,7 +178,7 @@ pub struct CallCtx {
   :8006) — started/stopped by new top-level make targets `sfx-up` /
   `sfx-down` / `sfx-status` (pid files under `vendor/`, `/docs` readiness
   probe, same shape as `run.sh`'s blocks). The tool is always advertised
-  when `POC_SFX_ENABLED` is on; on each call it probes the routed backend
+  when `SFX_ENABLED` is on; on each call it probes the routed backend
   (`GET /docs`, 1 s) and, if it is down, returns "The sound effect server
   isn't running — start it with make sfx-up." instead of "Playing …", so
   the LLM tells the user rather than promising a sound that never comes.
@@ -215,7 +215,7 @@ browser playground gets no media playback.
 1. **Runtime + tier A** — `skills/mod.rs`, `time.rs`, `weather.rs`,
    `web_search.rs`; `SkillSession` replaces `StubSession`; `skills.json`
    moves to `crates/server/` (8 entries byte-identical, new entries
-   appended); `POC_STUBS_URL`/`POC_SKILLS` removed; `make stubs` dropped
+   appended); `STUBS_URL`/`SKILLS` removed; `make stubs` dropped
    from the top-level Makefile (PoC `Makefile` keeps it). Verify the warm
    prefix still hits (`prompt_eval_duration` gate) with the bigger list.
 2. **Timer (tier B)** — `CallRegistry` in `call.rs`; `timer.rs`. Verify a
@@ -274,7 +274,7 @@ play three seconds of Radio 4 through mpv. Deviations from the plan above:
   now reads `poc/.env` then `.env`, line by line, never overriding set vars.
 - `ask_claude` talks to `/v1/messages` directly (`llm_claude.rs`) rather
   than through an OpenAI-compatible shim; default model `claude-opus-5`
-  (`POC_CLAUDE_MODEL`). The legacy Python used `claude-sonnet-4-6`.
+  (`CLAUDE_MODEL`). The legacy Python used `claude-sonnet-4-6`.
 - Not verified live: an end-to-end spoken turn (Ollama wasn't running and
   gemma4:26b needs ~17 GB), the timer firing mid-conversation through the
   speech gate, Spotify playback (no "Babel" librespot device was online),

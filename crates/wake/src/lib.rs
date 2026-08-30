@@ -51,8 +51,8 @@ pub fn persona_for_head(stem: &str) -> String {
     body.replace('_', "-")
 }
 
-/// Resolve the head files from `POC_WAKE_DIR` (every `*.onnx`, name-sorted)
-/// or, when the directory is unset, the single `POC_WAKE_MODEL`. Relative
+/// Resolve the head files from `WAKE_DIR` (every `*.onnx`, name-sorted)
+/// or, when the directory is unset, the single `WAKE_MODEL`. Relative
 /// paths resolve against `root`. Empty result = push mode. Each entry is
 /// `(path, persona)`.
 pub fn resolve_heads(
@@ -71,7 +71,7 @@ pub fn resolve_heads(
     let mut paths: Vec<PathBuf> = Vec::new();
     if !dir.trim().is_empty() {
         if !single.trim().is_empty() {
-            tracing::warn!("POC_WAKE_DIR and POC_WAKE_MODEL are both set; using the directory");
+            tracing::warn!("WAKE_DIR and WAKE_MODEL are both set; using the directory");
         }
         let dir = absolute(dir.trim());
         let entries = std::fs::read_dir(&dir)

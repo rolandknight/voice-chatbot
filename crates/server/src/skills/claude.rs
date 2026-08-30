@@ -8,19 +8,12 @@ use serde_json::Value;
 
 use super::{CallCtx, LlmBackend, Skill};
 
-/// The tool result, which by the time it is read is a prompt *to Claude* — the
-/// backend has already flipped, so the continuation of this very turn runs on
-/// Claude. The Python original returned a bare "Asking Claude. Go ahead."
-/// confirmation, written for a world where the local model answered the
-/// continuation; fed to Claude it just makes it re-announce the handover and
-/// never answer, costing the caller a turn (and, if the wake session lapses
-/// first, the backend flip too). The brevity clause keeps the reply inside one
-/// spoken turn — unprompted, Claude writes paragraphs that take a minute to
-/// speak.
-pub(crate) const HANDOVER: &str =
-    "You are now answering as Claude. Answer the user's request above yourself, \
-directly — do not say you are handing over or ask them to repeat it. Keep it to one or two short \
-spoken sentences; offer to go deeper if they want more.";
+/// What the tool returns. Since the handover instruction moved to
+/// `call::CLAUDE_SYSTEM_SUFFIX`, this string is stripped from the rolling
+/// context before either backend's next turn (`call::strip_ask_claude`) and is
+/// never read by a model. It stays non-empty because the tool contract requires
+/// a spoken-friendly string, and it shows up in the `tool return` log line.
+const HANDOVER: &str = "Switched to Claude.";
 
 pub struct AskClaude;
 

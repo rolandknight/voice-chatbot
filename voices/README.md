@@ -13,7 +13,7 @@
 Qwen3-TTS (`crates/qwen-tts`) clones by in-context learning and **requires the
 transcript of the reference clip**; Chatterbox ignores it. A `<name>.txt`
 next to each clip is picked up automatically by the engine's voice catalog (the server's
-`POC_QWEN_VOICE` and `qwen-tts-tester`'s Voice Clone tab).
+`QWEN_VOICE` and `qwen-tts-tester`'s Voice Clone tab).
 The current sidecars were produced with `mlx-community/whisper-base.en-mlx`
 on 2026-08-24; `marvin.txt` matches the known source quote, `babel.txt` reads
 cleanly, and the tail of `one-one.txt` ("Ah, ah, here you go") has not been

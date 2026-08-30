@@ -1,7 +1,7 @@
 """Engine profile loading.
 
 A profile yaml (default: the crate's config/server.yaml) is the source of truth. Any scalar can be overridden from the
-environment with POC_QWEN_<SECTION>_<KEY>=value (upper-cased); values are
+environment with QWEN_<SECTION>_<KEY>=value (upper-cased); values are
 coerced to the type of the yaml value they replace (bool/int/float/str).
 """
 
@@ -14,7 +14,7 @@ import yaml
 
 CRATE_DIR = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = CRATE_DIR / "config" / "server.yaml"
-ENV_PREFIX = "POC_QWEN_"
+ENV_PREFIX = "QWEN_"
 
 
 def _coerce(raw: str, like):
@@ -28,7 +28,7 @@ def _coerce(raw: str, like):
 
 
 def apply_env_overrides(config: dict, env: dict | None = None) -> dict:
-    """Overlay POC_QWEN_<SECTION>_<KEY> onto matching scalar keys. Returns a new dict."""
+    """Overlay QWEN_<SECTION>_<KEY> onto matching scalar keys. Returns a new dict."""
     env = os.environ if env is None else env
     merged = {section: (dict(values) if isinstance(values, dict) else values) for section, values in config.items()}
     for section, values in merged.items():

@@ -11,7 +11,7 @@ fn main() {
     // The interpreter path is also needed at run time: an embedded interpreter
     // reports the host binary as sys.executable, and libraries that spawn
     // `sys.executable -c ...` (tokenizers, multiprocessing) would run *us*.
-    println!("cargo:rustc-env=POC_PYTHON={python}");
+    println!("cargo:rustc-env=QWEN_PYTHON={python}");
     let out = Command::new(&python)
         .args([
             "-c",

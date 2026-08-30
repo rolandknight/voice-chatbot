@@ -7,16 +7,16 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-POC_DIR="$PROJECT_DIR" # runtime root (models/, .deps/, .env); the PoC trees are archived
+DIR="$PROJECT_DIR" # runtime root (models/, .deps/, .env); the PoC trees are archived
 
 MOONSHINE_VERSION="v0.1.3"
 MOONSHINE_PACKAGE_VERSION="${MOONSHINE_VERSION#v}"
 MOONSHINE_MODEL_ARCH="5" # MOONSHINE_MODEL_ARCH_MEDIUM_STREAMING
 MOONSHINE_MODEL_REL="download.moonshine.ai/model/medium-streaming-en/quantized_26_07_30"
 
-NATIVE_PARENT="$POC_DIR/.deps/moonshine"
+NATIVE_PARENT="$DIR/.deps/moonshine"
 NATIVE_ROOT="$NATIVE_PARENT/$MOONSHINE_VERSION"
-MODEL_PARENT="$POC_DIR/models"
+MODEL_PARENT="$DIR/models"
 MODEL_ROOT="$MODEL_PARENT/moonshine"
 MODEL_DIR="$MODEL_ROOT/$MOONSHINE_MODEL_REL"
 RELEASE_BASE="https://github.com/moonshine-ai/moonshine/releases/download/$MOONSHINE_VERSION"

@@ -32,7 +32,7 @@ engine code removed in favour of a path dependency on the crate.
 Engine sections (`models:`, `generation:`, `voices:`, `preload:`,
 `transcribe:`) are read by `qwen_tts.config`; `server:`, `python:`, `bench:`
 by the Rust side. Scalars can be overridden with
-`POC_QWEN_<SECTION>_<KEY>=value`.
+`QWEN_<SECTION>_<KEY>=value`.
 
 ## Results (M4 Max, 1.7B-Base, `one-one` clone, warm)
 

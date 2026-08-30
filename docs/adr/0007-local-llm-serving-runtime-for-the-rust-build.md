@@ -4,7 +4,7 @@
 |---|---|
 | **Status** | Accepted in direction, **deferred** (2026-08-25): Ollama stays the local runtime for the current phase; the Rust chatbot takes over Ollama's lifecycle now (lifecycle plan, native `/api/chat` service + supervisor). The `llama-server` switch is a future phase, entered via the gates in "Test strategy". ADR-0003's model choice, prompt-layout rules and prefix-cache discipline are unchanged and carried forward. |
 | **Date** | 2026-08-25 |
-| **Decision (proposed)** | Serve **Gemma 4 26B-A4B (GGUF Q4_K_M)** on **llama.cpp `llama-server`**, started and stopped by the Rust chatbot as a **child process** (`-np 1 --jinja -c 8192 --cache-reuse 256 …`), so that the model is resident exactly as long as the chatbot runs, the prompt cache is verifiable per request (`timings.cache_n`), and none of Ollama's scheduler/keep-alive semantics are in the path. Keep **Ollama** as a *dev profile* (`POC_LLM_PROVIDER=ollama`) for continuity with ADR-0003's numbers. Time-box a **Rapid-MLX** A/B for TTFT. **vLLM / vllm-metal, mlx_lm.server, LM Studio, mistral.rs, in-process bindings: not adopted** (reasons below). |
+| **Decision (proposed)** | Serve **Gemma 4 26B-A4B (GGUF Q4_K_M)** on **llama.cpp `llama-server`**, started and stopped by the Rust chatbot as a **child process** (`-np 1 --jinja -c 8192 --cache-reuse 256 …`), so that the model is resident exactly as long as the chatbot runs, the prompt cache is verifiable per request (`timings.cache_n`), and none of Ollama's scheduler/keep-alive semantics are in the path. Keep **Ollama** as a *dev profile* (`LLM_PROVIDER=ollama`) for continuity with ADR-0003's numbers. Time-box a **Rapid-MLX** A/B for TTFT. **vLLM / vllm-metal, mlx_lm.server, LM Studio, mistral.rs, in-process bindings: not adopted** (reasons below). |
 | **Related** | ADR-0001 (model), ADR-0003 (Ollama serving + prefix cache — partially superseded), ADR-0006 (FlowCat Rust runtime), `docs/poc/flowcat-poc-plan.md` §5 Phase 2 (already named llama-server primary), `docs/superpowers/plans/2026-08-25-poc-flowcat-ollama-lifecycle.md` (the lifecycle work this ADR redirects). |
 
 ---
@@ -111,7 +111,7 @@ which makes it a fight.
 2. **Ownership:** the Rust chatbot spawns and supervises it (lifecycle plan
    Layer 2), warms the exact prefix once at startup (Layer 1), and kills it
    on exit. Residency is the process; "pin" and "unload" cease to exist as
-   API concerns. `POC_LLM_PROVIDER=llama-server` becomes the default local
+   API concerns. `LLM_PROVIDER=llama-server` becomes the default local
    profile; `ollama` stays selectable for ADR-0003 continuity;
    `openrouter` stays for the cloud profile.
 3. **Adapter:** the existing FlowCat `OpenAiLlm` (`/v1/chat/completions`,

@@ -1,6 +1,6 @@
 //! `switch_persona` — change the voice for the rest of the call (port of
 //! skills/persona/switch_persona). Personas are the Qwen preset voices the
-//! server loaded (`POC_QWEN_VOICES`); the TTS stage reads the call's chosen
+//! server loaded (`QWEN_VOICES`); the TTS stage reads the call's chosen
 //! voice on every utterance.
 
 use async_trait::async_trait;
