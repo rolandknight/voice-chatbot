@@ -5124,8 +5124,16 @@ dependencies = [
  "tokio-tungstenite 0.30.0",
  "tracing",
  "tracing-subscriber",
+ "voice-chatbot-env-file",
  "voice-chatbot-protocol",
  "voice-chatbot-wake",
+]
+
+[[package]]
+name = "voice-chatbot-env-file"
+version = "0.1.0"
+dependencies = [
+ "tracing",
 ]
 
 [[package]]
@@ -5166,6 +5174,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "voice-chatbot-env-file",
  "voice-chatbot-protocol",
  "voice-chatbot-wake",
  "whisper-rs",

@@ -831,7 +831,7 @@ mod network_tests {
     #[tokio::test]
     #[ignore]
     async fn network_spotify_token_refresh_and_devices() {
-        crate::env_file::load_if_unset(std::path::Path::new("../../.env"));
+        voice_chatbot_env_file::load_if_unset(std::path::Path::new("../../.env"));
         let client_id = std::env::var("SPOTIPY_CLIENT_ID").expect("SPOTIPY_CLIENT_ID in .env");
         let c = SpotifyClient::new(client_id).expect("cached token");
         // Force a refresh regardless of expiry so the PKCE refresh path runs.

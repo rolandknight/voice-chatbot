@@ -33,17 +33,19 @@ PI_CROSS_ENV := CARGO_HOME=$(HOME)/.cargo RUSTUP_HOME=$(HOME)/.rustup \
 # CARGO_HOME into .hermit/rust, so a bare `cargo install` would put the binary
 # somewhere PI_CROSS_ENV's PATH never looks.
 PI_CARGO := CARGO_HOME=$(HOME)/.cargo RUSTUP_HOME=$(HOME)/.rustup $(HOME)/.cargo/bin/cargo
-# Runtime config lives in .env, which the server parses for itself
-# (crates/server/src/env_file.rs). make never reads it, so `make call` dialled
-# the built-in default even with SERVER_URL set there. Take the values the
-# `call` target hands the client from .env instead, as *defaults*: an exported
-# SERVER_URL or `make call SERVER_URL=...` still wins, mirroring env_file.rs's
-# "variables already set are never overridden". `include .env` is not an option
-# — the file is shared with the Python chatbot (python-dotenv grammar), where a
-# single line without an `=` is a fatal makefile syntax error. env_get mirrors
-# that lenient parse instead: optional `export ` prefix, surrounding quotes
-# stripped, an unquoted value ending at ` #`, first occurrence wins, anything
-# unparsable skipped.
+# Runtime config lives in .env, which both binaries parse for themselves
+# (crates/env-file). make never reads it, so `make call` dialled the built-in
+# default even with SERVER_URL set there. Take the values the `call` target
+# hands the client from .env instead, as *defaults*: an exported SERVER_URL or
+# `make call SERVER_URL=...` still wins, mirroring crates/env-file's "variables
+# already set are never overridden". The client reads .env for itself now, so
+# these scrapes are belt-and-braces: they keep `make call VAR=...` working and
+# keep the values visible in the command line make echoes. `include .env` is
+# not an option — the file is shared with the Python chatbot (python-dotenv
+# grammar), where a single line without an `=` is a fatal makefile syntax
+# error. env_get mirrors that lenient parse instead: optional `export ` prefix,
+# surrounding quotes stripped, an unquoted value ending at ` #`, first
+# occurrence wins, anything unparsable skipped.
 ENV_FILE ?= .env
 env_get = $(shell [ -f '$(ENV_FILE)' ] && sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}$(1)[[:space:]]*=[[:space:]]*//p' '$(ENV_FILE)' | head -n 1 | sed -e '/^["'\'']/!s/[[:space:]][[:space:]]*\#.*$$//' -e '/^["'\'']/!s/[[:space:]]*$$//' -e 's/^"\(.*\)"$$/\1/' -e "s/^'\(.*\)'$$/\1/")
 

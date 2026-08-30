@@ -42,7 +42,7 @@ Runtime artifacts live at the root too: `models/`, `.deps/`, `logs/`,
   `one-one` voice); saying one selects that persona's voice for the session
   and the client shows `[awake: marvin 0.87]` / `[asleep]`. The native client
   detects on-device instead, on by default: `make call` loads
-  `models/wakeword` (`--wake-dir` / `FLOWCAT_WAKE_DIR` to change, `--no-wake`
+  `models/wakeword` (`--wake-dir` / `WAKE_DIR` to change, `--no-wake`
   for always-on push mode), sends audio only after a wake word and tells the
   server which persona woke. Selecting a persona (wake word, client wake or
   `switch_persona`) also switches the system prompt to

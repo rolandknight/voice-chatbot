@@ -20,6 +20,7 @@ tokio = { version = "1", features = ["macros", "net", "process", "rt-multi-threa
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+voice-chatbot-env-file = { path = "../env-file" }
 voice-chatbot-protocol = { path = "../protocol" }
 voice-chatbot-wake = { path = "../wake" }
 

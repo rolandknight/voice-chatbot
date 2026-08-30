@@ -45,6 +45,7 @@ bytes = "1"
 # `stream::unfold` over that becomes a hand-rolled state machine.
 async-stream = "0.3"
 qwen-tts = { path = "../qwen-tts", optional = true }
+voice-chatbot-env-file = { path = "../env-file" }
 voice-chatbot-protocol = { path = "../protocol" }
 voice-chatbot-wake = { path = "../wake" }
 roxmltree = "0.20"

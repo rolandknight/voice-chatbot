@@ -10,7 +10,6 @@
 mod alarm;
 mod brain;
 mod call;
-mod env_file;
 mod llm;
 mod llm_claude;
 mod llm_ollama;
@@ -303,10 +302,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The repo-root .env (run from the repo root; silently skipped otherwise)
     // holds both the server's own settings and the shared secrets (Spotify,
     // search keys). It never overrides variables already set.
-    env_file::load_if_unset(std::path::Path::new(".env"));
-    let retired = env_file::retired_names(std::env::vars().map(|(k, _)| k));
+    voice_chatbot_env_file::load_if_unset(std::path::Path::new(".env"));
+    let retired = voice_chatbot_env_file::retired_names(std::env::vars().map(|(k, _)| k));
     if !retired.is_empty() {
-        let prefix = env_file::RETIRED_PREFIX;
+        let prefix = voice_chatbot_env_file::RETIRED_PREFIX;
         return Err(format!(
             "these environment variables lost their {prefix} prefix and are no longer read: {}. \
 Rename them in .env (drop {prefix}; {prefix}PROMPT is now PROMPT_FILE and {prefix}PYTHON is now QWEN_PYTHON) \

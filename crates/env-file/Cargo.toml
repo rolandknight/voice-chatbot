@@ -1,0 +1,9 @@
+[package]
+name = "voice-chatbot-env-file"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Lenient .env loading shared by crates/server and crates/client"
+
+[dependencies]
+tracing = "0.1"

@@ -14,13 +14,13 @@ use voice_chatbot_client::wake::{Activity, ClientWakeGate, WakeConfig};
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "flowcat-webrtc-client",
+    name = "voice-chatbot-client",
     version,
-    about = "Use native audio devices with the local FlowCat WebRTC server"
+    about = "Use native audio devices with the local voice-chatbot WebRTC server"
 )]
 struct Cli {
     /// Tracing filter (for example: info, debug, or voice_chatbot_client=trace).
-    #[arg(long, global = true, default_value = "info")]
+    #[arg(long, global = true, env = "LOG_LEVEL", default_value = "info")]
     log_level: String,
 
     #[command(subcommand)]
@@ -34,45 +34,76 @@ enum Command {
 
     /// Start a full-duplex audio call.
     Call {
-        /// Base URL of the local FlowCat server.
-        #[arg(long, env = "FLOWCAT_URL", default_value = "http://127.0.0.1:6210")]
+        /// Base URL of the local voice-chatbot server.
+        #[arg(long, env = "SERVER_URL", default_value = "http://127.0.0.1:6210")]
         server_url: String,
 
         /// Input selector: default, 1-based index, stable ID, name, or unique
         /// substring. Unset, the Jabra speakerphone is used when one is
         /// plugged in; pass `default` for the system default instead.
-        #[arg(long, env = "FLOWCAT_INPUT_DEVICE")]
+        #[arg(long, env = "INPUT_DEVICE")]
         input_device: Option<String>,
 
         /// Output selector: default, 1-based index, stable ID, name, or unique
         /// substring. Unset, the Jabra speakerphone is used when one is
         /// plugged in; pass `default` for the system default instead.
-        #[arg(long, env = "FLOWCAT_OUTPUT_DEVICE")]
+        #[arg(long, env = "OUTPUT_DEVICE")]
         output_device: Option<String>,
 
         /// On-device wake words: a directory of openWakeWord heads
         /// (hey_<persona>.onnx), relative to the working directory. Audio is
         /// only sent while a wake session is open, and the persona that woke
         /// is reported to the server.
-        #[arg(long, env = "FLOWCAT_WAKE_DIR", default_value = "models/wakeword")]
+        #[arg(long, env = "WAKE_DIR", default_value = "models/wakeword")]
         wake_dir: String,
 
         /// Always-on (push) mode: send audio continuously, no wake words.
-        #[arg(long, env = "FLOWCAT_NO_WAKE", conflicts_with = "wake_dir")]
+        #[arg(long, env = "NO_WAKE", conflicts_with = "wake_dir")]
         no_wake: bool,
 
         /// Wake probability threshold per head.
-        #[arg(long, env = "FLOWCAT_WAKE_THRESHOLD", default_value_t = 0.5)]
+        #[arg(long, env = "WAKE_THRESHOLD", default_value_t = 0.5)]
         wake_threshold: f32,
 
         /// Silence (seconds) that ends a wake session.
-        #[arg(long, env = "FLOWCAT_WAKE_SESSION_SECS", default_value_t = 15.0)]
+        #[arg(long, env = "WAKE_SESSION_SECS", default_value_t = 15.0)]
         wake_session_secs: f32,
     },
 }
 
+/// Names this client stopped reading when the `FLOWCAT_` prefix was dropped
+/// for the bare names the repo-root `.env` already uses.
+const RETIRED_PREFIX: &str = "FLOWCAT_";
+
+/// The startup error for any surviving `FLOWCAT_*`. Left set, one is simply
+/// never read, and the client silently dials the built-in default instead --
+/// the same trap the server's `POC_` guard exists to close.
+fn retired_var_error<I: Iterator<Item = String>>(keys: I) -> Option<String> {
+    let stale = voice_chatbot_env_file::names_with_prefix(keys, RETIRED_PREFIX);
+    if stale.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "these environment variables lost their {RETIRED_PREFIX} prefix and are no longer read: {}. \
+Rename them (drop {RETIRED_PREFIX}; {RETIRED_PREFIX}URL is now SERVER_URL) \
+-- leaving them set means silently running on the defaults.",
+        stale.join(", ")
+    ))
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    // The repo-root .env (run from the repo root; silently skipped otherwise)
+    // is the same file the server reads. It has to land before Cli::parse,
+    // which is when clap consults the `env` fallbacks above, and so before
+    // init_tracing -- the loader's debug line for an unparsable line goes
+    // unlogged here, but the server logs the same line from the same file.
+    // Variables already set are never overridden, so a flag or an exported
+    // variable still wins.
+    voice_chatbot_env_file::load_if_unset(std::path::Path::new(".env"));
+    if let Some(error) = retired_var_error(std::env::vars().map(|(k, _)| k)) {
+        anyhow::bail!(error);
+    }
     let cli = Cli::parse();
     init_tracing(&cli.log_level)?;
 
@@ -161,7 +192,7 @@ async fn run_call(
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(30))
         .build()
-        .context("build FlowCat HTTP client")?;
+        .context("build the server HTTP client")?;
 
     // One Ctrl-C listener for the whole process; sessions and the retry
     // delay both watch it so hanging up works at any point.
@@ -198,7 +229,7 @@ async fn run_call(
             SessionEnd::Unreachable(error) => {
                 if !announced_outage {
                     eprintln!(
-                        "cannot connect to FlowCat at {}: {error:#}; retrying every {}s (Ctrl-C to quit)",
+                        "cannot connect to the server at {}: {error:#}; retrying every {}s (Ctrl-C to quit)",
                         endpoints.health_url(),
                         RECONNECT_DELAY.as_secs()
                     );
@@ -211,7 +242,9 @@ async fn run_call(
                 first_session = false;
                 // A lost call always gets a line, even during an outage that
                 // was already announced: it is new information.
-                eprintln!("connection to FlowCat lost: {error:#}; reconnecting (Ctrl-C to quit)");
+                eprintln!(
+                    "connection to the server lost: {error:#}; reconnecting (Ctrl-C to quit)"
+                );
                 announced_outage = true;
             }
         }
@@ -363,7 +396,7 @@ async fn run_session(
         return SessionEnd::Lost(error);
     }
     if reconnecting {
-        eprintln!("reconnected to FlowCat at {}", endpoints.health_url());
+        eprintln!("reconnected to the server at {}", endpoints.health_url());
     } else {
         eprintln!("audio devices started; negotiating WebRTC (press Ctrl-C to hang up)");
     }
@@ -413,6 +446,28 @@ async fn run_session(
 mod tests {
     use super::*;
     use clap::CommandFactory;
+
+    #[test]
+    fn stale_flowcat_names_are_named_with_their_replacement() {
+        let keys = ["FLOWCAT_URL", "SERVER_URL", "FLOWCAT_WAKE_DIR"]
+            .into_iter()
+            .map(String::from);
+        let message = retired_var_error(keys).expect("stale names must be refused");
+        assert!(
+            message.contains("no longer read: FLOWCAT_URL, FLOWCAT_WAKE_DIR."),
+            "lists the stale names and only those: {message}"
+        );
+        assert!(
+            message.contains("FLOWCAT_URL is now SERVER_URL"),
+            "points at the replacement: {message}"
+        );
+    }
+
+    #[test]
+    fn an_environment_without_stale_names_starts() {
+        let keys = ["SERVER_URL", "WAKE_DIR"].into_iter().map(String::from);
+        assert!(retired_var_error(keys).is_none());
+    }
 
     #[test]
     fn command_definition_is_valid() {
