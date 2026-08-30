@@ -5140,6 +5140,7 @@ dependencies = [
  "sha2 0.10.9",
  "tokio",
  "tokio-tungstenite 0.30.0",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
  "voice-chatbot-protocol",

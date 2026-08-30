@@ -28,6 +28,9 @@ flowcat-server = { git = "https://github.com/AreevAI/flowcat.git", rev = "4ff03f
 axum = { version = "0.8", features = ["ws"] }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 tokio = { version = "1", features = ["full"] }
+# CancellationToken for per-timer cancellation (skills/timer.rs). Already in
+# the tree: vendored flowcat-core depends on the same version and feature.
+tokio-util = { version = "0.7", features = ["rt"] }
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

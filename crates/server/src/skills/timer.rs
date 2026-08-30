@@ -6,10 +6,11 @@
 //! timer fires, the send fails and the alert is logged and dropped — the same
 //! as the Python behaviour when its pipeline was gone.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde_json::Value;
+use tokio_util::sync::CancellationToken;
 
 use flowcat_core::processor::frame::Frame;
 
@@ -94,6 +95,127 @@ pub fn join_and(parts: &[String]) -> String {
         [one] => one.clone(),
         [a, b] => format!("{a} and {b}"),
         [rest @ .., last] => format!("{}, and {last}", rest.join(", ")),
+    }
+}
+
+/// One live timer on one call.
+#[derive(Clone)]
+pub struct TimerEntry {
+    /// Monotonic per call. The unambiguous internal handle — names are not unique.
+    pub id: u64,
+    /// Normalized name for matching (`normalize_name`). `None` when unnamed.
+    pub name: Option<String>,
+    /// The label as the user said it, for the spoken alert.
+    pub spoken_name: Option<String>,
+    /// The duration as requested, so "the 5 minute timer" can address it.
+    pub minutes: f64,
+    pub deadline: Instant,
+    /// Fired, and still announcing. Ringing timers stay in the book so they
+    /// can be silenced.
+    pub ringing: bool,
+    pub cancel: CancellationToken,
+}
+
+/// Every timer on one call.
+///
+/// Each timer's token is a child of `call_token`, so cancelling the parent
+/// cancels all of them at once. Lives inside `CallState`, so it is per call and
+/// nothing is persisted.
+pub struct TimerBook {
+    call_token: CancellationToken,
+    next_id: u64,
+    timers: Vec<TimerEntry>,
+}
+
+impl Default for TimerBook {
+    fn default() -> Self {
+        Self {
+            call_token: CancellationToken::new(),
+            next_id: 1,
+            timers: Vec::new(),
+        }
+    }
+}
+
+impl Drop for TimerBook {
+    /// The call ended. Wake every sleeping timer task so it exits now instead
+    /// of holding a thread-pool slot until a deadline that no longer matters.
+    /// (A plain `CancellationToken` drop does *not* cancel — this does.)
+    fn drop(&mut self) {
+        self.call_token.cancel();
+    }
+}
+
+impl TimerBook {
+    /// Register a timer. Returns its id and its own cancellation token; the
+    /// caller spawns the task that waits on them.
+    pub fn insert(
+        &mut self,
+        name: Option<String>,
+        spoken_name: Option<String>,
+        minutes: f64,
+        deadline: Instant,
+    ) -> (u64, CancellationToken) {
+        let id = self.next_id;
+        self.next_id += 1;
+        let cancel = self.call_token.child_token();
+        self.timers.push(TimerEntry {
+            id,
+            name,
+            spoken_name,
+            minutes,
+            deadline,
+            ringing: false,
+            cancel: cancel.clone(),
+        });
+        (id, cancel)
+    }
+
+    /// Forget a timer without cancelling it — the task calls this on its way out.
+    pub fn remove(&mut self, id: u64) {
+        self.timers.retain(|t| t.id != id);
+    }
+
+    pub fn mark_ringing(&mut self, id: u64) {
+        if let Some(t) = self.timers.iter_mut().find(|t| t.id == id) {
+            t.ringing = true;
+        }
+    }
+
+    /// Cancel one timer and forget it. False when the id is unknown.
+    pub fn cancel(&mut self, id: u64) -> bool {
+        match self.timers.iter().position(|t| t.id == id) {
+            Some(i) => {
+                self.timers.remove(i).cancel.cancel();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Cancel every timer; returns how many there were.
+    ///
+    /// A cancelled token stays cancelled forever, so the parent is *replaced*
+    /// rather than reused — otherwise every timer set later on this call would
+    /// be born already-cancelled and never fire.
+    pub fn cancel_all(&mut self) -> usize {
+        let n = self.timers.len();
+        self.call_token.cancel();
+        self.call_token = CancellationToken::new();
+        self.timers.clear();
+        n
+    }
+
+    pub fn entries(&self) -> Vec<TimerEntry> {
+        self.timers.clone()
+    }
+
+    pub fn len(&self) -> usize {
+        self.timers.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.timers.is_empty()
     }
 }
 
@@ -300,6 +422,67 @@ mod tests {
         assert_eq!(
             join_and(&["a".to_string(), "b".to_string(), "c".to_string()]),
             "a, b, and c"
+        );
+    }
+
+    fn at(secs: u64) -> Instant {
+        Instant::now() + Duration::from_secs(secs)
+    }
+
+    #[test]
+    fn book_tracks_and_removes_timers() {
+        let mut book = TimerBook::default();
+        assert!(book.is_empty());
+        let (a, _) = book.insert(Some("pasta".into()), Some("pasta".into()), 5.0, at(300));
+        let (b, _) = book.insert(None, None, 10.0, at(600));
+        assert_eq!(book.len(), 2);
+        assert_ne!(a, b, "ids are unique");
+
+        book.mark_ringing(a);
+        assert!(book.entries().iter().find(|t| t.id == a).unwrap().ringing);
+        assert!(!book.entries().iter().find(|t| t.id == b).unwrap().ringing);
+
+        book.remove(a);
+        assert_eq!(book.len(), 1);
+        book.remove(a); // removing twice is harmless
+        assert_eq!(book.len(), 1);
+    }
+
+    #[test]
+    fn cancel_fires_the_token_and_drops_the_entry() {
+        let mut book = TimerBook::default();
+        let (id, token) = book.insert(None, None, 1.0, at(60));
+        assert!(!token.is_cancelled());
+        assert!(book.cancel(id));
+        assert!(token.is_cancelled(), "cancel() is synchronous");
+        assert!(book.is_empty());
+        assert!(!book.cancel(id), "cancelling an unknown id reports false");
+    }
+
+    #[test]
+    fn cancel_all_clears_everything_and_leaves_the_book_usable() {
+        let mut book = TimerBook::default();
+        let (_, t1) = book.insert(None, None, 1.0, at(60));
+        let (_, t2) = book.insert(None, None, 2.0, at(120));
+        assert_eq!(book.cancel_all(), 2);
+        assert!(t1.is_cancelled() && t2.is_cancelled());
+        assert!(book.is_empty());
+
+        // A cancelled CancellationToken stays cancelled forever, so cancel_all
+        // must install a *fresh* parent or every later timer is born dead.
+        let (_, t3) = book.insert(None, None, 3.0, at(180));
+        assert!(!t3.is_cancelled(), "timers set after a cancel-all must still fire");
+        assert_eq!(book.cancel_all(), 1);
+    }
+
+    #[test]
+    fn dropping_the_book_cancels_live_timers() {
+        let mut book = TimerBook::default();
+        let (_, token) = book.insert(None, None, 30.0, at(1800));
+        drop(book);
+        assert!(
+            token.is_cancelled(),
+            "the call ended, so a sleeping task must wake and exit"
         );
     }
 }
