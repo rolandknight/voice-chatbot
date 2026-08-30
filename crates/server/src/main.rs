@@ -13,6 +13,7 @@ mod env_file;
 mod llm;
 mod llm_claude;
 mod llm_ollama;
+mod location;
 mod media;
 #[cfg(feature = "moonshine")]
 mod moonshine;
