@@ -177,6 +177,10 @@ pub struct PocConfig {
     pub qwen_size: String,
     /// `ask_claude`: Anthropic API key (empty → the tool is not advertised) and model.
     pub anthropic_key: String,
+    /// Messages API endpoint override (`ANTHROPIC_BASE_URL`). Empty uses
+    /// Anthropic directly; set it to route Claude through a gateway or proxy,
+    /// the way `OPENROUTER_BASE_URL` already does for the local backend.
+    pub anthropic_base_url: String,
     pub claude_model: String,
     /// `output_config.effort` for the Claude turns; empty omits the field (for
     /// models that reject it). See `llm_claude::DEFAULT_EFFORT`.
@@ -453,6 +457,7 @@ Rename them in .env (drop {prefix}; {prefix}PROMPT is now PROMPT_FILE and {prefi
             .collect(),
         voice_presets: voice_presets(&repo_root.join("voices")),
         anthropic_key: env_or("ANTHROPIC_API_KEY", ""),
+        anthropic_base_url: env_or("ANTHROPIC_BASE_URL", ""),
         claude_model: env_or("CLAUDE_MODEL", "claude-opus-5"),
         claude_effort: env_or("CLAUDE_EFFORT", llm_claude::DEFAULT_EFFORT),
         claude_web_search: env_flag("CLAUDE_WEB_SEARCH", true),

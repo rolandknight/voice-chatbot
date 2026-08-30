@@ -21,6 +21,10 @@ use flowcat_core::processor::metrics::{LlmTokenUsage, MetricsData};
 use flowcat_core::service::{LlmService, Tool};
 use flowcat_core::{FlowcatError, Result};
 
+/// Default Messages API endpoint. Overridable per instance (`with_base_url`,
+/// fed by `ANTHROPIC_BASE_URL`) so the turn driver can be pointed at a local
+/// server in tests — and so Claude can be routed through a gateway or proxy,
+/// the way the local backend already can via `OPENROUTER_BASE_URL`.
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
 const API_VERSION: &str = "2023-06-01";
 /// Ceiling for one streamed turn, shared by adaptive thinking and the spoken
@@ -110,6 +114,8 @@ pub struct ClaudeLlm {
     /// the turn is retried once without the tool and the process carries on
     /// unsearched. `AtomicBool` because the stream holds `&self`.
     search_disabled: std::sync::atomic::AtomicBool,
+    /// Where to POST. Defaults to [`API_URL`].
+    base_url: String,
 }
 
 impl ClaudeLlm {
@@ -139,7 +145,18 @@ impl ClaudeLlm {
             tools: Vec::new(),
             search,
             search_disabled: std::sync::atomic::AtomicBool::new(false),
+            base_url: API_URL.to_string(),
         }
+    }
+
+    /// Point this adapter at a different Messages API endpoint. Empty keeps the
+    /// default, so an unset `ANTHROPIC_BASE_URL` is not a misconfiguration.
+    pub fn with_base_url(mut self, url: String) -> Self {
+        let url = url.trim();
+        if !url.is_empty() {
+            self.base_url = url.to_string();
+        }
+        self
     }
 
     /// Switches Anthropic's server-side search tool off for the rest of *this
@@ -234,7 +251,7 @@ impl ClaudeLlm {
     > {
         let resp = self
             .http
-            .post(API_URL)
+            .post(&self.base_url)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", API_VERSION)
             .header("content-type", "application/json")
@@ -1686,6 +1703,127 @@ mod tests {
             !may_replay_without_search(0, true),
             "once per turn — the stripped request must not loop"
         );
+    }
+}
+
+#[cfg(test)]
+mod driver_tests {
+    //! The turn driver against a real HTTP server on loopback.
+    //!
+    //! Everything else in this file tests `Folder` and the pure helpers, so a
+    //! correct `Folder` wired into a broken loop passed the whole suite — which
+    //! is exactly how a turn that never ended reached a live call. These tests
+    //! exercise `run_llm` end to end over a socket. No internet: `127.0.0.1`
+    //! on an ephemeral port.
+
+    use super::*;
+
+    /// A complete, well-formed turn: greeting text, then `message_stop`.
+    const TURN: [&str; 6] = [
+        r#"data: {"type":"message_start","message":{"usage":{"input_tokens":10}}}"#,
+        r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+        r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello."}}"#,
+        r#"data: {"type":"content_block_stop","index":0}"#,
+        r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}"#,
+        r#"data: {"type":"message_stop"}"#,
+    ];
+
+    /// Serve `TURN`, then behave as `hold` dictates: `true` leaves the body
+    /// open forever (a pooled keep-alive connection the server is in no hurry
+    /// to close), `false` ends it normally. Returns the endpoint URL.
+    async fn spawn_api(hold: bool) -> String {
+        let app = axum::Router::new().route(
+            "/v1/messages",
+            axum::routing::post(move || async move {
+                let head = futures::stream::iter(TURN.iter().map(|line| {
+                    Ok::<bytes::Bytes, std::io::Error>(bytes::Bytes::from(format!("{line}\n\n")))
+                }));
+                let body = if hold {
+                    axum::body::Body::from_stream(head.chain(futures::stream::pending()))
+                } else {
+                    axum::body::Body::from_stream(head)
+                };
+                axum::response::Response::builder()
+                    .header("content-type", "text/event-stream")
+                    .body(body)
+                    .unwrap()
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}/v1/messages")
+    }
+
+    async fn run_turn(url: String) -> Vec<Frame> {
+        let mut llm = ClaudeLlm::new("k".into(), "claude-opus-5".into(), "low".into(), None)
+            .with_base_url(url);
+        let ctx = LlmContext {
+            messages: vec![json!({"role": "user", "content": "hi"})],
+            tools: vec![],
+        };
+        llm.run_llm(&ctx)
+            .await
+            .expect("request")
+            .collect::<Vec<Frame>>()
+            .await
+    }
+
+    fn assert_one_complete_turn(frames: &[Frame]) {
+        assert!(
+            matches!(frames.first(), Some(Frame::LlmResponseStart)),
+            "{frames:?}"
+        );
+        assert!(
+            matches!(frames.last(), Some(Frame::LlmResponseEnd)),
+            "{frames:?}"
+        );
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|f| matches!(f, Frame::LlmResponseStart))
+                .count(),
+            1,
+            "one turn means exactly one start"
+        );
+        assert_eq!(
+            frames
+                .iter()
+                .filter_map(|f| match f {
+                    Frame::LlmText(t) => Some(t.as_str()),
+                    _ => None,
+                })
+                .collect::<String>(),
+            "Hello."
+        );
+    }
+
+    /// The regression. The driver must end the turn at `message_stop` rather
+    /// than waiting for the body to close. When it waited, every spoken frame
+    /// still reached TTS — so the reply sounded perfect — but `finish()` never
+    /// ran, `LlmResponseEnd` was never emitted, and the pipeline's turn stayed
+    /// open, swallowing the caller's next utterance. Without the fix this test
+    /// does not fail an assertion; it hangs until the timeout.
+    #[tokio::test]
+    async fn a_turn_ends_at_message_stop_even_if_the_body_never_closes() {
+        let url = spawn_api(true).await;
+        let frames = tokio::time::timeout(std::time::Duration::from_secs(5), run_turn(url))
+            .await
+            .expect("the turn must end at message_stop, not wait for the body to close");
+        assert_one_complete_turn(&frames);
+    }
+
+    /// The ordinary case still works — the early exit must not truncate a turn
+    /// whose body does close.
+    #[tokio::test]
+    async fn a_turn_whose_body_closes_normally_is_unaffected() {
+        let url = spawn_api(false).await;
+        let frames = tokio::time::timeout(std::time::Duration::from_secs(5), run_turn(url))
+            .await
+            .expect("a normally-terminated body must not hang either");
+        assert_one_complete_turn(&frames);
     }
 }
 

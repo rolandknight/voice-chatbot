@@ -521,6 +521,7 @@ pub async fn offer(
             cfg.claude_effort.clone(),
             search,
         )
+        .with_base_url(cfg.anthropic_base_url.clone())
     });
     let inner = SwitchingLlm {
         local: inner,
