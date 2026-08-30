@@ -113,7 +113,7 @@ Status legend: ✅ Implemented · ◐ Partial / built-not-verified · 📋 Desig
 |---|---|---|
 | SKILL-1 | Drop-in skill framework: one folder per skill (`skills/<category>/<name>/` with `SKILL.md` frontmatter + `handler.py`), auto-discovered at startup. | ✅ |
 | SKILL-2 | Per-turn tool filtering (`SkillFilterProcessor`): only top-K (default 15) relevant tools are exposed to the LLM per turn, so the registry can grow without hurting latency or reliability. | ✅ |
-| SKILL-3 | Core skills: current time, current date, `set_timer(minutes, label?)` with spoken alert, `get_weather(location)` (Open-Meteo, no key; default-location precedence config → CoreLocation → IP geo → ask), `web_search(query)` (DuckDuckGo default; Brave/Tavily via key). | ✅ |
+| SKILL-3 | Core skills: current time, current date, `set_timer(minutes, label?)` with a repeating spoken alert, `cancel_timer(name?, minutes?, all?)`, `list_timers()`, `get_weather(location)` (Open-Meteo, no key; default-location precedence config → CoreLocation → IP geo → ask), `web_search(query)` (DuckDuckGo default; Brave/Tavily via key). | ✅ |
 | SKILL-4 | Per-skill enable/disable flags in `config.yaml`; skills gated on required credentials auto-hide from the LLM (e.g., Spotify requires `SPOTIPY_CLIENT_ID`). | ✅ |
 | SKILL-5 | Sound-effect generation skill (`generate_sound_effect`): dual backends — Woosh (Sony text-to-foley) and Stable Audio Open 1.0 — with keyword-based auto-routing between them. | ✅ |
 | SKILL-6 | **[Future]** Device sensor query skill (`query_sensors`: temperature, humidity, presence) backed by the MQTT sensor cache (Box-3 dependent, see §4.10). | 📋 (`docs/esp32.md`) |

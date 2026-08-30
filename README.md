@@ -163,7 +163,13 @@ a new skill, drop in a new folder — the loader picks it up at startup. The
 sees ~15 relevant tools no matter how many are registered. Skills shipped today:
 
 - `get_current_time`, `get_current_date` — local clock.
-- `set_timer(minutes, label?)` — counts down and speaks the alert out loud.
+- `set_timer(minutes, label?)` — counts down and speaks the alert out loud,
+  repeating it up to five times ten seconds apart. Several timers can run at
+  once; timers are per call and do not survive a disconnect.
+- `cancel_timer(name?, minutes?, all?)` — cancels a timer by name ("the pasta
+  timer"), by length ("the five minute timer"), or the only one running, and
+  silences one that is going off. Ambiguity is answered with a question.
+- `list_timers()` — says what is running and how long is left on each.
 - `get_weather(location)` — Open-Meteo, no API key. Honors `skills.weather.default_location` in `config.yaml`.
 - `web_search(query)` — DuckDuckGo by default. Switch with `skills.web_search.provider: brave` or `tavily` plus the matching API key in `.env`.
 - `play_bbc_radio(station)` / `stop_bbc_radio` — live BBC streams via `mpv`, targeted at the Jabra CoreAudio device. See "BBC radio" below. Disable with `skills.radio.enabled: false`.

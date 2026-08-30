@@ -19,7 +19,7 @@
   },
   {
     "name": "set_timer",
-    "description": "Start a countdown timer. When it expires the assistant will speak the alert out loud. Use for any request like 'set a timer', 'remind me in N minutes', 'wake me in N minutes'.",
+    "description": "Start a countdown timer. When it expires the assistant says 'Your <label> timer is up' out loud and repeats it a few times. Use for any request like 'set a timer', 'remind me in N minutes', 'wake me in N minutes'. Always pass the label the user gave it ('pasta', 'tea', 'laundry') — that label is how the user cancels or asks about this timer later. Several timers can run at once.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -33,6 +33,37 @@
         }
       },
       "required": ["minutes"]
+    }
+  },
+  {
+    "name": "cancel_timer",
+    "description": "Cancel a running timer, or silence one that is going off right now. Use for 'cancel the pasta timer', 'stop the timer', 'turn it off', 'never mind the timer'. Pass the name the user gave the timer if they named one; pass minutes instead when they identify it by its length ('cancel the five minute timer'); pass all=true for 'cancel all my timers'. Pass no arguments when the user says only 'cancel the timer' without saying which one.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Name of the timer to cancel, as the user said it (e.g. 'pasta', 'the tea timer')."
+        },
+        "minutes": {
+          "type": "number",
+          "description": "Length the timer was originally set for, when the user identifies it that way."
+        },
+        "all": {
+          "type": "boolean",
+          "description": "Cancel every running timer."
+        }
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "list_timers",
+    "description": "Say which timers are running and how long is left on each. Use for 'what timers do I have?', 'how long left on the pasta timer?', 'is my timer still going?'.",
+    "parameters": {
+      "type": "object",
+      "properties": {},
+      "required": []
     }
   },
   {

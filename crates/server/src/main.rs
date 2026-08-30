@@ -1013,6 +1013,8 @@ fn build_skills(
         Arc::new(skills::time::GetCurrentTime),
         Arc::new(skills::time::GetCurrentDate),
         Arc::new(skills::timer::SetTimer),
+        Arc::new(skills::timer::CancelTimer),
+        Arc::new(skills::timer::ListTimers),
         Arc::new(skills::weather::GetWeather::new(env_or(
             "POC_WEATHER_DEFAULT_LOCATION",
             "",
