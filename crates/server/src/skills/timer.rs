@@ -6,10 +6,11 @@
 //! timer fires, the send fails and the alert is logged and dropped — the same
 //! as the Python behaviour when its pipeline was gone.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::Value;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use flowcat_core::processor::frame::Frame;
@@ -182,6 +183,19 @@ impl TimerBook {
         }
     }
 
+    /// True if a timer with this id is still registered.
+    ///
+    /// Checking this under the same lock as the send that follows it is what
+    /// actually closes the cancel-vs-announce race: `cancel()` removes the
+    /// entry *before* cancelling its token, so a check that only reads
+    /// `token.is_cancelled()` can still be false for an id `cancel()` has
+    /// already forgotten. `contains` gives the announce loop something to
+    /// check while holding the same lock `cancel()` uses to remove the entry,
+    /// so "entry gone" and "frame sent" can never both be true.
+    pub fn contains(&self, id: u64) -> bool {
+        self.timers.iter().any(|t| t.id == id)
+    }
+
     /// Cancel one timer and forget it. False when the id is unknown.
     pub fn cancel(&mut self, id: u64) -> bool {
         match self.timers.iter().position(|t| t.id == id) {
@@ -277,21 +291,26 @@ impl Skill for SetTimer {
         let name = spoken_name.as_deref().and_then(normalize_name);
 
         let delay = Duration::from_secs_f64(minutes * 60.0);
-        let (id, token) = state.with_timers(|b| {
-            b.insert(name, spoken_name.clone(), minutes, Instant::now() + delay)
-        });
+        // A single absolute deadline, fixed now and shared by the book entry
+        // (for a future "about N minutes left") and the sleep below — not a
+        // relative `sleep(delay)` constructed lazily on the task's first
+        // poll. Under a paused test clock, that first poll can happen
+        // *after* the test has already advanced time past this point (e.g.
+        // inside `tokio::time::advance`'s own internal yield), which would
+        // silently push the fire time back by however much the clock moved
+        // before the task ever ran. Pinning the deadline here, before
+        // `tokio::spawn`, makes firing independent of when the scheduler
+        // gets around to polling the new task. It also has to be a
+        // `tokio::time::Instant`, not `std::time::Instant`: only tokio's own
+        // clock moves under `start_paused`, so a `std` deadline stored in the
+        // book would read as "the full delay left" no matter how far a test
+        // advances.
+        let deadline = Instant::now() + delay;
+        let (id, token) =
+            state.with_timers(|b| b.insert(name, spoken_name.clone(), minutes, deadline));
 
         let run_id = ctx.run_id;
         let text = alert_text(spoken_name.as_deref().unwrap_or(""));
-        // An absolute deadline, fixed now — not a relative `sleep(delay)`
-        // constructed lazily on the task's first poll. Under a paused test
-        // clock, that first poll can happen *after* the test has already
-        // advanced time past this point (e.g. inside `tokio::time::advance`'s
-        // own internal yield), which would silently push the fire time back
-        // by however much the clock moved before the task ever ran. Pinning
-        // the deadline here, before `tokio::spawn`, makes firing independent
-        // of when the scheduler gets around to polling the new task.
-        let deadline = tokio::time::Instant::now() + delay;
         // Weak, never Arc: a strong reference would keep `CallState` — and so
         // the whole `TimerBook` — alive past the end of the call, and the
         // book's `Drop` would never cancel anything.
@@ -305,12 +324,22 @@ impl Skill for SetTimer {
                 }
                 _ = tokio::time::sleep_until(deadline) => {}
             }
-            if let Some(s) = state.upgrade() {
-                s.with_timers(|b| b.mark_ringing(id));
-            }
+            let Some(s) = state.upgrade() else {
+                // The call ended between the deadline firing and this point;
+                // there is no more book — and likely no more call — to speak
+                // into.
+                return;
+            };
+            s.with_timers(|b| b.mark_ringing(id));
             for i in 0..MAX_ANNOUNCEMENTS {
-                // `cancel()` sets this synchronously, so checking here means a
-                // cancelled timer can never get one last word in.
+                // `cancel()` sets this synchronously, so checking here is a
+                // cheap early-out. It is *not* what makes the "no announcement
+                // after cancel" guarantee true on its own: `cancel()` removes
+                // the book entry before it cancels the token, so a window
+                // exists where this check would still pass for an id
+                // `cancel()` has already forgotten. The `contains` check
+                // below, taken under the same lock `cancel()` uses, is what
+                // actually closes that window.
                 if token.is_cancelled() {
                     break;
                 }
@@ -319,9 +348,23 @@ impl Skill for SetTimer {
                     // Record the timer going off once, not five times.
                     append_to_context: (i > 0).then_some(false),
                 };
-                if frames.send(frame).is_err() {
-                    tracing::info!(run_id, %text, "timer fired after the call ended; dropped");
-                    break;
+                let sent = s.with_timers(|b| {
+                    if b.contains(id) {
+                        Some(frames.send(frame))
+                    } else {
+                        None
+                    }
+                });
+                match sent {
+                    None => {
+                        tracing::info!(run_id, id, "timer cancelled before this announcement");
+                        break;
+                    }
+                    Some(Err(_)) => {
+                        tracing::info!(run_id, %text, "timer fired after the call ended; dropped");
+                        break;
+                    }
+                    Some(Ok(())) => {}
                 }
                 tracing::info!(run_id, id, %text, announcement = i + 1, "timer fired");
                 if i + 1 == MAX_ANNOUNCEMENTS {
@@ -332,9 +375,7 @@ impl Skill for SetTimer {
                     _ = tokio::time::sleep(REPEAT_EVERY) => {}
                 }
             }
-            if let Some(s) = state.upgrade() {
-                s.with_timers(|b| b.remove(id));
-            }
+            s.with_timers(|b| b.remove(id));
         });
 
         let pretty = format_duration(minutes);
@@ -360,6 +401,16 @@ mod tests {
         assert_eq!(format_duration(5.0), "5 minutes");
         assert_eq!(format_duration(2.5), "2.5 minutes");
         assert_eq!(format_duration(1.02), "1 minute");
+    }
+
+    #[test]
+    fn constants_are_pinned() {
+        // The tests below are written in terms of these constants, so a
+        // change to either would still compile and pass without this pin —
+        // but "five announcements, ten seconds apart" is the behaviour the
+        // brief specifies, not an implementation detail free to drift.
+        assert_eq!(MAX_ANNOUNCEMENTS, 5);
+        assert_eq!(REPEAT_EVERY, Duration::from_secs(10));
     }
 
     #[test]
@@ -464,6 +515,38 @@ mod tests {
         tokio::time::advance(REPEAT_EVERY * 10).await;
         tokio::task::yield_now().await;
         assert!(spoken(&mut rx).is_empty(), "no announcement after cancel()");
+        assert!(state.with_timers(|b| b.is_empty()), "book is cleaned up");
+    }
+
+    /// The exact window `cancel()` passes through internally: the entry is
+    /// gone from the book, but its token has not (yet, or ever, in this
+    /// test) been cancelled. A guard that only checks `token.is_cancelled()`
+    /// would still send the next announcement here; only a guard serialized
+    /// on the book (`TimerBook::contains`) catches it. This is what actually
+    /// closes the race the reviewer flagged: `cancel()` removes the entry
+    /// *before* cancelling the token, so a concurrent announce loop that only
+    /// checked the token could observe "not cancelled" for an id `cancel()`
+    /// has already forgotten.
+    #[tokio::test(start_paused = true)]
+    async fn entry_removed_without_cancelling_the_token_still_silences_the_timer() {
+        let (ctx, mut rx, state) = live_ctx();
+        SetTimer.call(&json!({"minutes": 1, "label": "tea"}), &ctx).await;
+        tokio::time::advance(Duration::from_secs(61)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(spoken(&mut rx).len(), 1, "one announcement on firing");
+
+        let id = state.with_timers(|b| b.entries()[0].id);
+        let token = state.with_timers(|b| b.entries()[0].cancel.clone());
+        state.with_timers(|b| b.remove(id));
+        assert!(!token.is_cancelled(), "remove() alone must not cancel the token");
+        assert!(state.with_timers(|b| !b.contains(id)));
+
+        tokio::time::advance(REPEAT_EVERY * 10).await;
+        tokio::task::yield_now().await;
+        assert!(
+            spoken(&mut rx).is_empty(),
+            "no announcement once the entry is gone, even with a live token"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -483,15 +566,39 @@ mod tests {
         let heard = spoken(&mut rx);
         assert!(heard.contains(&"Your pasta timer is up.".to_string()));
         assert!(heard.contains(&"Your tea timer is up.".to_string()), "tea repeats");
+
+        // By t=181s the tea (last announcement at t=100) and pasta (last at
+        // t=160) timers have both finished their five announcements each;
+        // only the unlabelled 3-minute timer (deadline t=180) is still due.
+        tokio::time::advance(Duration::from_secs(60)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            spoken(&mut rx).contains(&"Your timer is up.".to_string()),
+            "the unlabelled timer speaks the generic alert"
+        );
     }
 
     #[tokio::test(start_paused = true)]
     async fn a_timer_whose_call_ended_is_dropped() {
         let (ctx, rx, state) = live_ctx();
+        let weak = std::sync::Arc::downgrade(&state);
         SetTimer.call(&json!({"minutes": 1, "label": "tea"}), &ctx).await;
         drop(rx);
         drop(ctx);
+        // Only this test's own handle should be left: if `SetTimer::call`
+        // captured a strong `Arc<CallState>` into the spawned task instead of
+        // a `Weak`, that task — still sleeping until the deadline — would be
+        // holding a second one here.
+        assert_eq!(
+            std::sync::Arc::strong_count(&state),
+            1,
+            "the spawned task must not be holding a strong Arc<CallState>"
+        );
         drop(state); // the call ended: last strong Arc<CallState> released
+        assert!(
+            weak.upgrade().is_none(),
+            "CallState must actually be dropped, not kept alive by the timer task"
+        );
         tokio::time::advance(Duration::from_secs(300)).await;
         tokio::task::yield_now().await;
         // No panic, no leak. The task woke on the cancelled parent and exited.
