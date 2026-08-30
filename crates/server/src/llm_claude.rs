@@ -1,6 +1,7 @@
 //! Claude over the Messages API (`POST /v1/messages`, streaming) as a FlowCat
 //! [`LlmService`] — the `ask_claude` backend. Raw HTTP: there is no official
-//! Rust SDK, and the call shape is small (one streamed request per turn).
+//! Rust SDK, and the call shape is small (one streamed request per turn, plus
+//! a resend of the same turn when a server-side search pauses it).
 //!
 //! The rolling context is OpenAI-shaped (`assistant.tool_calls`, `tool`
 //! messages); it is translated to Messages-API content blocks here and the
@@ -28,6 +29,11 @@ const API_VERSION: &str = "2023-06-01";
 /// and return `stop_reason: max_tokens` with no text at all — a silent turn.
 /// Reply length is governed by the system prompt, not by this ceiling.
 const MAX_TOKENS: u32 = 4096;
+
+/// How many times a `pause_turn` may be resumed within one turn. The API pauses
+/// a long server-side search loop rather than running it forever; each resume
+/// is another request, so the cap bounds both spend and the caller's silence.
+const MAX_RESUMES: u32 = 2;
 
 /// Default `output_config.effort`. Spoken one-or-two-sentence answers do not
 /// need the API default (`high`); `low` measured ~0.7 s to first token against
@@ -162,6 +168,60 @@ impl ClaudeLlm {
             body["tools"] = Value::Array(tools);
         }
         Ok(body)
+    }
+
+    /// Issue one streamed request. Split out of `run_llm` so a `pause_turn` can
+    /// issue the next one from inside the returned stream.
+    async fn send(
+        &self,
+        body: &Value,
+    ) -> std::result::Result<
+        impl futures::Stream<Item = reqwest::Result<bytes::Bytes>> + Send,
+        SendFail,
+    > {
+        let resp = self
+            .http
+            .post(API_URL)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", API_VERSION)
+            .header("content-type", "application/json")
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| SendFail::Transport(e.to_string()))?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(SendFail::Http { status, body });
+        }
+        Ok(resp.bytes_stream())
+    }
+}
+
+/// The follow-up request for a `pause_turn`: the same body with the paused
+/// assistant turn appended verbatim. Deliberately no "continue" user message —
+/// the API resumes from the trailing `server_tool_use` block on its own, and an
+/// extra message would confuse it.
+fn resume_body(body: &Value, blocks: Vec<Value>) -> Value {
+    let mut next = body.clone();
+    if let Some(msgs) = next["messages"].as_array_mut() {
+        msgs.push(json!({ "role": "assistant", "content": blocks }));
+    }
+    next
+}
+
+/// Why one request failed, kept apart so the caller can react to the status.
+enum SendFail {
+    Http { status: u16, body: String },
+    Transport(String),
+}
+
+impl std::fmt::Display for SendFail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SendFail::Http { status, body } => write!(f, "claude {status}: {body}"),
+            SendFail::Transport(e) => write!(f, "claude send: {e}"),
+        }
     }
 }
 
@@ -350,10 +410,6 @@ impl Folder {
 
     /// Start another request in the same logical turn (a `pause_turn` resume).
     /// Blocks and timings carry over; per-request state does not.
-    ///
-    /// Not yet called outside tests — the resume driver lands in the next
-    /// task, which is why this is still `allow(dead_code)`.
-    #[allow(dead_code)]
     fn begin_request(&mut self) {
         self.block_index_offset = self.blocks.keys().last().map_or(0, |k| k + 1);
         self.block_input.clear();
@@ -364,10 +420,6 @@ impl Folder {
     }
 
     /// The assistant turn so far, in wire order.
-    ///
-    /// Not yet called outside tests — the resume driver lands in the next
-    /// task, which is why this is still `allow(dead_code)`.
-    #[allow(dead_code)]
     fn assistant_blocks(&self) -> Vec<Value> {
         self.blocks.values().cloned().collect()
     }
@@ -590,58 +642,55 @@ impl LlmService for ClaudeLlm {
     }
 
     async fn run_llm<'a>(&'a mut self, ctx: &'a LlmContext) -> Result<BoxStream<'a, Frame>> {
-        let body = self.request_body(ctx)?;
-        let resp = self
-            .http
-            .post(API_URL)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", API_VERSION)
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| FlowcatError::Network(format!("claude send: {e}")))?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(FlowcatError::Network(format!("claude {status}: {text}")));
+        let mut body = self.request_body(ctx)?;
+        let this: &ClaudeLlm = self;
+        Ok(async_stream::stream! {
+            let mut folder = Folder::new(this.model.clone());
+            let mut resumes = 0u32;
+            loop {
+                let stream = match this.send(&body).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "claude: request failed");
+                        break;
+                    }
+                };
+                futures::pin_mut!(stream);
+                while let Some(chunk) = stream.next().await {
+                    match chunk {
+                        Ok(b) => folder.feed(b.as_ref()),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "claude: stream read failed");
+                            break;
+                        }
+                    }
+                    while let Some(f) = folder.pending.pop_front() {
+                        yield f;
+                    }
+                }
+                while let Some(f) = folder.pending.pop_front() {
+                    yield f;
+                }
+                if folder.stop_reason.as_deref() == Some("pause_turn") && resumes < MAX_RESUMES {
+                    resumes += 1;
+                    tracing::info!(resumes, "claude: resuming a paused search turn");
+                    body = resume_body(&body, folder.assistant_blocks());
+                    folder.begin_request();
+                    continue;
+                }
+                break;
+            }
+            folder.finish();
+            while let Some(f) = folder.pending.pop_front() {
+                yield f;
+            }
         }
-        let folder = Folder::new(self.model.clone());
-        Ok(sse_to_frames(resp.bytes_stream(), folder))
+        .boxed())
     }
 
     fn set_tools(&mut self, tools: Vec<Tool>) {
         self.tools = tools;
     }
-}
-
-/// Fold the SSE byte stream into frames as they arrive.
-fn sse_to_frames<'a, S>(byte_stream: S, folder: Folder) -> BoxStream<'a, Frame>
-where
-    S: futures::Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Send + 'a,
-{
-    futures::stream::unfold(
-        (byte_stream.boxed(), folder),
-        |(mut bytes, mut st)| async move {
-            loop {
-                if let Some(f) = st.pending.pop_front() {
-                    return Some((f, (bytes, st)));
-                }
-                if st.finished {
-                    return None;
-                }
-                match bytes.next().await {
-                    Some(Ok(chunk)) => st.feed(chunk.as_ref()),
-                    Some(Err(e)) => {
-                        tracing::warn!(error = %e, "claude: stream read failed");
-                        st.finish();
-                    }
-                    None => st.finish(),
-                }
-            }
-        },
-    )
-    .boxed()
 }
 
 #[cfg(test)]
@@ -952,6 +1001,40 @@ mod tests {
             blocks[3],
             json!({"type": "text", "text": "Nothing showing."})
         );
+    }
+
+    #[test]
+    fn a_resume_body_appends_the_paused_turn_and_nothing_else() {
+        let body = json!({
+            "model": "claude-opus-5",
+            "messages": [{"role": "user", "content": "showtimes?"}]
+        });
+        let blocks =
+            vec![json!({"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search"})];
+        let next = resume_body(&body, blocks.clone());
+        let msgs = next["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[1], json!({"role": "assistant", "content": blocks}));
+        assert_eq!(
+            next["model"], body["model"],
+            "everything else must be unchanged"
+        );
+    }
+
+    #[test]
+    fn pause_turn_is_detected_from_the_stream() {
+        let mut f = Folder::new("m".into());
+        f.feed(
+            (SEARCH_STREAM.join("\n")
+                + "\n"
+                + r#"data: {"type":"message_delta","delta":{"stop_reason":"pause_turn"},"usage":{"output_tokens":9}}"#
+                + "\n"
+                + r#"data: {"type":"message_stop"}"#
+                + "\n")
+                .as_bytes(),
+        );
+        assert_eq!(f.stop_reason.as_deref(), Some("pause_turn"));
+        assert!(f.request_done);
     }
 }
 

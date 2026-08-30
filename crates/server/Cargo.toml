@@ -41,6 +41,9 @@ rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] 
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 futures = "0.3"
 bytes = "1"
+# A `pause_turn` makes one logical turn span several HTTP requests; a plain
+# `stream::unfold` over that becomes a hand-rolled state machine.
+async-stream = "0.3"
 qwen-tts = { path = "../qwen-tts", optional = true }
 voice-chatbot-protocol = { path = "../protocol" }
 voice-chatbot-wake = { path = "../wake" }
