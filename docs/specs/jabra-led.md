@@ -123,8 +123,9 @@ session start and run exactly as today. Mirrors `MediaPlayer::is_available`.
 ### R6 — Probe subcommand
 
 `voice-chatbot-client led-test`: opens the device, prints what it found (product
-string, report layout), cycles off → listening → thinking → muted → off at ~2 s per
-step. This is both the hardware-validation harness and a field diagnostic.
+string, report layout), cycles off → listening → thinking → muted → off at 3 s per
+step (slower than a real transition, for observability). This is both the
+hardware-validation harness and a field diagnostic.
 
 ### R7 — Deploy (Raspberry Pi)
 

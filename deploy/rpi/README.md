@@ -63,7 +63,7 @@ it plays on the client's own librespot endpoint, which is a separate service.
 never overwritten afterwards. It is *not* a copy of the repo-root `.env`: that
 one holds the server's API keys, which have no business on a satellite. The
 client reads `SERVER_URL`, `INPUT_DEVICE`, `OUTPUT_DEVICE`, `WAKE_DIR`,
-`NO_WAKE`, `WAKE_THRESHOLD`, `WAKE_SESSION_SECS` and `LOG_LEVEL`.
+`NO_WAKE`, `WAKE_THRESHOLD`, `WAKE_SESSION_SECS`, `LED` and `LOG_LEVEL`.
 
 These names lost their `FLOWCAT_` prefix, and the client now *refuses to start*
 with any `FLOWCAT_*` still set rather than silently running on the defaults.

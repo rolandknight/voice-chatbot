@@ -121,8 +121,9 @@ impl LedSink for TelephonyLeds {
     }
 }
 
-/// The linux-native backend may not implement `get_report_descriptor`; the
-/// descriptor is also a plain sysfs file, keyed by the hidraw node name.
+/// Belt-and-braces fallback for when `get_report_descriptor` fails on the
+/// linux-native backend: the descriptor is also a plain sysfs file, keyed
+/// by the hidraw node name.
 #[cfg(target_os = "linux")]
 fn descriptor_from_sysfs(path: &CStr) -> Option<Vec<u8>> {
     let node = std::path::Path::new(path.to_str().ok()?)

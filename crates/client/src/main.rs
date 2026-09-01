@@ -428,7 +428,7 @@ async fn run_session(
             }
             Err(error) => {
                 if describe_devices {
-                    tracing::info!(%error, "no speakerphone leds; running without");
+                    tracing::warn!(%error, "no speakerphone leds; running without");
                 }
                 (None, None)
             }
@@ -509,7 +509,10 @@ async fn run_session(
         match tokio::time::timeout(Duration::from_secs(2), &mut event_task).await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => tracing::warn!(%error, "event task failed"),
-            Err(_) => tracing::warn!("event task did not stop within two seconds"),
+            Err(_) => {
+                tracing::warn!("event task did not stop within two seconds");
+                event_task.abort();
+            }
         }
     }
 

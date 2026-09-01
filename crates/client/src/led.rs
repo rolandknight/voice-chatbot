@@ -5,6 +5,8 @@
 //! HID telephony LEDs: off-hook (solid green), +ring (flashing green),
 //! +mute (solid red). Asleep is dark; a bot speaking outranks asleep so
 //! out-of-session audio (timer alarms) lights the ring while it plays.
+//! Dropping every [`LedController`] clone clears the ring, unless a write
+//! already failed — a gone device cannot be cleared.
 
 pub mod hid;
 
@@ -59,7 +61,8 @@ enum Turn {
 /// sink; state changes coalesce through a watch channel, so a burst of
 /// events costs at most one write per settled state. Dropping every clone
 /// clears the ring and ends the driver (its JoinHandle resolves after the
-/// clear, so a session can bound its teardown).
+/// clear, so a session can bound its teardown) — unless a write already
+/// failed, since a gone device cannot be cleared.
 #[derive(Clone)]
 pub struct LedController(Arc<Mutex<Shared>>);
 
