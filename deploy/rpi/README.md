@@ -76,7 +76,7 @@ override; the unit tolerates it being absent.
 ## Speakerphone LEDs
 
 The client shows chatbot activity on the Jabra's LED ring: dark when asleep,
-solid green when listening, flashing green while thinking, red while the mic
+solid green when listening or thinking, red while the mic
 is gated. This rides the speakerphone's standard telephony HID interface
 (docs/specs/jabra-led.md), not the audio path, and needs `/dev/hidraw*`
 access: install.sh ships a udev rule opening Jabra hidraw nodes to the
