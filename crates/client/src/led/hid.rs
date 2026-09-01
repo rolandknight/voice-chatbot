@@ -76,8 +76,11 @@ mod tests {
     use super::*;
 
     /// A minimal telephony collection shaped like a Jabra's: one input
-    /// report (hook switch + mute button, which the mapper must ignore) and
-    /// one output report with the three LEDs. Synthetic — the real Speak2 40
+    /// report (hook switch + mute button, which the mapper must ignore),
+    /// one output report with the three LEDs, and a third output report on
+    /// the Telephony page (a ringer control) the mapper must also ignore —
+    /// it proves the LED-usage-page filter actually excludes something,
+    /// not just report 1's input fields. Synthetic — the real Speak2 40
     /// descriptor is archived by the hardware-validation task.
     pub(super) const SYNTHETIC_TELEPHONY_DESCRIPTOR: &[u8] = &[
         0x05, 0x0B, // Usage Page (Telephony)
@@ -103,6 +106,15 @@ mod tests {
         0x75, 0x05, //   Report Size (5)
         0x95, 0x01, //   Report Count (1)
         0x91, 0x01, //   Output (Const) — padding
+        0x85, 0x03, //   Report ID (3): non-LED output the mapper must skip
+        0x05, 0x0B, //   Usage Page (Telephony)
+        0x09, 0x9E, //   Usage (Ringer)
+        0x75, 0x01, //   Report Size (1)
+        0x95, 0x01, //   Report Count (1)
+        0x91, 0x02, //   Output (Data,Var,Abs)
+        0x75, 0x07, //   Report Size (7)
+        0x95, 0x01, //   Report Count (1)
+        0x91, 0x01, //   Output (Const) — padding
         0xC0, // End Collection
     ];
 
@@ -118,6 +130,10 @@ mod tests {
         // offsets follow hidreport's convention; relative order is what matters.
         assert_eq!(mute.bit, off_hook.bit + 1);
         assert_eq!(ring.bit, off_hook.bit + 2);
+        // All three come from report 2's LED-page fields; report 3's
+        // Telephony-page ringer field must not leak into the map.
+        assert_eq!(mute.report_id, 2);
+        assert_eq!(ring.report_id, 2);
     }
 
     #[test]
@@ -136,5 +152,53 @@ mod tests {
             0xC0, // End Collection
         ];
         assert_eq!(map_leds(NO_LEDS).unwrap(), LedMap::default());
+    }
+
+    #[test]
+    fn a_descriptor_without_report_ids_maps_to_nothing() {
+        // LED-page output fields, but no Report ID item anywhere: an
+        // unnumbered report. hidapi needs a report ID as the write's first
+        // byte, so the mapper must skip it rather than guess one.
+        const UNNUMBERED_LED_OUTPUT: &[u8] = &[
+            0x05, 0x08, // Usage Page (LED)
+            0x09, 0x17, // Usage (Off-Hook)
+            0xA1, 0x01, // Collection (Application)
+            0x09, 0x17, //   Usage (Off-Hook)
+            0x09, 0x09, //   Usage (Mute)
+            0x09, 0x18, //   Usage (Ring)
+            0x75, 0x01, //   Report Size (1)
+            0x95, 0x03, //   Report Count (3)
+            0x91, 0x02, //   Output (Data,Var,Abs)
+            0x75, 0x05, //   Report Size (5)
+            0x95, 0x01, //   Report Count (1)
+            0x91, 0x01, //   Output (Const) — padding
+            0xC0, // End Collection
+        ];
+        assert_eq!(map_leds(UNNUMBERED_LED_OUTPUT).unwrap(), LedMap::default());
+    }
+
+    #[test]
+    fn a_numeric_usage_id_match_on_the_wrong_page_is_not_mapped() {
+        // Same numeric usage ID as USAGE_OFF_HOOK, but on the Telephony
+        // page rather than LED. Confirms the mapper filters by usage page,
+        // not just by numeric usage ID — a fixture with the LED page
+        // present elsewhere can't tell a real filter from a no-op one
+        // (get_or_insert only fills an empty slot, so a matching ID that
+        // shares a report with real LED fields is masked either way).
+        const WRONG_PAGE_SAME_ID: &[u8] = &[
+            0x05, 0x0B, // Usage Page (Telephony)
+            0x09, 0x05, // Usage (Headset)
+            0xA1, 0x01, // Collection (Application)
+            0x85, 0x01, //   Report ID (1)
+            0x09, 0x17, //   Usage (numerically == USAGE_OFF_HOOK, wrong page)
+            0x75, 0x01, //   Report Size (1)
+            0x95, 0x01, //   Report Count (1)
+            0x91, 0x02, //   Output (Data,Var,Abs)
+            0x75, 0x07, //   Report Size (7)
+            0x95, 0x01, //   Report Count (1)
+            0x91, 0x01, //   Output (Const) — padding
+            0xC0, // End Collection
+        ];
+        assert_eq!(map_leds(WRONG_PAGE_SAME_ID).unwrap(), LedMap::default());
     }
 }
