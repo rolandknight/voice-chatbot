@@ -5,7 +5,9 @@
 # udev rule opening Jabra (GN Audio, USB vendor 0b0e) hidraw nodes to the
 # locally logged-in user (systemd uaccess ACL) and to the audio group, so
 # the client reaches the LEDs whether it runs from a desktop session or as
-# a service.
+# a service. It also adds the human who invoked sudo to the audio group --
+# a desktop login is usually not in it, and uaccess does not always apply on
+# a re-trigger -- which needs a re-login to take effect.
 #
 # The Raspberry Pi deploy does NOT need this: deploy/rpi/install.sh ships
 # its own rule. Run this once on a desktop/laptop where you run the client
@@ -31,6 +33,24 @@ SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b0e", MODE="0660", GROUP="audio", TAG+="
 EOF
 chmod 0644 "$RULE_DEST"
 echo "installed $RULE_DEST"
+
+# The rule opens the node to root and the audio group; a desktop login is
+# usually in neither (uaccess is meant to cover it but does not always apply
+# on a re-trigger). Add the human who invoked sudo to the audio group so the
+# client, run by hand from their session, can open the node. Group changes
+# only take effect in a new login, hence the note.
+user="${SUDO_USER:-}"
+if [ -z "$user" ] || [ "$user" = "root" ]; then
+    echo "not run via sudo as a normal user; skipping the audio-group step" \
+         "(add yourself with: usermod -aG audio <you>)"
+elif id -nG "$user" 2>/dev/null | tr ' ' '\n' | grep -qx audio; then
+    echo "$user is already in the audio group"
+else
+    usermod -aG audio "$user"
+    echo "added $user to the audio group -- log out and back in (or run" \
+         "'newgrp audio' in the terminal you launch the client from) for it" \
+         "to take effect"
+fi
 
 # Re-apply to a speakerphone that is already plugged in, no replug needed.
 udevadm control --reload-rules
