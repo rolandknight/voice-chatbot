@@ -27,10 +27,23 @@ struct Cli {
     command: Command,
 }
 
+/// Whether to drive a speakerphone's LED ring (docs/specs/jabra-led.md).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum LedMode {
+    /// Drive a Jabra's telephony LEDs when one is plugged in.
+    Auto,
+    /// Never touch the LEDs.
+    Off,
+}
+
 #[derive(Debug, Subcommand)]
 enum Command {
     /// List available input and output devices.
     Devices,
+
+    /// Probe the speakerphone's LEDs: open the Jabra telephony interface and
+    /// cycle off -> listening -> thinking -> muted -> off.
+    LedTest,
 
     /// Start a full-duplex audio call.
     Call {
@@ -68,6 +81,10 @@ enum Command {
         /// Silence (seconds) that ends a wake session.
         #[arg(long, env = "WAKE_SESSION_SECS", default_value_t = 15.0)]
         wake_session_secs: f32,
+
+        /// Show chatbot activity on the speakerphone's LED ring.
+        #[arg(long, env = "LED", value_enum, default_value_t = LedMode::Auto)]
+        led: LedMode,
     },
 }
 
@@ -109,6 +126,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Devices => AudioDevices::new()?.print(),
+        Command::LedTest => led_test()?,
         Command::Call {
             server_url,
             input_device,
@@ -117,6 +135,7 @@ async fn main() -> Result<()> {
             no_wake,
             wake_threshold,
             wake_session_secs,
+            led,
         } => {
             let wake = if no_wake {
                 None
@@ -128,6 +147,7 @@ async fn main() -> Result<()> {
                 input_device.as_deref(),
                 output_device.as_deref(),
                 wake,
+                led,
             )
             .await?
         }
@@ -152,6 +172,36 @@ fn wake_config(dir: &str, threshold: f32, session_secs: f32) -> Result<WakeConfi
         threshold,
         session_secs,
     })
+}
+
+/// Hardware probe for docs/specs/jabra-led.md: what does each LED state
+/// look (and sound) like on the attached device?
+fn led_test() -> Result<()> {
+    use voice_chatbot_client::led::LedSink;
+    let mut leds = voice_chatbot_client::led::hid::open()?;
+    println!("driving {}", leds.describe());
+    let steps: [(&str, (bool, bool, bool)); 5] = [
+        ("off (asleep)", (false, false, false)),
+        (
+            "listening: off-hook -- expect solid green",
+            (true, false, false),
+        ),
+        (
+            "thinking: off-hook + ring -- expect flashing green, and LISTEN: this must be silent",
+            (true, true, false),
+        ),
+        (
+            "muted: off-hook + mute -- expect solid red",
+            (true, false, true),
+        ),
+        ("off again", (false, false, false)),
+    ];
+    for (what, (off_hook, ring, mute)) in steps {
+        println!("{what}");
+        leds.set(off_hook, ring, mute)?;
+        std::thread::sleep(Duration::from_secs(3));
+    }
+    Ok(())
 }
 
 fn init_tracing(filter: &str) -> Result<()> {
@@ -186,6 +236,7 @@ async fn run_call(
     input_selector: Option<&str>,
     output_selector: Option<&str>,
     wake: Option<WakeConfig>,
+    led: LedMode,
 ) -> Result<()> {
     let endpoints = ServerEndpoints::new(server_url)?;
     let http = Client::builder()
@@ -221,6 +272,7 @@ async fn run_call(
             hangup_rx.clone(),
             first_session,
             announced_outage,
+            led,
         )
         .await;
 
@@ -275,6 +327,7 @@ async fn run_session(
     mut hangup: watch::Receiver<bool>,
     describe_devices: bool,
     reconnecting: bool,
+    led_mode: LedMode,
 ) -> SessionEnd {
     if *hangup.borrow() {
         return SessionEnd::HungUp;
@@ -359,6 +412,29 @@ async fn run_session(
         }
         None
     };
+
+    // Chatbot activity on the speakerphone's LED ring. A missing device or
+    // missing hidraw permissions degrade to running dark, like ffmpeg above.
+    let (led, led_done) = match led_mode {
+        LedMode::Off => (None, None),
+        LedMode::Auto => match voice_chatbot_client::led::hid::open() {
+            Ok(leds) => {
+                if describe_devices {
+                    eprintln!("leds:   {}", leds.describe());
+                }
+                let (controller, done) =
+                    voice_chatbot_client::led::LedController::start(Box::new(leds), wake.is_none());
+                (Some(controller), Some(done))
+            }
+            Err(error) => {
+                if describe_devices {
+                    tracing::info!(%error, "no speakerphone leds; running without");
+                }
+                (None, None)
+            }
+        },
+    };
+
     let (outbound_tx, outbound_rx) = tokio::sync::mpsc::unbounded_channel();
     let activity = Activity::default();
     let mut event_task = tokio::spawn(events::run(
@@ -367,7 +443,7 @@ async fn run_session(
         media,
         outbound_rx,
         activity.clone(),
-        None,
+        led.clone(),
     ));
 
     // On-device wake: gate the capture channel before the peer sees it.
@@ -385,7 +461,7 @@ async fn run_session(
             if describe_devices {
                 eprintln!("wake:   listening (audio is sent only after a wake word)");
             }
-            voice_chatbot_client::wake::spawn(gate, input_rx, outbound_tx, None)
+            voice_chatbot_client::wake::spawn(gate, input_rx, outbound_tx, led.clone())
         }
         None => {
             drop(outbound_tx);
@@ -435,6 +511,14 @@ async fn run_session(
             Ok(Err(error)) => tracing::warn!(%error, "event task failed"),
             Err(_) => tracing::warn!("event task did not stop within two seconds"),
         }
+    }
+
+    // The led driver darkens the ring once every handle is gone (the events
+    // and wake tasks hold the other clones); bounded so a wedged device
+    // write cannot stall teardown or leave the ring lit into the next state.
+    drop(led);
+    if let Some(done) = led_done {
+        let _ = tokio::time::timeout(Duration::from_secs(1), done).await;
     }
 
     match call_result {
@@ -487,7 +571,7 @@ mod tests {
         let cli = Cli::try_parse_from(["client", "call", "--no-wake"]).unwrap();
         match cli.command {
             Command::Call { no_wake, .. } => assert!(no_wake),
-            Command::Devices => panic!("expected call command"),
+            _ => panic!("expected call command"),
         }
         assert!(Cli::try_parse_from(["client", "call", "--no-wake", "--wake-dir", "x"]).is_err());
     }
@@ -518,6 +602,7 @@ mod tests {
                 no_wake,
                 wake_threshold,
                 wake_session_secs,
+                led,
             } => {
                 assert_eq!(server_url, "http://localhost:7000");
                 assert_eq!(input_device.as_deref(), Some("Jabra input"));
@@ -526,8 +611,27 @@ mod tests {
                 assert!(!no_wake);
                 assert_eq!(wake_threshold, 0.5);
                 assert_eq!(wake_session_secs, 15.0);
+                assert_eq!(led, LedMode::Auto);
             }
-            Command::Devices => panic!("expected call command"),
+            _ => panic!("expected call command"),
         }
+    }
+
+    #[test]
+    fn parses_led_mode() {
+        let cli = Cli::try_parse_from(["client", "call", "--led", "off"]).unwrap();
+        match cli.command {
+            Command::Call { led, .. } => assert_eq!(led, LedMode::Off),
+            _ => panic!("expected call"),
+        }
+        let cli = Cli::try_parse_from(["client", "call"]).unwrap();
+        match cli.command {
+            Command::Call { led, .. } => assert_eq!(led, LedMode::Auto, "auto by default"),
+            _ => panic!("expected call"),
+        }
+        assert!(matches!(
+            Cli::try_parse_from(["client", "led-test"]).unwrap().command,
+            Command::LedTest
+        ));
     }
 }
