@@ -9,6 +9,8 @@
 pub mod hid;
 
 use serde_json::Value;
+use std::sync::{Arc, Mutex};
+use tokio::sync::watch;
 use voice_chatbot_protocol::WakeState;
 
 /// What the ring shows. Speaking and Listening render the same today (solid
@@ -51,6 +53,86 @@ enum Turn {
     Quiet,
     Thinking,
     Speaking,
+}
+
+/// Clonable handle the events and wake tasks feed. A driver task owns the
+/// sink; state changes coalesce through a watch channel, so a burst of
+/// events costs at most one write per settled state. Dropping every clone
+/// clears the ring and ends the driver (its JoinHandle resolves after the
+/// clear, so a session can bound its teardown).
+#[derive(Clone)]
+pub struct LedController(Arc<Mutex<Shared>>);
+
+struct Shared {
+    tracker: PhaseTracker,
+    seen: watch::Sender<Indication>,
+}
+
+impl LedController {
+    pub fn start(
+        sink: Box<dyn LedSink>,
+        awake_at_start: bool,
+    ) -> (Self, tokio::task::JoinHandle<()>) {
+        let tracker = PhaseTracker::new(awake_at_start);
+        let (seen, changes) = watch::channel(tracker.indication());
+        let driver = tokio::spawn(drive(sink, changes));
+        (Self(Arc::new(Mutex::new(Shared { tracker, seen }))), driver)
+    }
+
+    /// Feed one raw events-WebSocket text frame (same parse-it-yourself
+    /// contract as `note_activity` and `dispatch_media` in events.rs).
+    pub fn on_event(&self, input: &str) {
+        let Ok(message) = serde_json::from_str::<Value>(input) else {
+            return;
+        };
+        let Some(kind) = message.get("type").and_then(Value::as_str) else {
+            return;
+        };
+        let payload = message.get("payload").cloned().unwrap_or(Value::Null);
+        let mut shared = self.0.lock().unwrap();
+        if let Some(indication) = shared.tracker.on_event(kind, &payload) {
+            let _ = shared.seen.send(indication);
+        }
+    }
+
+    /// Feed a locally detected wake state change (wake::spawn).
+    pub fn on_wake(&self, state: &WakeState) {
+        let mut shared = self.0.lock().unwrap();
+        if let Some(indication) = shared.tracker.on_wake(state) {
+            let _ = shared.seen.send(indication);
+        }
+    }
+}
+
+/// Write every settled state change; on channel close (all handles gone,
+/// i.e. the session ended) leave the ring dark. hidraw writes are small but
+/// still syscalls against a device node, so they run on the blocking pool.
+async fn drive(mut sink: Box<dyn LedSink>, mut changes: watch::Receiver<Indication>) {
+    let mut shown: Option<Indication> = None;
+    loop {
+        let wanted = *changes.borrow_and_update();
+        if shown != Some(wanted) {
+            let (off_hook, ring, mute) = wanted.bits();
+            let (returned, result) = tokio::task::spawn_blocking(move || {
+                let result = sink.set(off_hook, ring, mute);
+                (sink, result)
+            })
+            .await
+            .expect("led sink panicked");
+            sink = returned;
+            if let Err(error) = result {
+                // Unplugging the speakerphone ends the audio session too;
+                // the next session re-opens the device. Just go dark.
+                tracing::debug!(%error, "led write failed; no leds for this session");
+                return;
+            }
+            shown = Some(wanted);
+        }
+        if changes.changed().await.is_err() {
+            break;
+        }
+    }
+    let _ = tokio::task::spawn_blocking(move || sink.set(false, false, false)).await;
 }
 
 /// Folds wake state, turn events and turn-mute into the shown [`Indication`].
@@ -260,5 +342,41 @@ mod tests {
             .on_event("rtf-bot-text", &json!({"text": "hi"}))
             .is_none());
         assert!(tracker.on_event("media", &json!({})).is_none());
+    }
+
+    struct RecordingSink(std::sync::mpsc::Sender<(bool, bool, bool)>);
+
+    impl LedSink for RecordingSink {
+        fn set(&mut self, off_hook: bool, ring: bool, mute: bool) -> anyhow::Result<()> {
+            self.0.send((off_hook, ring, mute)).unwrap();
+            Ok(())
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn controller_writes_changes_and_clears_on_drop() {
+        let timeout = std::time::Duration::from_secs(5);
+        let (sink_tx, written) = std::sync::mpsc::channel();
+        let (led, done) = LedController::start(Box::new(RecordingSink(sink_tx)), false);
+        assert_eq!(
+            written.recv_timeout(timeout).unwrap(),
+            (false, false, false),
+            "the starting state is written, clearing a crashed predecessor's leds"
+        );
+        led.on_event(r#"{"type":"rtf-bot-started-speaking","payload":{}}"#);
+        assert_eq!(written.recv_timeout(timeout).unwrap(), (true, false, false));
+        led.on_event(r#"{"type":"rtf-bot-text","payload":{"text":"hi"}}"#);
+        led.on_event("not json at all");
+        drop(led);
+        assert_eq!(
+            written.recv_timeout(timeout).unwrap(),
+            (false, false, false),
+            "dropping the last handle darkens the ring"
+        );
+        done.await.unwrap();
+        assert!(
+            written.try_recv().is_err(),
+            "no write happened for the no-change events"
+        );
     }
 }
