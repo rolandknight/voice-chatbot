@@ -1896,6 +1896,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hidreport"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6bba4f2ebef8032ef0125a72c7052481c9d63e50f1d48d35c0933ae11aa58c6d"
+dependencies = [
+ "hut",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "hmac-sha256"
 version = "1.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1957,6 +1967,12 @@ name = "httpdate"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
+
+[[package]]
+name = "hut"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c882ba3379c41a5713a111ea16bddf8d337c439630db6ec5f7ece7d1e7e29c5c"
 
 [[package]]
 name = "hybrid-array"
@@ -5114,6 +5130,7 @@ dependencies = [
  "clap 4.6.6",
  "cpal",
  "futures",
+ "hidreport",
  "pretty_assertions",
  "reqwest",
  "rubato 4.0.0",

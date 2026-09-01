@@ -6,6 +6,8 @@
 //! +mute (solid red). Asleep is dark; a bot speaking outranks asleep so
 //! out-of-session audio (timer alarms) lights the ring while it plays.
 
+pub mod hid;
+
 use serde_json::Value;
 use voice_chatbot_protocol::WakeState;
 
