@@ -82,5 +82,6 @@ is gated. This rides the speakerphone's standard telephony HID interface
 access: install.sh ships a udev rule opening Jabra hidraw nodes to the
 `audio` group the service already runs in. `LED=off` in `.env` disables it;
 `voice-chatbot-client led-test` (with the service stopped) cycles the states
-for a look. Running the client by hand on a dev machine needs the same udev
-rule, or a `TAG+="uaccess"` variant for desktop logins.
+for a look. Running the client by hand on a dev machine needs the same
+access: run `sudo deploy/jabra-setup.sh` once (installs a desktop-friendly
+`uaccess` + `audio`-group udev rule).
