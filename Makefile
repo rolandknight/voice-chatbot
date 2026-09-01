@@ -26,10 +26,12 @@ PI_TOOLCHAIN ?= 1.97.1
 # invalidate the other's artifacts.
 PI_TARGET_DIR ?= target/pi
 PI_CLIENT_BIN := $(PI_TARGET_DIR)/$(PI_TARGET)/release/voice-chatbot-client
-# Deploying that binary to the Pi: `make deploy-pi PI_HOST=pi@raspberrypi.local`.
+# Deploying that binary to the Pi: `make deploy-pi PI_HOST=pi@raspberrypi.local`,
+# or set PI_HOST in .env (read below via env_get, like SERVER_URL); a
+# command-line PI_HOST=... still wins.
 # PI_STAGE is relative to the Pi user's home -- rsync lands there unprivileged,
 # and only the installer it runs needs sudo.
-PI_HOST ?=
+PI_HOST ?= $(call env_get,PI_HOST)
 PI_DIR ?= /opt/voice-chatbot
 PI_STAGE ?= .cache/voice-chatbot-deploy
 PI_SERVICE ?= voice-chatbot-client
