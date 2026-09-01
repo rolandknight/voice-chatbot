@@ -85,3 +85,25 @@ access: install.sh ships a udev rule opening Jabra hidraw nodes to the
 for a look. Running the client by hand on a dev machine needs the same
 access: run `sudo deploy/jabra-setup.sh` once (installs a desktop-friendly
 `uaccess` + `audio`-group udev rule).
+
+## Trimming boot time
+
+A stock Pi OS Desktop image spends minutes of every boot on services a
+satellite never uses — on one Pi, `docker.service` alone blamed 5min12s and
+`rpi-eeprom-update.service` another 2min41s. `trim-boot.sh` turns them off
+over ssh, from the dev machine:
+
+```sh
+deploy/rpi/trim-boot.sh pi@raspberrypi.local
+```
+
+It disables docker/containerd, the per-boot EEPROM update check, bluetooth
+and cups, and sets the default boot target to the console (no lightdm). The
+last one also helps audio on Desktop images: it is lightdm's autologin
+session that starts the PipeWire which can hold the speakerphone (see above).
+avahi stays — `deploy-pi` resolves the Pi's `*.local` name through it.
+
+Everything is reversible (`sudo systemctl enable --now <unit>`,
+`sudo systemctl set-default graphical.target`) and rerunning the script is a
+no-op. With the boot check gone, run `sudo rpi-eeprom-update -a` by hand now
+and then to keep the bootloader current.
