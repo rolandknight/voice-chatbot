@@ -192,6 +192,7 @@ pub fn spawn(
     mut gate: ClientWakeGate,
     mut input: mpsc::Receiver<Vec<i16>>,
     outbound: mpsc::UnboundedSender<String>,
+    led: Option<crate::led::LedController>,
 ) -> mpsc::Receiver<Vec<i16>> {
     let (tx, rx) = mpsc::channel(64);
     tokio::spawn(async move {
@@ -205,6 +206,9 @@ pub fn spawn(
             };
             if let Some(state) = report {
                 println!("{}", describe(&state));
+                if let Some(led) = &led {
+                    led.on_wake(&state);
+                }
                 let _ = outbound.send(wake_frame(&state));
             }
             if !out.is_empty() && tx.send(out).await.is_err() {

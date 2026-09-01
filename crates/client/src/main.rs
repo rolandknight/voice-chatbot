@@ -367,6 +367,7 @@ async fn run_session(
         media,
         outbound_rx,
         activity.clone(),
+        None,
     ));
 
     // On-device wake: gate the capture channel before the peer sees it.
@@ -384,7 +385,7 @@ async fn run_session(
             if describe_devices {
                 eprintln!("wake:   listening (audio is sent only after a wake word)");
             }
-            voice_chatbot_client::wake::spawn(gate, input_rx, outbound_tx)
+            voice_chatbot_client::wake::spawn(gate, input_rx, outbound_tx, None)
         }
         None => {
             drop(outbound_tx);
