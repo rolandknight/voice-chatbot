@@ -67,8 +67,9 @@ echo "  as user: $RUN_USER"
 command -v ffmpeg >/dev/null 2>&1 \
     || echo "WARNING: ffmpeg is not installed; radio, shows and sound effects will not play (apt install ffmpeg)" >&2
 
-# The unit grants /dev/snd through SupplementaryGroups, so the service does not
-# need this. It is for running the client by hand over ssh.
+# The unit grants the service /dev/snd and the Jabra hidraw node (LEDs) through
+# SupplementaryGroups=audio, so it does not need this. This is for running the
+# client -- or led-test -- by hand over ssh.
 if ! id -nG "$RUN_USER" | tr ' ' '\n' | grep -qx audio; then
     echo "  adding $RUN_USER to the audio group (for manual runs; the unit grants it anyway)"
     usermod -aG audio "$RUN_USER"
@@ -112,11 +113,22 @@ sed -e "s|@INSTALL_DIR@|$INSTALL_DIR|g" -e "s|@RUN_USER@|$RUN_USER|g" "$UNIT_SRC
 chmod 0644 "$UNIT_DEST"
 systemctl daemon-reload
 
-# LED control needs the Jabra's hidraw node (see the rules file). Reload and
-# retrigger so an already-plugged speakerphone gets the group without a reboot.
-install -m 0644 "$SRC_DIR/99-voice-chatbot-jabra.rules" /etc/udev/rules.d/99-voice-chatbot-jabra.rules
-udevadm control --reload-rules
-udevadm trigger --subsystem-match=hidraw
+# Speakerphone LEDs: open the Jabra hidraw node to the audio group the service
+# already runs in, then reload and retrigger so an already-plugged speakerphone
+# picks up the group without a reboot. Deliberately non-fatal -- without the
+# rule the client still runs, just with no LED indication -- so a missing file
+# or a udev that is not reachable here never blocks the client install. Rerun
+# safe: install overwrites the rule in place.
+JABRA_RULE="$SRC_DIR/99-voice-chatbot-jabra.rules"
+if [ -f "$JABRA_RULE" ] \
+    && install -m 0644 "$JABRA_RULE" /etc/udev/rules.d/99-voice-chatbot-jabra.rules \
+    && udevadm control --reload-rules \
+    && udevadm trigger --subsystem-match=hidraw; then
+    echo "  installed the Jabra LED udev rule (hidraw -> audio group)"
+else
+    echo "  speakerphone LED setup skipped or failed (client unaffected;" \
+         "a reboot or replug applies the rule if it was written)" >&2
+fi
 
 # Smoke test before enabling: catches a wrong-architecture binary, a missing
 # shared library and an unparsable .env, with the error in front of you rather
