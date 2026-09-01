@@ -112,6 +112,12 @@ sed -e "s|@INSTALL_DIR@|$INSTALL_DIR|g" -e "s|@RUN_USER@|$RUN_USER|g" "$UNIT_SRC
 chmod 0644 "$UNIT_DEST"
 systemctl daemon-reload
 
+# LED control needs the Jabra's hidraw node (see the rules file). Reload and
+# retrigger so an already-plugged speakerphone gets the group without a reboot.
+install -m 0644 "$SRC_DIR/99-voice-chatbot-jabra.rules" /etc/udev/rules.d/99-voice-chatbot-jabra.rules
+udevadm control --reload-rules
+udevadm trigger --subsystem-match=hidraw
+
 # Smoke test before enabling: catches a wrong-architecture binary, a missing
 # shared library and an unparsable .env, with the error in front of you rather
 # than in the journal of a service that restarts every 5 s.
