@@ -3,13 +3,15 @@
 //! bit positions come from the interface's own report descriptor — never
 //! from hardcoded bytes (docs/specs/jabra-led.md, R3).
 
-use anyhow::Result;
+use std::ffi::CStr;
+
+use anyhow::{bail, Context, Result};
+use hidapi::{HidApi, HidDevice, MAX_REPORT_DESCRIPTOR_SIZE};
 use hidreport::{Field, Report, ReportDescriptor};
 
-/// GN Audio (Jabra) USB vendor ID. Not consumed by this module — reserved
-/// for the device-discovery task that matches USB devices before parsing
-/// their descriptors.
-#[allow(dead_code)]
+use crate::led::LedSink;
+
+/// GN Audio (Jabra) USB vendor ID.
 pub(crate) const JABRA_VENDOR_ID: u16 = 0x0b0e;
 /// HID LED usage page, and the telephony LEDs on it (HID Usage Tables §11).
 const LED_PAGE: u16 = 0x08;
@@ -69,6 +71,124 @@ pub fn map_leds(descriptor: &[u8]) -> Result<LedMap> {
         }
     }
     Ok(map)
+}
+
+/// Build the output-report buffers (report ID first, as hidapi wants) that
+/// show exactly the given bits. Every report carrying a mapped LED is
+/// emitted, so clearing a bit rewrites its report with that bit zero.
+pub fn compose(map: &LedMap, off_hook: bool, ring: bool, mute: bool) -> Vec<Vec<u8>> {
+    let mut buffers: Vec<Vec<u8>> = Vec::new();
+    for (led, on) in [(map.off_hook, off_hook), (map.ring, ring), (map.mute, mute)] {
+        let Some(led) = led else { continue };
+        let buffer = match buffers.iter_mut().find(|buffer| buffer[0] == led.report_id) {
+            Some(buffer) => buffer,
+            None => {
+                buffers.push(vec![0u8; led.report_len]);
+                let buffer = buffers.last_mut().unwrap();
+                buffer[0] = led.report_id;
+                buffer
+            }
+        };
+        if on {
+            buffer[led.bit / 8] |= 1 << (led.bit % 8);
+        }
+    }
+    buffers
+}
+
+/// A Jabra telephony HID interface with its LED layout.
+pub struct TelephonyLeds {
+    device: HidDevice,
+    map: LedMap,
+    product: String,
+}
+
+impl TelephonyLeds {
+    /// One console-worthy line: what was opened and where its LEDs sit.
+    pub fn describe(&self) -> String {
+        format!("{} ({:?})", self.product, self.map)
+    }
+}
+
+impl LedSink for TelephonyLeds {
+    fn set(&mut self, off_hook: bool, ring: bool, mute: bool) -> Result<()> {
+        for buffer in compose(&self.map, off_hook, ring, mute) {
+            self.device
+                .write(&buffer)
+                .with_context(|| format!("write led report {:#04x}", buffer[0]))?;
+        }
+        Ok(())
+    }
+}
+
+/// The linux-native backend may not implement `get_report_descriptor`; the
+/// descriptor is also a plain sysfs file, keyed by the hidraw node name.
+#[cfg(target_os = "linux")]
+fn descriptor_from_sysfs(path: &CStr) -> Option<Vec<u8>> {
+    let node = std::path::Path::new(path.to_str().ok()?)
+        .file_name()?
+        .to_str()?;
+    std::fs::read(format!("/sys/class/hidraw/{node}/device/report_descriptor")).ok()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn descriptor_from_sysfs(_path: &CStr) -> Option<Vec<u8>> {
+    None
+}
+
+/// Find the first Jabra HID interface whose descriptor offers an Off-Hook
+/// LED output — that is the telephony collection. A Jabra presents several
+/// HID interfaces (consumer volume, vendor pages); content, not interface
+/// number, is what identifies the right one.
+pub fn open() -> Result<TelephonyLeds> {
+    let api = HidApi::new().context("initialize hidapi")?;
+    let mut tried = Vec::new();
+    for info in api
+        .device_list()
+        .filter(|d| d.vendor_id() == JABRA_VENDOR_ID)
+    {
+        let path = info.path();
+        let shown = path.to_string_lossy().into_owned();
+        let device = match api.open_path(path) {
+            Ok(device) => device,
+            Err(error) => {
+                tried.push(format!("{shown}: open: {error}"));
+                continue;
+            }
+        };
+        let mut buffer = [0u8; MAX_REPORT_DESCRIPTOR_SIZE];
+        let descriptor = match device.get_report_descriptor(&mut buffer) {
+            Ok(length) => buffer[..length].to_vec(),
+            Err(_) => match descriptor_from_sysfs(path) {
+                Some(descriptor) => descriptor,
+                None => {
+                    tried.push(format!("{shown}: no report descriptor"));
+                    continue;
+                }
+            },
+        };
+        let map = match map_leds(&descriptor) {
+            Ok(map) => map,
+            Err(error) => {
+                tried.push(format!("{shown}: {error}"));
+                continue;
+            }
+        };
+        if map.off_hook.is_none() {
+            tried.push(format!("{shown}: no off-hook led"));
+            continue;
+        }
+        let product = info.product_string().unwrap_or("Jabra").trim().to_string();
+        return Ok(TelephonyLeds {
+            device,
+            map,
+            product,
+        });
+    }
+    if tried.is_empty() {
+        bail!("no Jabra usb hid device present (vendor {JABRA_VENDOR_ID:#06x})");
+    }
+    bail!("no Jabra telephony led interface: {}", tried.join("; "))
 }
 
 #[cfg(test)]
@@ -200,5 +320,47 @@ mod tests {
             0xC0, // End Collection
         ];
         assert_eq!(map_leds(WRONG_PAGE_SAME_ID).unwrap(), LedMap::default());
+    }
+
+    #[test]
+    fn composed_reports_round_trip_through_the_descriptor() {
+        let parsed = ReportDescriptor::try_from(SYNTHETIC_TELEPHONY_DESCRIPTOR).unwrap();
+        let map = map_leds(SYNTHETIC_TELEPHONY_DESCRIPTOR).unwrap();
+        let buffers = compose(&map, true, false, true);
+        assert_eq!(buffers.len(), 1, "all three leds live in one report");
+        let buffer = &buffers[0];
+        assert_eq!(buffer[0], 2, "hidapi wants the report id first");
+        assert_eq!(buffer.len(), 2);
+        // Read the buffer back through hidreport itself: pins the bit-index
+        // convention without hardcoding it.
+        let report = parsed.find_output_report(buffer).expect("report 2");
+        let mut lit = std::collections::HashMap::new();
+        for field in report.fields() {
+            if let Field::Variable(var) = field {
+                let value: u32 = var.extract(buffer).unwrap().into();
+                lit.insert(u16::from(var.usage.usage_id), value);
+            }
+        }
+        assert_eq!(lit[&USAGE_OFF_HOOK], 1);
+        assert_eq!(lit[&USAGE_RING], 0);
+        assert_eq!(lit[&USAGE_MUTE], 1);
+    }
+
+    #[test]
+    fn clearing_writes_the_report_as_zeros() {
+        let map = map_leds(SYNTHETIC_TELEPHONY_DESCRIPTOR).unwrap();
+        let buffers = compose(&map, false, false, false);
+        assert_eq!(
+            buffers.len(),
+            1,
+            "a mapped report is written even all-clear"
+        );
+        assert_eq!(buffers[0][0], 2);
+        assert!(buffers[0][1..].iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn an_empty_map_composes_no_writes() {
+        assert!(compose(&LedMap::default(), true, true, true).is_empty());
     }
 }

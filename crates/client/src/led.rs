@@ -39,6 +39,12 @@ impl Indication {
     }
 }
 
+/// One write of the three LED bits to whatever renders them. Split from the
+/// device so the driver task is testable without hardware.
+pub trait LedSink: Send {
+    fn set(&mut self, off_hook: bool, ring: bool, mute: bool) -> anyhow::Result<()>;
+}
+
 /// Where the current turn stands, from the events socket.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Turn {
