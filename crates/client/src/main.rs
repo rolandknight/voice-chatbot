@@ -42,7 +42,7 @@ enum Command {
     Devices,
 
     /// Probe the speakerphone's LEDs: open the Jabra telephony interface and
-    /// cycle off -> listening -> thinking -> muted -> off.
+    /// cycle off -> listening/thinking (green) -> muted -> off.
     LedTest,
 
     /// Start a full-duplex audio call.
@@ -79,7 +79,7 @@ enum Command {
         wake_threshold: f32,
 
         /// Silence (seconds) that ends a wake session.
-        #[arg(long, env = "WAKE_SESSION_SECS", default_value_t = 15.0)]
+        #[arg(long, env = "WAKE_SESSION_SECS", default_value_t = 5.0)]
         wake_session_secs: f32,
 
         /// Show chatbot activity on the speakerphone's LED ring.
@@ -180,15 +180,13 @@ fn led_test() -> Result<()> {
     use voice_chatbot_client::led::LedSink;
     let mut leds = voice_chatbot_client::led::hid::open()?;
     println!("driving {}", leds.describe());
-    let steps: [(&str, (bool, bool, bool)); 5] = [
+    // The Ring usage is intentionally never driven: it double-beeps on the
+    // Speak2 40, so listening and thinking both show solid green.
+    let steps: [(&str, (bool, bool, bool)); 4] = [
         ("off (asleep)", (false, false, false)),
         (
-            "listening: off-hook -- expect solid green",
+            "listening / thinking: off-hook -- expect solid green",
             (true, false, false),
-        ),
-        (
-            "thinking: off-hook + ring -- expect flashing green, and LISTEN: this must be silent",
-            (true, true, false),
         ),
         (
             "muted: off-hook + mute -- expect solid red",
@@ -613,7 +611,7 @@ mod tests {
                 assert_eq!(wake_dir, "models/wakeword", "wake is on by default");
                 assert!(!no_wake);
                 assert_eq!(wake_threshold, 0.5);
-                assert_eq!(wake_session_secs, 15.0);
+                assert_eq!(wake_session_secs, 5.0);
                 assert_eq!(led, LedMode::Auto);
             }
             _ => panic!("expected call command"),

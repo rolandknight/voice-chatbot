@@ -1,9 +1,9 @@
 # jabra-led — chatbot activity on the speakerphone's LED ring
 
 **Date:** 2026-09-01
-**Status:** Proposed. Protocol facts below are researched from public sources; the two
-items under [Open questions](#open-questions-verify-on-hardware) need one probe session
-with the device before the implementation is called done.
+**Status:** Implemented and hardware-verified on a Speak2 40 UC (`0b0e:ae6d`). The
+Ring/flashing-green "thinking" indicator was dropped because the device beeps when it is
+asserted — see the resolved [Open questions](#open-questions--resolved-on-hardware-2026-09-01-speak2-40-uc-0b0eae6d).
 **Implementation plan:** `docs/plans/jabra-led.md`
 
 ## Goal
@@ -77,8 +77,13 @@ renders it:
 |---|---|---|---|
 | Speaking | bot is speaking | off-hook | solid green |
 | Asleep | not awake | none | off |
-| Thinking | user turn ended / tool running, no bot speech yet | off-hook + ring | flashing green |
+| Thinking | user turn ended / tool running, no bot speech yet | off-hook | solid green |
 | Listening | otherwise | off-hook | solid green |
+
+The Ring usage (`0x18`, flashing green) was the intended Thinking indicator, but on
+the Speak2 40 asserting it double-beeps (hardware-verified — see Open questions), and
+the device renders no other silent animated state (its Hold/Microphone LED usages are
+inert), so Thinking falls back to solid green, the same as Listening.
 
 `muted` is an overlay: whenever set (and the phase is not Asleep), the Mute usage is
 also set → solid red. Turn-mute typically spans the bot's reply, so in that
@@ -157,18 +162,23 @@ variant); documented in `deploy/rpi/README.md`.
 - Server-commanded outputs (SENS-2 proper) — this is client-derived only.
 - A device selector for multiple simultaneous Jabras (first match wins).
 
-## Open questions (verify on hardware)
+## Open questions — resolved on hardware (2026-09-01, Speak2 40 UC, `0b0e:ae6d`)
 
-1. **Ring silence.** The audible ringer is a separate usage (`0x9E`), so setting only
-   the Ring LED usage should flash silently — confirmed nowhere in public sources.
-   If the device rings audibly, Thinking falls back to off-hook only (solid green,
-   same as Listening).
-2. **Off-hook side effects on audio.** Holding off-hook puts the device in "in call"
-   state; verify capture/playback behave identically (no call-start chime, no DSP
-   change) with LEDs driven vs. `LED=off`.
-3. **Actual descriptor layout** of the Speak2 40's telephony collection (report IDs,
-   which optional usages exist). Dump `/sys/class/hidraw/hidrawN/device/report_descriptor`
-   on the Pi and archive it in `docs/research/`.
+1. **Ring silence — NO, it beeps.** Asserting the Ring LED usage (`0x18`) makes the
+   device play a double beep, even though the audible ringer (`0x9E`) is never set. The
+   ring is the device's only animated state, so there is no silent flashing option:
+   Thinking now uses off-hook only (solid green, same as Listening), and the client
+   never asserts Ring. Probed with raw output reports; Hold (`0x20`) and Microphone
+   (`0x21`) are exposed in the descriptor but inert on this device (no distinct ring
+   visual), so they cannot serve as a silent Thinking indicator either.
+2. **Off-hook side effects on audio — none observed.** Full wake→listen→tool→reply
+   turns ran with LEDs driven and behaved identically to `LED=off`: no call-start
+   chime, no audible DSP change, capture and playback unaffected.
+3. **Descriptor layout — captured.** Telephony collection is Report ID 2, one data
+   byte: bit0 off-hook (`0x17`), bit1 mute (`0x09`), bit2 ring (`0x18`), bit3 hold
+   (`0x20`), bit4 microphone (`0x21`), bit5 ringer (`0x9E`). Only off-hook and mute
+   produce useful silent visuals (green / red); ring beeps; hold and microphone are
+   inert.
 
 ## Sources
 

@@ -2,8 +2,10 @@
 //!
 //! Three inputs the client already has — wake state, turn events, the
 //! server's turn-mute — fold into one [`Phase`], rendered as the standard
-//! HID telephony LEDs: off-hook (solid green), +ring (flashing green),
-//! +mute (solid red). Asleep is dark; a bot speaking outranks asleep so
+//! HID telephony LEDs: off-hook (solid green) while awake, +mute (solid
+//! red) when the mic is gated. The Ring usage (flashing green) is left
+//! unused — on the Speak2 40 it double-beeps — so Thinking shows solid
+//! green like Listening. Asleep is dark; a bot speaking outranks asleep so
 //! out-of-session audio (timer alarms) lights the ring while it plays.
 //! Dropping every [`LedController`] clone clears the ring, unless a write
 //! already failed — a gone device cannot be cleared.
@@ -15,9 +17,9 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 use voice_chatbot_protocol::WakeState;
 
-/// What the ring shows. Speaking and Listening render the same today (solid
-/// green); they stay distinct because the derivation differs and a later
-/// device may render them differently.
+/// What the ring shows. Listening, Thinking and Speaking all render solid
+/// green today; they stay distinct phases because the derivation differs and
+/// a later (silent-ring) device may render them differently.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
     Asleep,
@@ -37,7 +39,9 @@ impl Indication {
     /// The telephony LED usages to set: (off-hook, ring, mute).
     pub fn bits(self) -> (bool, bool, bool) {
         let off_hook = self.phase != Phase::Asleep;
-        let ring = self.phase == Phase::Thinking;
+        // The Ring usage is audible on the Speak2 40 (a double beep on assert),
+        // so it is never set; Thinking renders solid green, same as Listening.
+        let ring = false;
         let mute = self.muted && off_hook;
         (off_hook, ring, mute)
     }
@@ -226,7 +230,10 @@ mod tests {
         let show = |phase, muted| Indication { phase, muted }.bits();
         assert_eq!(show(Phase::Asleep, false), (false, false, false));
         assert_eq!(show(Phase::Listening, false), (true, false, false));
-        assert_eq!(show(Phase::Thinking, false), (true, true, false));
+        // Thinking renders solid green, same as listening: the Ring usage is
+        // audible on the Speak2 40 (a double beep), so it is never asserted.
+        assert_eq!(show(Phase::Thinking, false), (true, false, false));
+        assert_eq!(show(Phase::Thinking, true), (true, false, true));
         assert_eq!(show(Phase::Speaking, false), (true, false, false));
         assert_eq!(show(Phase::Speaking, true), (true, false, true));
         assert_eq!(
