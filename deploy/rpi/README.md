@@ -63,7 +63,7 @@ it plays on the client's own librespot endpoint, which is a separate service.
 never overwritten afterwards. It is *not* a copy of the repo-root `.env`: that
 one holds the server's API keys, which have no business on a satellite. The
 client reads `SERVER_URL`, `INPUT_DEVICE`, `OUTPUT_DEVICE`, `WAKE_DIR`,
-`NO_WAKE`, `WAKE_THRESHOLD`, `WAKE_SESSION_SECS` and `LOG_LEVEL`.
+`NO_WAKE`, `WAKE_THRESHOLD`, `WAKE_SESSION_SECS`, `LED` and `LOG_LEVEL`.
 
 These names lost their `FLOWCAT_` prefix, and the client now *refuses to start*
 with any `FLOWCAT_*` still set rather than silently running on the defaults.
@@ -72,6 +72,19 @@ filename attached instead of in a 5-second restart loop.
 
 `/etc/default/voice-chatbot-client` is read after `.env` as an optional ops
 override; the unit tolerates it being absent.
+
+## Speakerphone LEDs
+
+The client shows chatbot activity on the Jabra's LED ring: dark when asleep,
+solid green when listening, flashing green while thinking, red while the mic
+is gated. This rides the speakerphone's standard telephony HID interface
+(docs/specs/jabra-led.md), not the audio path, and needs `/dev/hidraw*`
+access: install.sh ships a udev rule opening Jabra hidraw nodes to the
+`audio` group the service already runs in. `LED=off` in `.env` disables it;
+`voice-chatbot-client led-test` (with the service stopped) cycles the states
+for a look. Running the client by hand on a dev machine needs the same
+access: run `sudo deploy/jabra-setup.sh` once (installs a desktop-friendly
+`uaccess` + `audio`-group udev rule).
 
 ## Trimming boot time
 

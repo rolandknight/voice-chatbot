@@ -17,6 +17,7 @@ pub async fn run(
     mut media: Option<MediaPlayer>,
     mut outbound: tokio::sync::mpsc::UnboundedReceiver<String>,
     activity: crate::wake::Activity,
+    led: Option<crate::led::LedController>,
 ) {
     let (mut socket, _) = match tokio_tungstenite::connect_async(url.as_str()).await {
         Ok(connection) => connection,
@@ -55,6 +56,9 @@ pub async fn run(
                 match message {
                     Some(Ok(Message::Text(text))) => {
                         note_activity(&activity, &text);
+                        if let Some(led) = &led {
+                            led.on_event(&text);
+                        }
                         match render(&text) {
                             Ok(Some(line)) => println!("{line}"),
                             Ok(None) => {}

@@ -1,0 +1,5 @@
+# Jabra (GN Audio) HID interfaces: the client drives the speakerphone's
+# telephony LEDs over hidraw (docs/specs/jabra-led.md), and hidraw nodes are
+# root-only by default. The service user is already in the audio group for
+# /dev/snd, so the same group carries the speakerphone's other device node.
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b0e", MODE="0660", GROUP="audio"

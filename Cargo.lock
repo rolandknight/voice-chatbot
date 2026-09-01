@@ -479,6 +479,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
+name = "basic-udev"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a45f9771ced8a774de5e5ebffbe520f52e3943bf5a9a6baa3a5d14a5de1afe6"
+
+[[package]]
 name = "bindgen"
 version = "0.72.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1896,6 +1902,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "hidapi"
+version = "2.6.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "818c0e1d27887aaf76fe737042e27a66b796a7b099e6d2e1a72d106c2dff3fa6"
+dependencies = [
+ "basic-udev",
+ "cc",
+ "cfg-if",
+ "libc",
+ "nix",
+ "pkg-config",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "hidreport"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6bba4f2ebef8032ef0125a72c7052481c9d63e50f1d48d35c0933ae11aa58c6d"
+dependencies = [
+ "hut",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "hmac-sha256"
 version = "1.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1957,6 +1988,12 @@ name = "httpdate"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
+
+[[package]]
+name = "hut"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c882ba3379c41a5713a111ea16bddf8d337c439630db6ec5f7ece7d1e7e29c5c"
 
 [[package]]
 name = "hybrid-array"
@@ -2664,6 +2701,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ee6cda3051665f1fb8d9e08fc35c96d5a244fb1be711a03b71118828afc9a873"
 dependencies = [
  "jni-sys 0.3.1",
+]
+
+[[package]]
+name = "nix"
+version = "0.30.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "74523f3a35e05aba87a1d978330aef40f67b0304ac79c1c00b294c9830543db6"
+dependencies = [
+ "bitflags 2.13.1",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
 ]
 
 [[package]]
@@ -5114,6 +5163,8 @@ dependencies = [
  "clap 4.6.6",
  "cpal",
  "futures",
+ "hidapi",
+ "hidreport",
  "pretty_assertions",
  "reqwest",
  "rubato 4.0.0",
