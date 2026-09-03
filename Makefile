@@ -26,13 +26,21 @@ PI_TOOLCHAIN ?= 1.97.1
 # invalidate the other's artifacts.
 PI_TARGET_DIR ?= target/pi
 PI_CLIENT_BIN := $(PI_TARGET_DIR)/$(PI_TARGET)/release/voice-chatbot-client
-# Deploying that binary to the Pi: `make deploy-pi PI_HOST=pi@raspberrypi.local`.
+# Deploying that binary to the Pi: `make deploy-pi PI_HOST=pi@raspberrypi.local`,
+# or set PI_HOST in .env (read below via env_get, like SERVER_URL); a
+# command-line PI_HOST=... still wins.
 # PI_STAGE is relative to the Pi user's home -- rsync lands there unprivileged,
 # and only the installer it runs needs sudo.
-PI_HOST ?=
+PI_HOST ?= $(call env_get,PI_HOST)
 PI_DIR ?= /opt/voice-chatbot
 PI_STAGE ?= .cache/voice-chatbot-deploy
 PI_SERVICE ?= voice-chatbot-client
+# One authenticated SSH connection, shared by every deploy-pi step (checks,
+# rsyncs, and the single privileged install) via ControlMaster multiplexing:
+# you authenticate once, and the lone `sudo` on the install is then the only
+# password the deploy itself asks for. %C keeps the control-socket path short.
+# With key-based SSH auth the whole deploy is a single prompt (that sudo).
+PI_SSH := ssh -o ControlMaster=auto -o ControlPath=$(HOME)/.ssh/cm-%C -o ControlPersist=120
 PI_CROSS_ENV := CARGO_HOME=$(HOME)/.cargo RUSTUP_HOME=$(HOME)/.rustup \
     PATH=$(HOME)/.cargo/bin:$$PATH CARGO_TARGET_DIR=$(PI_TARGET_DIR) \
     PKG_CONFIG_ALLOW_CROSS=1 PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig
@@ -89,15 +97,16 @@ client-build-pi:  ## Cross-build the client for a Raspberry Pi (aarch64; needs D
 	@file $(PI_CLIENT_BIN) 2>/dev/null || true
 
 deploy-pi: client-build-pi  ## Ship the cross-built client to a Pi and install the autostart service (PI_HOST=pi@host)
-	@[ -n "$(PI_HOST)" ] || { echo "set PI_HOST, e.g. make deploy-pi PI_HOST=pi@raspberrypi.local"; exit 1; }
-	@ssh $(PI_HOST) 'command -v rsync >/dev/null' || { echo "the Pi has no rsync (sudo apt install rsync)"; exit 1; }
-	ssh $(PI_HOST) 'mkdir -p $(PI_STAGE)/models/wakeword'
-	rsync -az $(PI_CLIENT_BIN) $(PI_HOST):$(PI_STAGE)/voice-chatbot-client
-	rsync -az deploy/rpi/ $(PI_HOST):$(PI_STAGE)/
-	rsync -az --delete --include='hey_*.onnx' --exclude='*' \
+	@[ -n "$(PI_HOST)" ] || { echo "set PI_HOST, e.g. make deploy-pi PI_HOST=pi@raspberrypi.local (or set it in .env)"; exit 1; }
+	@$(PI_SSH) $(PI_HOST) 'command -v rsync >/dev/null' || { echo "the Pi has no rsync (sudo apt install rsync)"; exit 1; }
+	$(PI_SSH) $(PI_HOST) 'mkdir -p $(PI_STAGE)/models/wakeword'
+	rsync -az -e "$(PI_SSH)" $(PI_CLIENT_BIN) $(PI_HOST):$(PI_STAGE)/voice-chatbot-client
+	rsync -az -e "$(PI_SSH)" deploy/rpi/ $(PI_HOST):$(PI_STAGE)/
+	rsync -az -e "$(PI_SSH)" --delete --include='hey_*.onnx' --exclude='*' \
 	    models/wakeword/ $(PI_HOST):$(PI_STAGE)/models/wakeword/
-	ssh -t $(PI_HOST) 'sudo env INSTALL_DIR=$(PI_DIR) SERVICE_NAME=$(PI_SERVICE) \
+	$(PI_SSH) -t $(PI_HOST) 'sudo env INSTALL_DIR=$(PI_DIR) SERVICE_NAME=$(PI_SERVICE) \
 	    "$$HOME/$(PI_STAGE)/install.sh"'
+	@$(PI_SSH) -O exit $(PI_HOST) 2>/dev/null || true
 
 server: server-build  ## Build if needed, then run the server (reads .env)
 	./$(SERVER_BIN)
