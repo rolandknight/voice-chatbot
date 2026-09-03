@@ -5,6 +5,9 @@
 Ring/flashing-green "thinking" indicator was dropped because the device beeps when it is
 asserted — see the resolved [Open questions](#open-questions--resolved-on-hardware-2026-09-01-speak2-40-uc-0b0eae6d).
 **Implementation plan:** `docs/plans/jabra-led.md`
+**Since 2026-09-03:** the WS2812 strip (ADR-0008) shares this phase tracker as a second
+sink, with its own rendering per phase and an `Offline` phase the call loop sets between
+sessions; see the ADR's "Vocabulary" section.
 
 ## Goal
 

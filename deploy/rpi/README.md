@@ -63,7 +63,9 @@ it plays on the client's own librespot endpoint, which is a separate service.
 never overwritten afterwards. It is *not* a copy of the repo-root `.env`: that
 one holds the server's API keys, which have no business on a satellite. The
 client reads `SERVER_URL`, `INPUT_DEVICE`, `OUTPUT_DEVICE`, `WAKE_DIR`,
-`NO_WAKE`, `WAKE_THRESHOLD`, `WAKE_SESSION_SECS`, `LED` and `LOG_LEVEL`.
+`NO_WAKE`, `WAKE_THRESHOLD`, `WAKE_SESSION_SECS`, `LED`, `LED_STRIP`,
+`LED_STRIP_COUNT`, `LED_STRIP_BRIGHTNESS`, `LED_STRIP_IDLE_BRIGHTNESS` and
+`LOG_LEVEL`.
 
 These names lost their `FLOWCAT_` prefix, and the client now *refuses to start*
 with any `FLOWCAT_*` still set rather than silently running on the defaults.
@@ -85,6 +87,33 @@ access: install.sh ships a udev rule opening Jabra hidraw nodes to the
 for a look. Running the client by hand on a dev machine needs the same
 access: run `sudo deploy/jabra-setup.sh` once (installs a desktop-friendly
 `uaccess` + `audio`-group udev rule).
+
+## LED strip
+
+A WS2812B strip on the header (5 V, GND, data on pin 19 = GPIO 10, SPI0 MOSI)
+shows what the bot is doing (docs/adr/0008-ws2812-strip-over-spi.md,
+"Vocabulary"):
+
+| The bot is | The strip shows |
+|---|---|
+| asleep, waiting for the wake word | one dim green pixel sweeping slowly end to end |
+| listening | every LED dim green |
+| thinking | the Larson scanner, a new colour each pass |
+| speaking | a soft warm glow |
+| any of those with the mic gated by the server | both end pixels red, on top |
+| without a server (unreachable, or the connection dropped) | one amber pixel blinking slowly |
+| stopped | dark |
+
+The unit's `SupplementaryGroups=audio spi` covers `/dev/spidev0.0`;
+`install.sh` turns SPI on in `config.txt`, which takes a reboot the first time
+(it says so at the end, and never applies it live: that hung a Pi 5).
+`LED_STRIP=off` in `.env` disables it; `LED_STRIP_COUNT` fits it to the strip,
+`LED_STRIP_BRIGHTNESS` sets the level for thinking, speaking and the mute
+overlay, and `LED_STRIP_IDLE_BRIGHTNESS` the much lower level for the states
+that last hours (asleep, listening, offline). `voice-chatbot-client led-test`
+(with the service stopped) walks the ring and the strip through every state.
+Wiring, the standalone demo, and why it is SPI rather than the guide's
+GPIO 18: `crates/ws2812/README.md`.
 
 ## Trimming boot time
 

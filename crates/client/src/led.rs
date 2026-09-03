@@ -7,25 +7,36 @@
 //! unused — on the Speak2 40 it double-beeps — so Thinking shows solid
 //! green like Listening. Asleep is dark; a bot speaking outranks asleep so
 //! out-of-session audio (timer alarms) lights the ring while it plays.
-//! Dropping every [`LedController`] clone clears the ring, unless a write
-//! already failed — a gone device cannot be cleared.
+//! The same [`Indication`] feeds every [`LedSink`] a session has — the ring,
+//! and the WS2812 strip with its own vocabulary (ADR-0008). Dropping every
+//! [`LedController`] clone puts them all to rest (asleep), except a sink
+//! whose write already failed: a gone device cannot be cleared. [`Phase::Offline`]
+//! is the one phase the tracker never produces: the call loop sets it on the
+//! strip between sessions, when there is no server to have a phase with.
 
 pub mod hid;
+pub mod strip;
 
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 use voice_chatbot_protocol::WakeState;
 
-/// What the ring shows. Listening, Thinking and Speaking all render solid
-/// green today; they stay distinct phases because the derivation differs and
-/// a later (silent-ring) device may render them differently.
+/// What the LEDs show. On the ring, Listening, Thinking and Speaking all
+/// render solid green; the strip tells them apart (led/strip.rs).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
+    /// Armed, waiting for the wake word (wake mode only).
     Asleep,
+    /// Awake: audio streams to the server.
     Listening,
+    /// The user's turn is in; the server is working on it.
     Thinking,
+    /// The bot's audio is playing.
     Speaking,
+    /// No server: unreachable, or the connection dropped. Between sessions
+    /// only, set by the call loop rather than the tracker.
+    Offline,
 }
 
 /// A phase plus the server's turn-mute overlay: everything one LED write needs.
@@ -38,7 +49,10 @@ pub struct Indication {
 impl Indication {
     /// The telephony LED usages to set: (off-hook, ring, mute).
     pub fn bits(self) -> (bool, bool, bool) {
-        let off_hook = self.phase != Phase::Asleep;
+        let off_hook = matches!(
+            self.phase,
+            Phase::Listening | Phase::Thinking | Phase::Speaking
+        );
         // The Ring usage is audible on the Speak2 40 (a double beep on assert),
         // so it is never set; Thinking renders solid green, same as Listening.
         let ring = false;
@@ -47,10 +61,11 @@ impl Indication {
     }
 }
 
-/// One write of the three LED bits to whatever renders them. Split from the
-/// device so the driver task is testable without hardware.
+/// Something that shows an [`Indication`]: the ring writes its three LED
+/// bits, the strip picks an animation. Split from the devices so the driver
+/// task is testable without hardware.
 pub trait LedSink: Send {
-    fn set(&mut self, off_hook: bool, ring: bool, mute: bool) -> anyhow::Result<()>;
+    fn set(&mut self, indication: Indication) -> anyhow::Result<()>;
 }
 
 /// Where the current turn stands, from the events socket.
@@ -62,11 +77,11 @@ enum Turn {
 }
 
 /// Clonable handle the events and wake tasks feed. A driver task owns the
-/// sink; state changes coalesce through a watch channel, so a burst of
-/// events costs at most one write per settled state. Dropping every clone
-/// clears the ring and ends the driver (its JoinHandle resolves after the
-/// clear, so a session can bound its teardown) — unless a write already
-/// failed, since a gone device cannot be cleared.
+/// sinks; state changes coalesce through a watch channel, so a burst of
+/// events costs at most one write per sink per settled state. Dropping every
+/// clone clears the sinks and ends the driver (its JoinHandle resolves after
+/// the clear, so a session can bound its teardown). A sink whose write fails
+/// is dropped for the session, since a gone device cannot be cleared either.
 #[derive(Clone)]
 pub struct LedController(Arc<Mutex<Shared>>);
 
@@ -77,12 +92,12 @@ struct Shared {
 
 impl LedController {
     pub fn start(
-        sink: Box<dyn LedSink>,
+        sinks: Vec<Box<dyn LedSink>>,
         awake_at_start: bool,
     ) -> (Self, tokio::task::JoinHandle<()>) {
         let tracker = PhaseTracker::new(awake_at_start);
         let (seen, changes) = watch::channel(tracker.indication());
-        let driver = tokio::spawn(drive(sink, changes));
+        let driver = tokio::spawn(drive(sinks, changes));
         (Self(Arc::new(Mutex::new(Shared { tracker, seen }))), driver)
     }
 
@@ -111,26 +126,18 @@ impl LedController {
     }
 }
 
-/// Write every settled state change; on channel close (all handles gone,
-/// i.e. the session ended) leave the ring dark. hidraw writes are small but
-/// still syscalls against a device node, so they run on the blocking pool.
-async fn drive(mut sink: Box<dyn LedSink>, mut changes: watch::Receiver<Indication>) {
+/// Write every settled state change to every sink; on channel close (all
+/// handles gone, i.e. the session ended) leave them dark. The writes are
+/// small syscalls against device nodes, so they run on the blocking pool.
+async fn drive(mut sinks: Vec<Box<dyn LedSink>>, mut changes: watch::Receiver<Indication>) {
     let mut shown: Option<Indication> = None;
     loop {
         let wanted = *changes.borrow_and_update();
         if shown != Some(wanted) {
-            let (off_hook, ring, mute) = wanted.bits();
-            let (returned, result) = tokio::task::spawn_blocking(move || {
-                let result = sink.set(off_hook, ring, mute);
-                (sink, result)
-            })
-            .await
-            .expect("led sink panicked");
-            sink = returned;
-            if let Err(error) = result {
-                // Unplugging the speakerphone ends the audio session too;
-                // the next session re-opens the device. Just go dark.
-                tracing::debug!(%error, "led write failed; no leds for this session");
+            sinks = tokio::task::spawn_blocking(move || write_all(sinks, wanted))
+                .await
+                .expect("led sink panicked");
+            if sinks.is_empty() {
                 return;
             }
             shown = Some(wanted);
@@ -139,7 +146,30 @@ async fn drive(mut sink: Box<dyn LedSink>, mut changes: watch::Receiver<Indicati
             break;
         }
     }
-    let _ = tokio::task::spawn_blocking(move || sink.set(false, false, false)).await;
+    // Asleep is the resting state: dark on the ring, the idle sweep on the
+    // strip (whose owner shows Offline instead if the server went away).
+    let rest = Indication {
+        phase: Phase::Asleep,
+        muted: false,
+    };
+    // The sinks are dropped on the blocking pool too, in case one blocks.
+    let _ = tokio::task::spawn_blocking(move || drop(write_all(sinks, rest))).await;
+}
+
+/// Show `wanted` on every sink, keeping the ones that succeeded. Unplugging
+/// the speakerphone ends the audio session too, and the next session
+/// re-opens the device; a failed sink just goes dark until then.
+fn write_all(sinks: Vec<Box<dyn LedSink>>, wanted: Indication) -> Vec<Box<dyn LedSink>> {
+    sinks
+        .into_iter()
+        .filter_map(|mut sink| match sink.set(wanted) {
+            Ok(()) => Some(sink),
+            Err(error) => {
+                tracing::debug!(%error, "led write failed; no more writes to that device this session");
+                None
+            }
+        })
+        .collect()
 }
 
 /// Folds wake state, turn events and turn-mute into the shown [`Indication`].
@@ -240,6 +270,11 @@ mod tests {
             show(Phase::Asleep, true),
             (false, false, false),
             "mute never shows on a dark ring"
+        );
+        assert_eq!(
+            show(Phase::Offline, false),
+            (false, false, false),
+            "no server: the ring is dark"
         );
     }
 
@@ -354,39 +389,111 @@ mod tests {
         assert!(tracker.on_event("media", &json!({})).is_none());
     }
 
-    struct RecordingSink(std::sync::mpsc::Sender<(bool, bool, bool)>);
+    /// Records what it is asked to show, tagged with its id; can be told to
+    /// fail from a given write on, like a device that was unplugged.
+    struct RecordingSink {
+        id: usize,
+        sent: std::sync::mpsc::Sender<(usize, Indication)>,
+        fail_from_write: Option<usize>,
+        writes: usize,
+    }
+
+    impl RecordingSink {
+        fn new(id: usize, sent: &std::sync::mpsc::Sender<(usize, Indication)>) -> Self {
+            Self {
+                id,
+                sent: sent.clone(),
+                fail_from_write: None,
+                writes: 0,
+            }
+        }
+    }
 
     impl LedSink for RecordingSink {
-        fn set(&mut self, off_hook: bool, ring: bool, mute: bool) -> anyhow::Result<()> {
-            self.0.send((off_hook, ring, mute)).unwrap();
+        fn set(&mut self, indication: Indication) -> anyhow::Result<()> {
+            self.writes += 1;
+            if self.fail_from_write.is_some_and(|n| self.writes >= n) {
+                anyhow::bail!("device gone");
+            }
+            self.sent.send((self.id, indication)).unwrap();
             Ok(())
         }
     }
 
+    const DARK: Indication = Indication {
+        phase: Phase::Asleep,
+        muted: false,
+    };
+    const SPEAKING: Indication = Indication {
+        phase: Phase::Speaking,
+        muted: false,
+    };
+
     #[tokio::test(flavor = "multi_thread")]
     async fn controller_writes_changes_and_clears_on_drop() {
         let timeout = std::time::Duration::from_secs(5);
-        let (sink_tx, written) = std::sync::mpsc::channel();
-        let (led, done) = LedController::start(Box::new(RecordingSink(sink_tx)), false);
+        let (sent, written) = std::sync::mpsc::channel();
+        let sink: Box<dyn LedSink> = Box::new(RecordingSink::new(0, &sent));
+        let (led, done) = LedController::start(vec![sink], false);
         assert_eq!(
             written.recv_timeout(timeout).unwrap(),
-            (false, false, false),
+            (0, DARK),
             "the starting state is written, clearing a crashed predecessor's leds"
         );
         led.on_event(r#"{"type":"rtf-bot-started-speaking","payload":{}}"#);
-        assert_eq!(written.recv_timeout(timeout).unwrap(), (true, false, false));
+        assert_eq!(written.recv_timeout(timeout).unwrap(), (0, SPEAKING));
         led.on_event(r#"{"type":"rtf-bot-text","payload":{"text":"hi"}}"#);
         led.on_event("not json at all");
         drop(led);
         assert_eq!(
             written.recv_timeout(timeout).unwrap(),
-            (false, false, false),
-            "dropping the last handle darkens the ring"
+            (0, DARK),
+            "dropping the last handle darkens the leds"
         );
         done.await.unwrap();
         assert!(
             written.try_recv().is_err(),
             "no write happened for the no-change events"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn controller_fans_out_to_every_sink_and_drops_one_that_fails() {
+        let timeout = std::time::Duration::from_secs(5);
+        let (sent, written) = std::sync::mpsc::channel();
+        let ring = RecordingSink::new(0, &sent);
+        let mut strip = RecordingSink::new(1, &sent);
+        strip.fail_from_write = Some(2);
+        let sinks: Vec<Box<dyn LedSink>> = vec![Box::new(ring), Box::new(strip)];
+        let (led, done) = LedController::start(sinks, true);
+        let mut first = [
+            written.recv_timeout(timeout).unwrap(),
+            written.recv_timeout(timeout).unwrap(),
+        ];
+        first.sort_by_key(|(id, _)| *id);
+        let listening = Indication {
+            phase: Phase::Listening,
+            muted: false,
+        };
+        assert_eq!(
+            first,
+            [(0, listening), (1, listening)],
+            "both sinks get the start state"
+        );
+        led.on_event(r#"{"type":"rtf-bot-started-speaking","payload":{}}"#);
+        assert_eq!(
+            written.recv_timeout(timeout).unwrap(),
+            (0, SPEAKING),
+            "the ring still gets the change after the strip failed"
+        );
+        led.on_event(r#"{"type":"rtf-bot-stopped-speaking","payload":{}}"#);
+        assert_eq!(written.recv_timeout(timeout).unwrap(), (0, listening));
+        drop(led);
+        assert_eq!(written.recv_timeout(timeout).unwrap(), (0, DARK));
+        done.await.unwrap();
+        assert!(
+            written.try_recv().is_err(),
+            "the failed sink is never written again, not even the clear"
         );
     }
 }

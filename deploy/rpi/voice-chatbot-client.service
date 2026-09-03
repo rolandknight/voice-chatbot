@@ -13,8 +13,9 @@ User=@RUN_USER@
 # cpal drives ALSA directly and prefers the raw `plughw:` PCM (alias_rank in
 # crates/client/src/audio.rs), never PulseAudio or PipeWire. So there is no
 # user session to wait for and nothing to inherit but /dev/snd access, which
-# is the whole reason this is a system unit rather than a --user one.
-SupplementaryGroups=audio
+# is the whole reason this is a system unit rather than a --user one. spi is
+# for the WS2812 strip's /dev/spidev0.0 (ADR-0008); Pi OS creates the group.
+SupplementaryGroups=audio spi
 NoNewPrivileges=yes
 
 # Both runtime paths are relative to the working directory: the client loads

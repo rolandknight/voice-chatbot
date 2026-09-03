@@ -67,13 +67,15 @@ echo "  as user: $RUN_USER"
 command -v ffmpeg >/dev/null 2>&1 \
     || echo "WARNING: ffmpeg is not installed; radio, shows and sound effects will not play (apt install ffmpeg)" >&2
 
-# The unit grants the service /dev/snd and the Jabra hidraw node (LEDs) through
-# SupplementaryGroups=audio, so it does not need this. This is for running the
-# client -- or led-test -- by hand over ssh.
-if ! id -nG "$RUN_USER" | tr ' ' '\n' | grep -qx audio; then
-    echo "  adding $RUN_USER to the audio group (for manual runs; the unit grants it anyway)"
-    usermod -aG audio "$RUN_USER"
-fi
+# The unit grants the service /dev/snd, the Jabra hidraw node (LEDs) and the
+# LED strip's spidev node through SupplementaryGroups=audio spi, so it does not
+# need these. They are for running the client -- or led-test -- by hand over ssh.
+for group in audio spi; do
+    if getent group "$group" >/dev/null && ! id -nG "$RUN_USER" | tr ' ' '\n' | grep -qx "$group"; then
+        echo "  adding $RUN_USER to the $group group (for manual runs; the unit grants it anyway)"
+        usermod -aG "$group" "$RUN_USER"
+    fi
+done
 
 # A running service holds the binary open: replacing it in place is ETXTBSY.
 WAS_ACTIVE=0
@@ -130,6 +132,30 @@ else
          "a reboot or replug applies the rule if it was written)" >&2
 fi
 
+# LED strip (ADR-0008): the client drives a WS2812 strip on SPI0, so SPI has
+# to be on. Only config.txt is edited -- never `dtparam spi=on` live, which
+# hung a Pi 5 -- so a first enable takes effect at the next reboot, announced
+# at the end. Non-fatal like the Jabra rule: without SPI the client runs, just
+# without the strip.
+SPI_NEEDS_REBOOT=0
+if [ ! -e /dev/spidev0.0 ]; then
+    CONFIG_TXT=/boot/firmware/config.txt
+    [ -f "$CONFIG_TXT" ] || CONFIG_TXT=/boot/config.txt
+    if [ ! -f "$CONFIG_TXT" ]; then
+        echo "  no config.txt found; SPI for the LED strip was not enabled" >&2
+    else
+        if grep -qE '^dtparam=spi=on' "$CONFIG_TXT"; then
+            :
+        elif grep -qE '^#?dtparam=spi=' "$CONFIG_TXT"; then
+            sed -i -E 's/^#?dtparam=spi=.*/dtparam=spi=on/' "$CONFIG_TXT"
+        else
+            printf 'dtparam=spi=on\n' >> "$CONFIG_TXT"
+        fi
+        SPI_NEEDS_REBOOT=1
+        echo "  SPI is on in $CONFIG_TXT for the LED strip; it takes effect after a reboot"
+    fi
+fi
+
 # Smoke test before enabling: catches a wrong-architecture binary, a missing
 # shared library and an unparsable .env, with the error in front of you rather
 # than in the journal of a service that restarts every 5 s.
@@ -156,3 +182,6 @@ echo "  journalctl -u $SERVICE_NAME -f       # follow it"
 echo "  sudo systemctl restart $SERVICE_NAME"
 echo "  sudo systemctl disable --now $SERVICE_NAME   # stop, and stop autostarting"
 echo "  \$EDITOR $INSTALL_DIR/.env            # then restart"
+if [ "$SPI_NEEDS_REBOOT" = 1 ]; then
+    echo "  sudo reboot                          # brings up /dev/spidev0.0 for the LED strip"
+fi

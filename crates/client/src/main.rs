@@ -1,12 +1,15 @@
+use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use reqwest::Client;
 use tokio::sync::watch;
 use tracing_subscriber::EnvFilter;
 use voice_chatbot_client::audio::{AudioDevices, AudioIoParts};
 use voice_chatbot_client::events;
+use voice_chatbot_client::led::strip::{Strip, StripConfig};
+use voice_chatbot_client::led::{hid, Indication, LedSink, Phase};
 use voice_chatbot_client::media::MediaPlayer;
 use voice_chatbot_client::peer::PendingPeer;
 use voice_chatbot_client::protocol::{exchange_offer, require_healthy, ServerEndpoints};
@@ -27,13 +30,131 @@ struct Cli {
     command: Command,
 }
 
-/// Whether to drive a speakerphone's LED ring (docs/specs/jabra-led.md).
+/// Whether to drive an LED device.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 enum LedMode {
-    /// Drive a Jabra's telephony LEDs when one is plugged in.
+    /// Drive it when it is present.
     Auto,
-    /// Never touch the LEDs.
+    /// Never touch it.
     Off,
+}
+
+/// The strip's spidev node: SPI0, MOSI on GPIO 10 (ADR-0008).
+const STRIP_DEVICE: &str = "/dev/spidev0.0";
+
+/// The LED devices a session drives: the speakerphone's ring
+/// (docs/specs/jabra-led.md) and the WS2812 strip (ADR-0008). Shared by
+/// `call` and `led-test`.
+#[derive(Debug, clap::Args)]
+struct LedArgs {
+    /// Show chatbot activity on the speakerphone's LED ring.
+    #[arg(long, env = "LED", value_enum, default_value_t = LedMode::Auto)]
+    led: LedMode,
+
+    /// Run a Larson scanner on a WS2812 strip (SPI0 MOSI, GPIO 10, header
+    /// pin 19) while the bot is thinking.
+    #[arg(long, env = "LED_STRIP", value_enum, default_value_t = LedMode::Auto)]
+    led_strip: LedMode,
+
+    /// LEDs on the strip (at least 2).
+    #[arg(long, env = "LED_STRIP_COUNT", default_value_t = 8)]
+    led_strip_count: usize,
+
+    /// Strip brightness, 0 to 1, for thinking, speaking and the mute
+    /// overlay. Full white on 8 LEDs draws 480 mA.
+    #[arg(long, env = "LED_STRIP_BRIGHTNESS", default_value_t = 0.2)]
+    led_strip_brightness: f32,
+
+    /// Strip brightness, 0 to 1, for asleep, listening and offline: the
+    /// states that last hours.
+    #[arg(long, env = "LED_STRIP_IDLE_BRIGHTNESS", default_value_t = 0.05)]
+    led_strip_idle_brightness: f32,
+}
+
+/// What the strip shows between sessions, when there is no server.
+const OFFLINE: Indication = Indication {
+    phase: Phase::Offline,
+    muted: false,
+};
+
+impl LedArgs {
+    /// The strip to open, or None when it is switched off.
+    fn strip_config(&self) -> Option<StripConfig> {
+        (self.led_strip == LedMode::Auto).then(|| StripConfig {
+            device: PathBuf::from(STRIP_DEVICE),
+            count: self.led_strip_count,
+            brightness: self.led_strip_brightness,
+            idle_brightness: self.led_strip_idle_brightness,
+        })
+    }
+
+    /// Reject settings the strip could not run with, before a session starts.
+    fn validate(&self) -> Result<()> {
+        if self.led_strip == LedMode::Off {
+            return Ok(());
+        }
+        if self.led_strip_count < 2 {
+            bail!("--led-strip-count must be at least 2: a scanner needs two LEDs");
+        }
+        if !(0.0..=1.0).contains(&self.led_strip_brightness) {
+            bail!("--led-strip-brightness must be within 0 and 1");
+        }
+        if !(0.0..=1.0).contains(&self.led_strip_idle_brightness) {
+            bail!("--led-strip-idle-brightness must be within 0 and 1");
+        }
+        Ok(())
+    }
+
+    /// Open the strip once for the whole call, if enabled and present.
+    /// Missing SPI or permissions degrade to running without it, like
+    /// ffmpeg; `describe` reports the outcome once, on the console.
+    fn open_strip(&self, describe: bool) -> Option<Strip> {
+        let config = self.strip_config()?;
+        match Strip::open(&config) {
+            Ok(strip) => {
+                if describe {
+                    eprintln!("leds:   {}", strip.describe());
+                }
+                Some(strip)
+            }
+            Err(error) => {
+                // Dev machines have no strip and never will; only nag when
+                // the node is there and still could not be used.
+                if describe && config.device.exists() {
+                    tracing::warn!(%error, "led strip present but unusable; running without");
+                } else if describe {
+                    tracing::debug!(%error, "no led strip; running without");
+                }
+                None
+            }
+        }
+    }
+
+    /// The sinks for one session: the speakerphone's ring, opened per
+    /// session because unplugging it ends the session too, and a handle on
+    /// the call-long strip.
+    fn session_sinks(&self, strip: Option<&Strip>, describe: bool) -> Vec<Box<dyn LedSink>> {
+        let mut sinks: Vec<Box<dyn LedSink>> = Vec::new();
+        if self.led == LedMode::Auto {
+            match hid::open() {
+                Ok(leds) => {
+                    if describe {
+                        eprintln!("leds:   {}", leds.describe());
+                    }
+                    sinks.push(Box::new(leds));
+                }
+                Err(error) => {
+                    if describe {
+                        tracing::warn!(%error, "no speakerphone leds; running without");
+                    }
+                }
+            }
+        }
+        if let Some(strip) = strip {
+            sinks.push(Box::new(strip.handle()));
+        }
+        sinks
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -41,9 +162,13 @@ enum Command {
     /// List available input and output devices.
     Devices,
 
-    /// Probe the speakerphone's LEDs: open the Jabra telephony interface and
-    /// cycle off -> listening/thinking (green) -> muted -> off.
-    LedTest,
+    /// Probe the LED devices: cycle off -> listening -> thinking -> muted ->
+    /// off on the speakerphone's ring and the WS2812 strip, whichever are
+    /// present.
+    LedTest {
+        #[command(flatten)]
+        leds: LedArgs,
+    },
 
     /// Start a full-duplex audio call.
     Call {
@@ -82,9 +207,8 @@ enum Command {
         #[arg(long, env = "WAKE_SESSION_SECS", default_value_t = 5.0)]
         wake_session_secs: f32,
 
-        /// Show chatbot activity on the speakerphone's LED ring.
-        #[arg(long, env = "LED", value_enum, default_value_t = LedMode::Auto)]
-        led: LedMode,
+        #[command(flatten)]
+        leds: LedArgs,
     },
 }
 
@@ -126,7 +250,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Devices => AudioDevices::new()?.print(),
-        Command::LedTest => led_test()?,
+        Command::LedTest { leds } => led_test(&leds)?,
         Command::Call {
             server_url,
             input_device,
@@ -135,8 +259,9 @@ async fn main() -> Result<()> {
             no_wake,
             wake_threshold,
             wake_session_secs,
-            led,
+            leds,
         } => {
+            leds.validate()?;
             let wake = if no_wake {
                 None
             } else {
@@ -147,7 +272,7 @@ async fn main() -> Result<()> {
                 input_device.as_deref(),
                 output_device.as_deref(),
                 wake,
-                led,
+                leds,
             )
             .await?
         }
@@ -174,30 +299,65 @@ fn wake_config(dir: &str, threshold: f32, session_secs: f32) -> Result<WakeConfi
     })
 }
 
-/// Hardware probe for docs/specs/jabra-led.md: what does each LED state
-/// look (and sound) like on the attached device?
-fn led_test() -> Result<()> {
-    use voice_chatbot_client::led::LedSink;
-    let mut leds = voice_chatbot_client::led::hid::open()?;
-    println!("driving {}", leds.describe());
+/// Hardware probe for docs/specs/jabra-led.md and ADR-0008: what does each
+/// state look (and sound) like on the attached devices?
+fn led_test(leds: &LedArgs) -> Result<()> {
+    leds.validate()?;
+    let strip = leds.open_strip(true);
+    let mut sinks = leds.session_sinks(strip.as_ref(), true);
+    if sinks.is_empty() {
+        bail!(
+            "nothing to test: no Jabra telephony interface and no strip on {STRIP_DEVICE} \
+             (or both are switched off)"
+        );
+    }
     // The Ring usage is intentionally never driven: it double-beeps on the
-    // Speak2 40, so listening and thinking both show solid green.
-    let steps: [(&str, (bool, bool, bool)); 4] = [
-        ("off (asleep)", (false, false, false)),
+    // Speak2 40, so listening, thinking and speaking all show solid green on
+    // the ring; the strip tells them apart (ADR-0008, "Vocabulary").
+    let show = |phase, muted| Indication { phase, muted };
+    let steps = [
         (
-            "listening / thinking: off-hook -- expect solid green",
-            (true, false, false),
+            "asleep: ring dark, strip sweeps one dim green pixel",
+            show(Phase::Asleep, false),
+            6,
         ),
         (
-            "muted: off-hook + mute -- expect solid red",
-            (true, false, true),
+            "listening: ring solid green, strip every LED dim green",
+            show(Phase::Listening, false),
+            3,
         ),
-        ("off again", (false, false, false)),
+        (
+            "thinking: ring solid green, strip runs the scanner",
+            show(Phase::Thinking, false),
+            3,
+        ),
+        (
+            "speaking: ring solid green, strip a soft warm glow",
+            show(Phase::Speaking, false),
+            3,
+        ),
+        (
+            "muted: ring solid red, strip red at both ends over listening",
+            show(Phase::Listening, true),
+            3,
+        ),
+        (
+            "offline: ring dark, strip blinks one amber pixel",
+            OFFLINE,
+            4,
+        ),
+        (
+            "asleep again: ring dark; the strip clears when the test exits",
+            show(Phase::Asleep, false),
+            2,
+        ),
     ];
-    for (what, (off_hook, ring, mute)) in steps {
+    for (what, indication, seconds) in steps {
         println!("{what}");
-        leds.set(off_hook, ring, mute)?;
-        std::thread::sleep(Duration::from_secs(3));
+        for sink in &mut sinks {
+            sink.set(indication)?;
+        }
+        std::thread::sleep(Duration::from_secs(seconds));
     }
     Ok(())
 }
@@ -234,7 +394,7 @@ async fn run_call(
     input_selector: Option<&str>,
     output_selector: Option<&str>,
     wake: Option<WakeConfig>,
-    led: LedMode,
+    leds: LedArgs,
 ) -> Result<()> {
     let endpoints = ServerEndpoints::new(server_url)?;
     let http = Client::builder()
@@ -253,6 +413,10 @@ async fn run_call(
         let _ = hangup_tx.send(true);
     });
 
+    // The strip outlives sessions so it can show Offline between them; it
+    // clears itself when this returns. Described here, once.
+    let strip = leds.open_strip(true);
+
     // Audio devices are opened once per session but only described once.
     let mut first_session = true;
     // Set after a "cannot connect"/"connection lost" line so retries stay
@@ -270,7 +434,8 @@ async fn run_call(
             hangup_rx.clone(),
             first_session,
             announced_outage,
-            led,
+            &leds,
+            strip.as_ref(),
         )
         .await;
 
@@ -296,6 +461,14 @@ async fn run_call(
                     "connection to the server lost: {error:#}; reconnecting (Ctrl-C to quit)"
                 );
                 announced_outage = true;
+            }
+        }
+
+        // Both remaining outcomes are outages; a session that starts again
+        // overrides this with its own state.
+        if let Some(strip) = &strip {
+            if let Err(error) = strip.show(OFFLINE) {
+                tracing::debug!(%error, "led strip gone");
             }
         }
 
@@ -325,7 +498,8 @@ async fn run_session(
     mut hangup: watch::Receiver<bool>,
     describe_devices: bool,
     reconnecting: bool,
-    led_mode: LedMode,
+    leds: &LedArgs,
+    strip: Option<&Strip>,
 ) -> SessionEnd {
     if *hangup.borrow() {
         return SessionEnd::HungUp;
@@ -411,26 +585,15 @@ async fn run_session(
         None
     };
 
-    // Chatbot activity on the speakerphone's LED ring. A missing device or
-    // missing hidraw permissions degrade to running dark, like ffmpeg above.
-    let (led, led_done) = match led_mode {
-        LedMode::Off => (None, None),
-        LedMode::Auto => match voice_chatbot_client::led::hid::open() {
-            Ok(leds) => {
-                if describe_devices {
-                    eprintln!("leds:   {}", leds.describe());
-                }
-                let (controller, done) =
-                    voice_chatbot_client::led::LedController::start(Box::new(leds), wake.is_none());
-                (Some(controller), Some(done))
-            }
-            Err(error) => {
-                if describe_devices {
-                    tracing::warn!(%error, "no speakerphone leds; running without");
-                }
-                (None, None)
-            }
-        },
+    // Chatbot activity on the LED devices: the speakerphone's ring and the
+    // WS2812 strip. Whatever is missing degrades to running without it.
+    let sinks = leds.session_sinks(strip, describe_devices);
+    let (led, led_done) = if sinks.is_empty() {
+        (None, None)
+    } else {
+        let (controller, done) =
+            voice_chatbot_client::led::LedController::start(sinks, wake.is_none());
+        (Some(controller), Some(done))
     };
 
     let (outbound_tx, outbound_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -603,7 +766,7 @@ mod tests {
                 no_wake,
                 wake_threshold,
                 wake_session_secs,
-                led,
+                leds,
             } => {
                 assert_eq!(server_url, "http://localhost:7000");
                 assert_eq!(input_device.as_deref(), Some("Jabra input"));
@@ -612,7 +775,7 @@ mod tests {
                 assert!(!no_wake);
                 assert_eq!(wake_threshold, 0.5);
                 assert_eq!(wake_session_secs, 5.0);
-                assert_eq!(led, LedMode::Auto);
+                assert_eq!(leds.led, LedMode::Auto);
             }
             _ => panic!("expected call command"),
         }
@@ -622,17 +785,96 @@ mod tests {
     fn parses_led_mode() {
         let cli = Cli::try_parse_from(["client", "call", "--led", "off"]).unwrap();
         match cli.command {
-            Command::Call { led, .. } => assert_eq!(led, LedMode::Off),
+            Command::Call { leds, .. } => assert_eq!(leds.led, LedMode::Off),
             _ => panic!("expected call"),
         }
         let cli = Cli::try_parse_from(["client", "call"]).unwrap();
         match cli.command {
-            Command::Call { led, .. } => assert_eq!(led, LedMode::Auto, "auto by default"),
+            Command::Call { leds, .. } => assert_eq!(leds.led, LedMode::Auto, "auto by default"),
             _ => panic!("expected call"),
         }
         assert!(matches!(
             Cli::try_parse_from(["client", "led-test"]).unwrap().command,
-            Command::LedTest
+            Command::LedTest { .. }
         ));
+    }
+
+    #[test]
+    fn parses_led_strip_flags() {
+        let cli = Cli::try_parse_from(["client", "call"]).unwrap();
+        match cli.command {
+            Command::Call { leds, .. } => {
+                assert_eq!(leds.led_strip, LedMode::Auto, "the strip is on by default");
+                assert_eq!(leds.led_strip_count, 8);
+                assert_eq!(leds.led_strip_brightness, 0.2);
+                assert_eq!(leds.led_strip_idle_brightness, 0.05);
+                let config = leds.strip_config().unwrap();
+                assert_eq!(config.device, std::path::PathBuf::from("/dev/spidev0.0"));
+                assert_eq!(config.idle_brightness, 0.05);
+            }
+            _ => panic!("expected call"),
+        }
+        let cli = Cli::try_parse_from([
+            "client",
+            "call",
+            "--led-strip",
+            "off",
+            "--led-strip-count",
+            "12",
+            "--led-strip-brightness",
+            "0.5",
+            "--led-strip-idle-brightness",
+            "0.1",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Call { leds, .. } => {
+                assert_eq!(leds.led_strip, LedMode::Off);
+                assert_eq!(
+                    leds.strip_config(),
+                    None,
+                    "off means the strip is never opened"
+                );
+                assert_eq!(leds.led_strip_count, 12);
+                assert_eq!(leds.led_strip_brightness, 0.5);
+                assert_eq!(leds.led_strip_idle_brightness, 0.1);
+            }
+            _ => panic!("expected call"),
+        }
+        let cli = Cli::try_parse_from(["client", "led-test", "--led-strip", "off"]).unwrap();
+        match cli.command {
+            Command::LedTest { leds } => assert_eq!(leds.led_strip, LedMode::Off),
+            _ => panic!("expected led-test"),
+        }
+    }
+
+    #[test]
+    fn rejects_an_unusable_strip() {
+        let unusable = |args: &[&str]| {
+            let all: Vec<&str> = ["client", "call"]
+                .into_iter()
+                .chain(args.iter().copied())
+                .collect();
+            match Cli::try_parse_from(all).unwrap().command {
+                Command::Call { leds, .. } => leds.validate().is_err(),
+                _ => unreachable!(),
+            }
+        };
+        assert!(
+            unusable(&["--led-strip-count", "1"]),
+            "a scanner needs two LEDs"
+        );
+        assert!(unusable(&["--led-strip-brightness", "1.5"]));
+        assert!(unusable(&["--led-strip-idle-brightness", "2"]));
+        assert!(!unusable(&[
+            "--led-strip-count",
+            "2",
+            "--led-strip-brightness",
+            "1"
+        ]));
+        assert!(
+            !unusable(&["--led-strip", "off", "--led-strip-count", "1"]),
+            "a disabled strip is never checked"
+        );
     }
 }

@@ -25,6 +25,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 voice-chatbot-env-file = { path = "../env-file" }
 voice-chatbot-protocol = { path = "../protocol" }
 voice-chatbot-wake = { path = "../wake" }
+voice-chatbot-ws2812 = { path = "../ws2812" }
 
 [dev-dependencies]
 pretty_assertions = "1"

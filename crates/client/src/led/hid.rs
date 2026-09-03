@@ -9,7 +9,7 @@ use anyhow::{bail, Context, Result};
 use hidapi::{HidApi, HidDevice, MAX_REPORT_DESCRIPTOR_SIZE};
 use hidreport::{Field, Report, ReportDescriptor};
 
-use crate::led::LedSink;
+use crate::led::{Indication, LedSink};
 
 /// GN Audio (Jabra) USB vendor ID.
 pub(crate) const JABRA_VENDOR_ID: u16 = 0x0b0e;
@@ -111,7 +111,8 @@ impl TelephonyLeds {
 }
 
 impl LedSink for TelephonyLeds {
-    fn set(&mut self, off_hook: bool, ring: bool, mute: bool) -> Result<()> {
+    fn set(&mut self, indication: Indication) -> Result<()> {
+        let (off_hook, ring, mute) = indication.bits();
         for buffer in compose(&self.map, off_hook, ring, mute) {
             self.device
                 .write(&buffer)

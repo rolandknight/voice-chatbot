@@ -1,5 +1,6 @@
 # voice-chatbot — server + native WebRTC client (Cargo workspace in crates/).
-# The PoC targets live on in archive/Makefile.old.
+# The old PoC targets live on in archive/Makefile.old; the WS2812 LED PoC
+# (crates/ws2812) has ws2812-build-pi / ws2812-pi below.
 #
 # Runtime artifacts live at the repo root (models/, .deps/, logs/; config in
 # .env). The PoC trees are archived under archive/ (targets in
@@ -26,6 +27,12 @@ PI_TOOLCHAIN ?= 1.97.1
 # invalidate the other's artifacts.
 PI_TARGET_DIR ?= target/pi
 PI_CLIENT_BIN := $(PI_TARGET_DIR)/$(PI_TARGET)/release/voice-chatbot-client
+# The WS2812 LED PoC rides the same cross-build; it is staged in its own
+# subdirectory so the client's install.sh never sees it.
+PI_WS2812_BIN := $(PI_TARGET_DIR)/$(PI_TARGET)/release/ws2812-poc
+PI_WS2812_STAGE ?= $(PI_STAGE)/ws2812-poc
+# Arguments for the PoC, e.g. WS2812_ARGS="--pattern wiring" (see its --help).
+WS2812_ARGS ?=
 # Deploying that binary to the Pi: `make deploy-pi PI_HOST=pi@raspberrypi.local`,
 # or set PI_HOST in .env (read below via env_get, like SERVER_URL); a
 # command-line PI_HOST=... still wins.
@@ -75,7 +82,7 @@ SERVER_BUILD_ENV := PYO3_PYTHON=$(QWEN_PYTHON) NEMO_SPEECH_LIB_DIR=$(NEMO_SPEECH
 comma := ,
 WS_FEATURES := $(subst $(eval) ,$(comma),$(addprefix voice-chatbot-server/,$(subst $(comma), ,$(SERVER_FEATURES))))
 
-.PHONY: build server-build client-build client-build-pi deploy-pi server call devices sfx-up sfx-down sfx-status test check clean help
+.PHONY: build server-build client-build client-build-pi deploy-pi ws2812-build-pi ws2812-pi server call devices sfx-up sfx-down sfx-status test check clean help
 
 build: server-build client-build  ## Build server + client (release)
 
@@ -85,13 +92,19 @@ server-build:  ## Build crates/server with SERVER_FEATURES
 client-build:  ## Build crates/client
 	$(CARGO) build --release -p voice-chatbot-client
 
+# What every cross-build needs: rustup, cross (installed on first use) and a
+# Docker daemon. Expanded inside a recipe, one command per line.
+define pi_cross_prereqs
+@command -v rustup >/dev/null 2>&1 || { echo "rustup not found; cross builds against the rustup toolchain, not Hermit's"; exit 1; }
+@command -v cross >/dev/null 2>&1 || [ -x "$(HOME)/.cargo/bin/cross" ] || { \
+    echo "cross not found; installing it into $(HOME)/.cargo/bin (one-off, a few minutes)"; \
+    $(PI_CARGO) install cross --locked; \
+}
+@docker info >/dev/null 2>&1 || { echo "cross needs a running Docker daemon"; exit 1; }
+endef
+
 client-build-pi:  ## Cross-build the client for a Raspberry Pi (aarch64; needs Docker; installs cross on first use)
-	@command -v rustup >/dev/null 2>&1 || { echo "rustup not found; cross builds against the rustup toolchain, not Hermit's"; exit 1; }
-	@command -v cross >/dev/null 2>&1 || [ -x "$(HOME)/.cargo/bin/cross" ] || { \
-	    echo "cross not found; installing it into $(HOME)/.cargo/bin (one-off, a few minutes)"; \
-	    $(PI_CARGO) install cross --locked; \
-	}
-	@docker info >/dev/null 2>&1 || { echo "cross needs a running Docker daemon"; exit 1; }
+	$(pi_cross_prereqs)
 	$(PI_CROSS_ENV) cross +$(PI_TOOLCHAIN) build --release --target $(PI_TARGET) -p voice-chatbot-client
 	@echo "built $(PI_CLIENT_BIN)"
 	@file $(PI_CLIENT_BIN) 2>/dev/null || true
@@ -106,6 +119,22 @@ deploy-pi: client-build-pi  ## Ship the cross-built client to a Pi and install t
 	    models/wakeword/ $(PI_HOST):$(PI_STAGE)/models/wakeword/
 	$(PI_SSH) -t $(PI_HOST) 'sudo env INSTALL_DIR=$(PI_DIR) SERVICE_NAME=$(PI_SERVICE) \
 	    "$$HOME/$(PI_STAGE)/install.sh"'
+	@$(PI_SSH) -O exit $(PI_HOST) 2>/dev/null || true
+
+ws2812-build-pi:  ## Cross-build the WS2812 LED PoC (crates/ws2812) for a Raspberry Pi
+	$(pi_cross_prereqs)
+	$(PI_CROSS_ENV) cross +$(PI_TOOLCHAIN) build --release --target $(PI_TARGET) -p voice-chatbot-ws2812
+	@echo "built $(PI_WS2812_BIN)"
+
+# Runs interactively over ssh -t: Ctrl-C reaches the PoC, which clears the
+# strip before exiting. On first use run-on-pi.sh writes dtparam=spi=on to
+# config.txt and asks to reboot (sudo there, never in the PoC); rerun after.
+ws2812-pi: ws2812-build-pi  ## Ship the WS2812 PoC to the Pi (PI_HOST) and run it there; Ctrl-C stops it (WS2812_ARGS="--pattern wiring")
+	@[ -n "$(PI_HOST)" ] || { echo "set PI_HOST, e.g. make ws2812-pi PI_HOST=pi@raspberrypi.local (or set it in .env)"; exit 1; }
+	@$(PI_SSH) $(PI_HOST) 'command -v rsync >/dev/null' || { echo "the Pi has no rsync (sudo apt install rsync)"; exit 1; }
+	$(PI_SSH) $(PI_HOST) 'mkdir -p $(PI_WS2812_STAGE)'
+	rsync -az -e "$(PI_SSH)" $(PI_WS2812_BIN) crates/ws2812/run-on-pi.sh $(PI_HOST):$(PI_WS2812_STAGE)/
+	$(PI_SSH) -t $(PI_HOST) '"$$HOME/$(PI_WS2812_STAGE)/run-on-pi.sh" $(WS2812_ARGS)'
 	@$(PI_SSH) -O exit $(PI_HOST) 2>/dev/null || true
 
 server: server-build  ## Build if needed, then run the server (reads .env)
@@ -166,5 +195,5 @@ clean:  ## Drop workspace build output
 	rm -rf target
 
 help:  ## List targets
-	@grep -hE '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
+	@grep -hE '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'

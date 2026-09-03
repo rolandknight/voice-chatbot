@@ -1,0 +1,20 @@
+[package]
+name = "voice-chatbot-ws2812"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "WS2812B strip over SPI on a Raspberry Pi: encoder, spidev writer, Larson scanner, and the ws2812-poc demo binary"
+
+[[bin]]
+name = "ws2812-poc"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+ctrlc = { version = "3.5", features = ["termination"] }
+
+# spidev is the only hardware dependency, and it is Linux-only: keeping it
+# target-gated is what lets `cargo build --workspace` stay green on the Mac.
+[target.'cfg(target_os = "linux")'.dependencies]
+spidev = "0.7"
